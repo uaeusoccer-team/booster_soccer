@@ -59,6 +59,7 @@ class FrameStore:
     condition: threading.Condition = field(default_factory=threading.Condition)
     jpeg: Optional[bytes] = None
     detections: list[Detection] = field(default_factory=list)
+    yolo_only_ball: bool = False
     frame_id: int = 0
     last_error: str = ""
     last_update: float = 0.0
@@ -86,7 +87,11 @@ class FrameStore:
 
     def set_detections(self, detections: list[Detection]) -> None:
         with self.condition:
-            self.detections = [detection for detection in detections if detection.is_ball()]
+            self.detections = (
+                [detection for detection in detections if detection.is_ball()]
+                if self.yolo_only_ball
+                else detections
+            )
             self.detections_last_update = time.time()
             self.detections_last_error = ""
             self.detections_connected = True
@@ -255,10 +260,10 @@ class RosDetectionParser:
             return
 
         if stripped.startswith("- "):
-            self.finish_current()
-            self.current = {}
             rest = stripped[2:].strip()
-            if rest:
+            if rest.startswith("label:"):
+                self.finish_current()
+                self.current = {}
                 self.parse_field(rest)
             return
 
@@ -564,6 +569,28 @@ INDEX_HTML = """<!doctype html>
 """
 
 
+def str_to_bool(value: object) -> bool:
+    if isinstance(value, bool):
+        return value
+    text = str(value).strip().lower()
+    if text in {"1", "true", "yes", "y", "on"}:
+        return True
+    if text in {"0", "false", "no", "n", "off"}:
+        return False
+    raise argparse.ArgumentTypeError(f"invalid boolean value: {value!r}")
+
+
+def apply_legacy_key_value_args(args: argparse.Namespace, extras: list[str]) -> None:
+    for extra in extras:
+        if "=" not in extra:
+            raise SystemExit(f"unknown argument: {extra}")
+        key, value = extra.split("=", 1)
+        normalized_key = key.strip().lower().replace("-", "_")
+        if normalized_key != "yolo_only_ball":
+            raise SystemExit(f"unknown argument: {extra}")
+        args.yolo_only_ball = str_to_bool(value)
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--robot", default="192.168.68.103", help="robot IP address")
@@ -582,12 +609,22 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--listen-port", type=int, default=8091, help="local HTTP port")
     parser.add_argument("--timeout", type=float, default=5.0, help="robot socket timeout in seconds")
     parser.add_argument("--open", action="store_true", help="open the browser after starting")
-    return parser.parse_args()
+    parser.add_argument(
+        "--yolo-only-ball",
+        nargs="?",
+        const=True,
+        default=False,
+        type=str_to_bool,
+        help="show only Ball detections; default shows all YOLO objects",
+    )
+    args, extras = parser.parse_known_args()
+    apply_legacy_key_value_args(args, extras)
+    return args
 
 
 def main() -> int:
     args = parse_args()
-    store = FrameStore()
+    store = FrameStore(yolo_only_ball=args.yolo_only_ball)
     reader = threading.Thread(
         target=camera_reader,
         args=(store, args.robot, args.ws_port, args.ws_path, args.timeout),
