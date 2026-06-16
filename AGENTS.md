@@ -30,6 +30,18 @@ Development checkouts may live anywhere on each teammate's machine. Refer to thi
 
 ## Critical User Reminder After Changes
 
+Before making any code changes, the agent must stay on the current team member's dedicated branch and pull `main` into that branch:
+
+```bash
+git status --short --branch
+git branch --show-current
+git pull origin main
+```
+
+If the GitHub CLI is available and the team's workflow uses it, the agent may use the equivalent GitHub-assisted sync flow. If GitHub CLI is not available, use `git pull origin main`.
+
+Do not create new branches, delete branches, rename branches, or switch to a new work branch. Each team member already has a dedicated branch. If the working tree already has uncommitted user changes, do not overwrite them; ask the user before pulling if a conflict or merge would affect those changes.
+
 When an agent changes code, remind the user that robot testing requires moving the changes to the robot:
 
 1. Push the current working branch.
@@ -37,20 +49,17 @@ When an agent changes code, remind the user that robot testing requires moving t
 3. SSH into the robot and pull `main` in `~/booster_soccer`.
 4. Rebuild on the robot before running.
 
-Use commands like these, adjusting the branch name as needed:
+Use commands like these, staying on the current dedicated branch:
 
 ```bash
 # On the development machine
 git status
 git add <changed-files>
 git commit -m "<message>"
-git push origin <your-branch>
+git push origin HEAD
 
-# Merge via PR, or locally if that is the team's workflow:
-git switch main
-git pull origin main
-git merge <your-branch>
-git push origin main
+# Merge the current branch into main via PR or the team's existing merge workflow.
+# Do not create, delete, or rename branches.
 
 # On the robot
 ssh booster@192.168.68.103
