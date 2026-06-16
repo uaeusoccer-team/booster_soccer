@@ -1245,16 +1245,7 @@ void Brain::detectionsCallback(const vision_interface::msg::Detections &msg)
     for (int i = 0; i < gameObjects.size(); i++)
     {
         const auto &obj = gameObjects[i];
-        if (
-            obj.label == "Ball" ||
-            (
-                obj.label == "Person" &&
-                obj.boundingBox.xmin > 700 &&
-                obj.boundingBox.ymin > 350 &&
-                (obj.boundingBox.xmax - obj.boundingBox.xmin) > 80 &&
-                (obj.boundingBox.ymax - obj.boundingBox.ymin) > 120
-            )
-        )
+        if (obj.label == "Ball")
             balls.push_back(obj);
         if (obj.label == "Goalpost")
             goalposts.push_back(obj);

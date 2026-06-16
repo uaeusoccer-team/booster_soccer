@@ -32,11 +32,10 @@ int RobotClient::moveHead(double pitch, double yaw)
     yaw = cap(yaw, brain->config->get_head_yaw_limit_left(), brain->config->get_head_yaw_limit_right());
     pitch = max(pitch, brain->config->get_head_pitch_limit_up());
 
-    brain->log->debug("move_head_2004", format("pitch: %.3f, yaw: %.3f", pitch, yaw));
+    brain->log->debug("move_head", format("pitch: %.1f, yaw: %.1f", pitch, yaw));
 
     return call(booster_interface::CreateRotateHeadMsg(pitch, yaw));
 }
-
 
 int RobotClient::standUp()
 {

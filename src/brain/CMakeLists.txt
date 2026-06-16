@@ -66,7 +66,8 @@ set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wno-narrowing -Wno-unused-parameter -Wn
 ament_target_dependencies(brain_node rclcpp rosidl_typesupport_cpp std_msgs sensor_msgs nav_msgs diagnostic_msgs behaviortree_cpp booster_interface vision_interface game_controller_interface booster_msgs tf2 tf2_ros tf2_geometry_msgs geometry_msgs visualization_msgs)
 
 target_include_directories(brain_node PUBLIC
-  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+ /home/booster/booster_robotics_sdk/include
+ $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
   $<INSTALL_INTERFACE:include>)
 target_compile_features(brain_node PUBLIC c_std_99 cxx_std_17) # Require C99 and C++17
 install(TARGETS

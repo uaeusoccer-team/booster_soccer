@@ -29,14 +29,51 @@ int RobotClient::call(booster_interface::msg::BoosterApiReqMsg msg)
 
 int RobotClient::moveHead(double pitch, double yaw)
 {
+    // T1 firmware/app-compatible head control:
+    // absolute RotateHead api_id=2004 is rejected on this robot.
+    // The official app uses api_id=2006 with {"expect_response":true}
+    // and a directional body: {"pitch_direction":..., "yaw_direction":...}.
     yaw = cap(yaw, brain->config->get_head_yaw_limit_left(), brain->config->get_head_yaw_limit_right());
     pitch = max(pitch, brain->config->get_head_pitch_limit_up());
 
-    brain->log->debug("move_head_2004", format("pitch: %.3f, yaw: %.3f", pitch, yaw));
+    const double yaw_error = yaw - brain->data->headYaw;
+    const double pitch_error = pitch - brain->data->headPitch;
+    const double deadband = 0.03;  // rad, about 1.7 deg
 
-    return call(booster_interface::CreateRotateHeadMsg(pitch, yaw));
+    // API 2006 naming is counter-intuitive on T1:
+    //   pitch_direction controls horizontal pan: left/right
+    //   yaw_direction controls vertical tilt: up/down
+    int yaw_direction = 0;
+    int pitch_direction = 0;
+
+    if (std::fabs(yaw_error) > deadband)
+        pitch_direction = (yaw_error > 0.0) ? 1 : -1;
+
+    if (std::fabs(pitch_error) > deadband)
+        yaw_direction = (pitch_error > 0.0) ? 1 : -1;
+
+    brain->log->debug(
+        "move_head_dir",
+        format("target_pitch: %.2f target_yaw: %.2f current_pitch: %.2f current_yaw: %.2f pitch_dir: %d yaw_dir: %d",
+               pitch, yaw, brain->data->headPitch, brain->data->headYaw, pitch_direction, yaw_direction));
+
+    auto message = booster_msgs::msg::RpcReqMsg();
+    message.uuid = gen_uuid();
+
+    nlohmann::json req_header;
+    req_header["api_id"] = static_cast<int64_t>(booster::robot::b1::LocoApiId::kRotateHeadWithDirection);
+    req_header["expect_response"] = true;
+
+    nlohmann::json body;
+    body["pitch_direction"] = pitch_direction;
+    body["yaw_direction"] = yaw_direction;
+
+    message.header = req_header.dump();
+    message.body = body.dump();
+
+    publisher->publish(message);
+    return 0;
 }
-
 
 int RobotClient::standUp()
 {

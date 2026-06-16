@@ -6,12 +6,11 @@ brain_node:
       field_type: "adult_size" # adult_size | kid_size | robo_league
       player_role: "striker" # striker | goal_keeper
       treat_person_as_robot: false
-      number_of_players: 3
-      
+      number_of_players: 3 
     robot:
       robot_name: "" # When multiple robots exist, specify e.g. "robot0", "robot1"; leave empty for single robot
-      robot_height: 0.8 # 1.12 for T1
-      odom_factor: 0.8 # 1.2 for T1
+      robot_height: 1.12 # 1.12 for T1
+      odom_factor: 1.2 # 1.2 for T1
       vx_factor: 0.50
       yaw_offset: 0.0
       vx_limit: 1.0
@@ -58,7 +57,7 @@ brain_node:
       chase_ao_safe_dist: 3.5
 
     RLVisionKick:
-      enableAutoVisualKick: true
+      enableAutoVisualKick: false
       autoVisualKickEnableDistMin: 0.2
       autoVisualKickEnableDistMax: 4.0
       autoVisualKickEnableAngle: 0.8
@@ -81,10 +80,12 @@ brain_node:
         # depth_image_topic: "/zed/zed_node/depth/depth_registered" # zed
         # depth_camera_info_topic: "/zed/zed_node/depth/camera_info" # zed
 
-        image_camera_info_topic: "/StereoNetNode/rectified_image" # d-robotics
-        depth_image_topic: "/StereoNetNode/stereonet_depth" # d-robotics
-        depth_camera_info_topic: "/StereoNetNode/stereonet_depth/camera_info" # d-robotics
-
+        #image_camera_info_topic: "/StereoNetNode/rectified_image" # d-robotics
+        #depth_image_topic: "/StereoNetNode/stereonet_depth" # d-robotics
+        #depth_camera_info_topic: "/StereoNetNode/stereonet_depth/camera_info" # d-robotics
+        image_camera_info_topic: "/boostercamera/head/rgb/camera_info"
+        depth_image_topic: "/boostercamera/head/depth"
+        depth_camera_info_topic: "/boostercamera/head/depth/camera_info"
         
         # image_camera_info_topic: "/camera/robot0_rgbd_camera/rgb/camera_info" # simulated
         # depth_image_topic: "/camera/robot0_rgbd_camera/depth/image_raw" # simulated

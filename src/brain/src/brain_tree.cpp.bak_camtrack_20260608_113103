@@ -141,66 +141,54 @@ NodeStatus StepOnSpot::tick()
 
 NodeStatus CamTrackBall::tick()
 {
-    const double xCenter = brain->config->cameraImageWidth / 2.0;
-    const double yCenter = brain->config->cameraImageHeight / 2.0;
+    double pitch, yaw, ballX, ballY, deltaX, deltaY;
+    const double pixToleranceX = brain->config->cameraImageWidth * 3 / 10.; // If the pixel difference between the ball and the center of the field of view is less than this tolerance, it is considered to be at the center of the field of view.
+    const double pixToleranceY = brain->config->cameraImageHeight * 3 / 10.;
+    const double xCenter = brain->config->cameraImageWidth / 2;
+    const double yCenter = brain->config->cameraImageHeight / 2; 
 
-    const bool iSeeBall = brain->data->ballDetected;
 
-    const bool bboxValid =
-        brain->data->ball.boundingBox.xmax > brain->data->ball.boundingBox.xmin &&
-        brain->data->ball.boundingBox.ymax > brain->data->ball.boundingBox.ymin;
-
-    // For T1 api_id 2006, do not depend on absolute head angle tracking.
-    // Use image pixel error to create a small virtual target offset.
-    // RobotClient::moveHead() converts this offset into pitch_direction/yaw_direction.
-    double pitch = brain->data->headPitch;
-    double yaw = brain->data->headYaw;
-
-    if (!iSeeBall || !bboxValid)
-    {
-        // Explicit stop for directional head API.
-        brain->client->moveHead(pitch, yaw);
+    bool iSeeBall = brain->data->ballDetected;
+    bool iKnowBallPos = brain->tree->getEntry<bool>("ball_location_known");
+    bool tmBallPosReliable = brain->tree->getEntry<bool>("tm_ball_pos_reliable");
+    if (!(iKnowBallPos || tmBallPosReliable))
         return NodeStatus::SUCCESS;
+
+    if (!iSeeBall)
+    { 
+        if (iKnowBallPos) {
+            // moving with smooth to last known ball position from vision
+            pitch = brain->data->headPitch + (brain->data->ball.pitchToRobot - brain->data->headPitch) * 0.01;
+            yaw = brain->data->headYaw + (brain->data->ball.yawToRobot - brain->data->headYaw) * 0.01;
+        } else if (tmBallPosReliable) {
+            pitch =  brain->data->headPitch + (brain->data->tmBall.pitchToRobot - brain->data->headPitch) * 0.01;
+            yaw = brain->data->headYaw + (brain->data->tmBall.yawToRobot - brain->data->headYaw) * 0.01;
+        } else {
+            brain->log->error("CamTrackBall", "reached impossible condition");
+        }
+    }
+    else {      
+        ballX = mean(brain->data->ball.boundingBox.xmax, brain->data->ball.boundingBox.xmin);
+        ballY = mean(brain->data->ball.boundingBox.ymax, brain->data->ball.boundingBox.ymin);
+        deltaX = ballX - xCenter;
+        deltaY = ballY - yCenter; 
+        
+        if (std::fabs(deltaX) < pixToleranceX && std::fabs(deltaY) < pixToleranceY)
+        {
+            return NodeStatus::SUCCESS;
+        }
+
+        double smoother = 3.5;
+        double deltaYaw = deltaX / brain->config->cameraImageWidth * brain->config->depthCameraFovX / smoother;
+        double deltaPitch = deltaY / brain->config->cameraImageHeight * brain->config->depthCameraFovY / smoother;
+
+        pitch = brain->data->headPitch + deltaPitch;
+        yaw = brain->data->headYaw - deltaYaw;
     }
 
-    const double ballX = mean(brain->data->ball.boundingBox.xmax, brain->data->ball.boundingBox.xmin);
-    const double ballY = mean(brain->data->ball.boundingBox.ymax, brain->data->ball.boundingBox.ymin);
-
-    const double dx = ballX - xCenter;  // + means ball is right of image center
-    const double dy = ballY - yCenter;  // + means ball is below image center
-
-    const double deadbandX = 35.0;
-    const double deadbandY = 35.0;
-
-    // Small virtual angle offset. It only needs to exceed RobotClient::moveHead deadband.
-    const double step = 0.04;
-
-    if (std::fabs(dx) > deadbandX)
-    {
-        // Existing sign convention from original code:
-        // ball right -> yaw target decreases.
-        yaw += (dx > 0.0) ? -step : step;
-    }
-
-    if (std::fabs(dy) > deadbandY)
-    {
-        // Existing sign convention from original code:
-        // ball low -> pitch target increases.
-        pitch += (dy > 0.0) ? step : -step;
-    }
-
-    // If both errors are inside deadband, pitch/yaw remain current values,
-    // causing RobotClient::moveHead() to publish direction 0,0.
     brain->client->moveHead(pitch, yaw);
-
-    brain->log->log(
-        "CamTrackBall/direct_pixel",
-        format("ballX: %.1f ballY: %.1f dx: %.1f dy: %.1f pitch: %.2f yaw: %.2f",
-               ballX, ballY, dx, dy, pitch, yaw));
-
     return NodeStatus::SUCCESS;
 }
-
 
 CamFindBall::CamFindBall(const string &name, const NodeConfig &config, Brain *_brain) : SyncActionNode(name, config), brain(_brain)
 {

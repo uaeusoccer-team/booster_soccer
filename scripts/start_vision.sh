@@ -12,4 +12,4 @@ source ./install/setup.bash
 ros2 daemon stop
 ros2 daemon start
 
-ros2 launch vision launch.py sim:=true "$@"
+ros2 launch vision launch.py sim:=true  "$@"
