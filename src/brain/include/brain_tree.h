@@ -139,14 +139,28 @@ class CamFindBall : public SyncActionNode
 public:
     CamFindBall(const string &name, const NodeConfig &config, Brain *_brain);
 
+    static PortsList providedPorts()
+    {
+        return {
+            InputPort<double>("low_pitch", 1.0, "Lowest pitch used while sweeping for the ball"),
+            InputPort<double>("high_pitch", 0.45, "Highest pitch used while sweeping for the ball"),
+            InputPort<double>("yaw_limit", 1.1, "Maximum absolute yaw used while sweeping for the ball"),
+            InputPort<double>("sweep_msec", 3000.0, "Milliseconds for one left-right-left head sweep"),
+            InputPort<double>("pitch_cycle_msec", 6000.0, "Milliseconds for one high-low-high pitch cycle"),
+            InputPort<double>("cmd_interval_msec", 100.0, "Minimum time between head commands"),
+            InputPort<bool>("turn_body_on_loss", true, "Rotate toward the most recent ball yaw for a short time after losing sight"),
+            InputPort<double>("lost_turn_msec", 1200.0, "Milliseconds to keep turning toward the recent lost-ball direction"),
+            InputPort<double>("lost_turn_speed", 0.25, "Body yaw speed while turning toward a recently lost ball"),
+            InputPort<double>("lost_turn_min_yaw", 0.08, "Minimum remembered ball yaw required before body turn is used"),
+        };
+    }
+
     NodeStatus tick() override;
 
 private:
-    double _cmdSequence[6][2];    
-    rclcpp::Time _timeLastCmd;   
-    int _cmdIndex;                
-    long _cmdIntervalMSec;        
-    long _cmdRestartIntervalMSec; 
+    rclcpp::Time _timeSearchStart;
+    rclcpp::Time _timeLastCmd;
+    long _cmdRestartIntervalMSec;
 
     Brain *brain;
 

@@ -12,6 +12,27 @@
 #include <fstream>
 #include <ios>
 
+namespace
+{
+void turnTowardRecentlyLostBall(Brain *brain, bool enabled, double maxRecentLostMsec, double turnSpeed, double minYaw)
+{
+    if (!enabled || maxRecentLostMsec <= 0.0 || turnSpeed <= 0.0)
+    {
+        return;
+    }
+
+    const double lostMsec = brain->msecsSince(brain->data->ball.timePoint);
+    const double lastYaw = brain->data->ball.yawToRobot;
+    if (lostMsec >= 0.0 && lostMsec < maxRecentLostMsec && std::fabs(lastYaw) > minYaw)
+    {
+        brain->client->setVelocity(0.0, 0.0, lastYaw > 0.0 ? turnSpeed : -turnSpeed);
+        return;
+    }
+
+    brain->client->setVelocity(0.0, 0.0, 0.0);
+}
+}
+
 /**
  * Here we use a macro definition to reduce the code for RegisterBuilder. The effect of REGISTER_BUILDER(Test) after expansion is
  * factory.registerBuilder<Test>(  \
@@ -160,6 +181,7 @@ NodeStatus CamTrackBall::tick()
     {
         // Explicit stop for directional head API.
         brain->client->moveHead(pitch, yaw);
+        turnTowardRecentlyLostBall(brain, true, 1200.0, 0.25, 0.08);
         return NodeStatus::SUCCESS;
     }
 
@@ -204,53 +226,60 @@ NodeStatus CamTrackBall::tick()
 
 CamFindBall::CamFindBall(const string &name, const NodeConfig &config, Brain *_brain) : SyncActionNode(name, config), brain(_brain)
 {
-    double lowPitch = 1.0;
-    double highPitch = 0.2;
-    double leftYaw = 1.1;
-    double rightYaw = -1.1;
-
-    _cmdSequence[0][0] = lowPitch;
-    _cmdSequence[0][1] = leftYaw;
-    _cmdSequence[1][0] = lowPitch;
-    _cmdSequence[1][1] = 0;
-    _cmdSequence[2][0] = lowPitch;
-    _cmdSequence[2][1] = rightYaw;
-    _cmdSequence[3][0] = highPitch;
-    _cmdSequence[3][1] = rightYaw;
-    _cmdSequence[4][0] = highPitch;
-    _cmdSequence[4][1] = 0;
-    _cmdSequence[5][0] = highPitch;
-    _cmdSequence[5][1] = leftYaw;
-
-    _cmdIndex = 0;
-    _cmdIntervalMSec = 1000;
+    _timeSearchStart = brain->get_clock()->now();
+    _timeLastCmd = rclcpp::Time(0, 0, RCL_ROS_TIME);
     _cmdRestartIntervalMSec = 60000;
-    _timeLastCmd = brain->get_clock()->now();
 }
 
 NodeStatus CamFindBall::tick()
 {
+    auto curTime = brain->get_clock()->now();
+
     if (brain->data->ballDetected)
     {
+        _timeSearchStart = curTime;
         return NodeStatus::SUCCESS;
     } // Currently, all nodes return Success. Returning Failure would affect the execution of subsequent nodes.
 
-    auto curTime = brain->get_clock()->now();
+    double lowPitch, highPitch, yawLimit, sweepMsec, pitchCycleMsec, cmdIntervalMsec;
+    bool turnBodyOnLoss;
+    double lostTurnMsec, lostTurnSpeed, lostTurnMinYaw;
+    getInput("low_pitch", lowPitch);
+    getInput("high_pitch", highPitch);
+    getInput("yaw_limit", yawLimit);
+    getInput("sweep_msec", sweepMsec);
+    getInput("pitch_cycle_msec", pitchCycleMsec);
+    getInput("cmd_interval_msec", cmdIntervalMsec);
+    getInput("turn_body_on_loss", turnBodyOnLoss);
+    getInput("lost_turn_msec", lostTurnMsec);
+    getInput("lost_turn_speed", lostTurnSpeed);
+    getInput("lost_turn_min_yaw", lostTurnMinYaw);
+
+    cmdIntervalMsec = std::max(20.0, cmdIntervalMsec);
+    sweepMsec = std::max(500.0, sweepMsec);
+    pitchCycleMsec = std::max(500.0, pitchCycleMsec);
+
     auto timeSinceLastCmd = (curTime - _timeLastCmd).nanoseconds() / 1e6;
-    if (timeSinceLastCmd < _cmdIntervalMSec)
+    if (_timeLastCmd.nanoseconds() > 0 && timeSinceLastCmd < cmdIntervalMsec)
     {
         return NodeStatus::SUCCESS;
-    } // Not yet time for the next command
-    else if (timeSinceLastCmd > _cmdRestartIntervalMSec)
-    {                  // Exceeded a certain time, consider this as restarting from the beginning
-        _cmdIndex = 0; // Note that we don't return here
-    }
-    else
-    { // Reached the time, execute the next command, also do not return
-        _cmdIndex = (_cmdIndex + 1) % (sizeof(_cmdSequence) / sizeof(_cmdSequence[0]));
     }
 
-    brain->client->moveHead(_cmdSequence[_cmdIndex][0], _cmdSequence[_cmdIndex][1]);
+    auto searchMsec = (curTime - _timeSearchStart).nanoseconds() / 1e6;
+    if (searchMsec < 0.0 || searchMsec > _cmdRestartIntervalMSec)
+    {
+        _timeSearchStart = curTime;
+        searchMsec = 0.0;
+    }
+
+    const double yawPhase = 2.0 * M_PI * std::fmod(searchMsec, sweepMsec) / sweepMsec;
+    const double pitchPhase = 2.0 * M_PI * std::fmod(searchMsec, pitchCycleMsec) / pitchCycleMsec;
+    const double pitchBlend = 0.5 * (1.0 - std::cos(pitchPhase));
+    const double yaw = yawLimit * std::sin(yawPhase);
+    const double pitch = highPitch + (lowPitch - highPitch) * pitchBlend;
+
+    brain->client->moveHead(pitch, yaw);
+    turnTowardRecentlyLostBall(brain, turnBodyOnLoss, lostTurnMsec, lostTurnSpeed, lostTurnMinYaw);
     _timeLastCmd = brain->get_clock()->now();
     return NodeStatus::SUCCESS;
 }
@@ -1511,4 +1540,3 @@ NodeStatus PrintMsg::tick()
     std::cout << "[MSG] " << msg.value() << std::endl;
     return NodeStatus::SUCCESS;
 }
-
