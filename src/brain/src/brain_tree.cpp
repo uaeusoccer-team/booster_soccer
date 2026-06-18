@@ -23,6 +23,28 @@
         #Name,                     \
         [this](const string &name, const NodeConfig &config) { return make_unique<Name>(name, config, brain); });
 
+class TurnToBall : public SyncActionNode
+{
+public:
+    TurnToBall(const string &name, const NodeConfig &config, Brain *_brain) : SyncActionNode(name, config), brain(_brain) {}
+
+    static PortsList providedPorts()
+    {
+        return {
+            InputPort<double>("vtheta_limit", 0.45, "Maximum angular speed while turning toward the ball"),
+            InputPort<double>("gain", 2.0, "Yaw error multiplier"),
+            InputPort<double>("deadband", 0.12, "Yaw error below which the robot stops turning"),
+            InputPort<double>("smoothing", 0.35, "Low-pass blend for angular velocity"),
+        };
+    }
+
+    NodeStatus tick() override;
+
+private:
+    Brain *brain;
+    double _smoothVtheta = 0.0;
+};
+
 void BrainTree::init()
 {
     BehaviorTreeFactory factory;
@@ -37,6 +59,7 @@ void BrainTree::init()
     REGISTER_BUILDER(CalcKickDir)
     REGISTER_BUILDER(StrikerDecide)
     REGISTER_BUILDER(CamTrackBall)
+    REGISTER_BUILDER(TurnToBall)
     REGISTER_BUILDER(CamFindBall)
     REGISTER_BUILDER(CamFastScan)
     REGISTER_BUILDER(CamScanField)
@@ -197,6 +220,45 @@ NodeStatus CamTrackBall::tick()
         "CamTrackBall/direct_pixel",
         format("ballX: %.1f ballY: %.1f dx: %.1f dy: %.1f pitch: %.2f yaw: %.2f",
                ballX, ballY, dx, dy, pitch, yaw));
+
+    return NodeStatus::SUCCESS;
+}
+
+NodeStatus TurnToBall::tick()
+{
+    double vthetaLimit, gain, deadband, smoothing;
+    getInput("vtheta_limit", vthetaLimit);
+    getInput("gain", gain);
+    getInput("deadband", deadband);
+    getInput("smoothing", smoothing);
+
+    vthetaLimit = fabs(vthetaLimit);
+    smoothing = cap(smoothing, 1.0, 0.0);
+
+    if (!brain->data->ballDetected || !std::isfinite(brain->data->ball.yawToRobot))
+    {
+        _smoothVtheta = 0.0;
+        brain->client->setVelocity(0, 0, 0);
+        return NodeStatus::SUCCESS;
+    }
+
+    const double ballYaw = brain->data->ball.yawToRobot;
+    double vtheta = 0.0;
+    if (fabs(ballYaw) > fabs(deadband))
+    {
+        vtheta = cap(ballYaw * gain, vthetaLimit, -vthetaLimit);
+    }
+
+    _smoothVtheta = _smoothVtheta * (1.0 - smoothing) + vtheta * smoothing;
+    if (fabs(_smoothVtheta) < 0.02)
+    {
+        _smoothVtheta = 0.0;
+    }
+
+    brain->client->setVelocity(0, 0, _smoothVtheta);
+    brain->log->log(
+        "TurnToBall",
+        format("ballYaw: %.2f vtheta: %.2f", ballYaw, _smoothVtheta));
 
     return NodeStatus::SUCCESS;
 }
@@ -1511,4 +1573,3 @@ NodeStatus PrintMsg::tick()
     std::cout << "[MSG] " << msg.value() << std::endl;
     return NodeStatus::SUCCESS;
 }
-
