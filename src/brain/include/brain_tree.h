@@ -266,6 +266,7 @@ public:
             InputPort<double>("vtheta_limit", 1.0, "Maximum angular speed when chasing the ball"),
             InputPort<double>("dist", 0.1, "Target distance behind the ball when chasing"),
             InputPort<double>("safe_dist", 4.0, "Safe distance to maintain when circling back"),
+            InputPort<bool>("direct_to_ball", false, "Approach the ball directly without circling behind it"),
         };
     }
 

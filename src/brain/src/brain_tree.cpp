@@ -312,11 +312,13 @@ NodeStatus Chase::tick()
     log("ticked");
     
     double vxLimit, vyLimit, vthetaLimit, dist, safeDist;
+    bool directToBall;
     getInput("vx_limit", vxLimit);
     getInput("vy_limit", vyLimit);
     getInput("vtheta_limit", vthetaLimit);
     getInput("dist", dist);
     getInput("safe_dist", safeDist);
+    getInput("direct_to_ball", directToBall);
 
     bool avoidObstacle = brain->config->get_avoid_during_chase();
     double oaSafeDist = brain->config->get_chase_ao_safe_dist();
@@ -348,7 +350,13 @@ NodeStatus Chase::tick()
 
 
     // Calculate target point
-    if (fabs(toPInPI(kickDir - theta_rb)) < dirThreshold) {
+    if (directToBall) {
+        log("targetType = direct_to_ball");
+        targetType = "direct_to_ball";
+        // Lab mode: approach the ball from the robot's current side instead of circling behind it.
+        target_f.x = ballPos.x - dist * cos(theta_rb);
+        target_f.y = ballPos.y - dist * sin(theta_rb);
+    } else if (fabs(toPInPI(kickDir - theta_rb)) < dirThreshold) {
         log("targetType = direct");
         targetType = "direct";
         target_f.x = ballPos.x - dist * cos(kickDir);
@@ -367,19 +375,38 @@ NodeStatus Chase::tick()
             
     double targetDir = atan2(target_r.y, target_r.x);
     double distToObstacle = brain->distToObstacle(targetDir);
+
     if (avoidObstacle && distToObstacle < oaSafeDist) {
         log("avoid obstacle");
+        auto safeDirs = brain->findSafeDirections(targetDir, oaSafeDist);
+        if (directToBall && safeDirs[0] < 0.5 && safeDirs[2] < 0.5) {
+            log("no clear avoidance direction");
+            brain->client->setVelocity(0, 0, 0);
+            return NodeStatus::SUCCESS;
+        }
         auto avoidDir = brain->calcAvoidDir(targetDir, oaSafeDist);
-        const double speed = 0.5;
+        const double speed = directToBall ? vxLimit : 0.5;
         vx = speed * cos(avoidDir);
         vy = speed * sin(avoidDir);
         vtheta = ballYaw;
     } else {
-        vx = min(vxLimit, brain->data->ball.range);
-        vy = 0;
-        vtheta = targetDir;
-        if (fabs(targetDir) < 0.1 && ballRange > 2.0) vtheta = 0.0;
-        vx *= sigmoid((fabs(vtheta)), 1, 3); 
+        if (directToBall) {
+            double targetRange = norm(target_r.x, target_r.y);
+            vx = cap(target_r.x, vxLimit, -vxLimit * 0.5);
+            vy = target_r.y;
+            vtheta = ballYaw;
+            if (targetRange < 0.05) {
+                vx = 0.0;
+                vy = 0.0;
+            }
+            if (fabs(vtheta) < 0.08) vtheta = 0.0;
+        } else {
+            vx = min(vxLimit, brain->data->ball.range);
+            vy = 0;
+            vtheta = targetDir;
+            if (fabs(targetDir) < 0.1 && ballRange > 2.0) vtheta = 0.0;
+            vx *= sigmoid((fabs(vtheta)), 1, 3);
+        }
     }
 
     vx = cap(vx, vxLimit, -vxLimit);
