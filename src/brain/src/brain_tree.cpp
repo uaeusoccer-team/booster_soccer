@@ -171,15 +171,14 @@ NodeStatus CamTrackBall::tick()
         brain->data->ball.boundingBox.xmax > brain->data->ball.boundingBox.xmin &&
         brain->data->ball.boundingBox.ymax > brain->data->ball.boundingBox.ymin;
 
-    // For T1 api_id 2006, do not depend on absolute head angle tracking.
-    // Use image pixel error to create a small virtual target offset.
-    // RobotClient::moveHead() converts this offset into pitch_direction/yaw_direction.
+    // Use image pixel error to create a small target offset around the measured head angle.
+    // RobotClient::moveHead() clamps the command to the configured head joint limits.
     double pitch = brain->data->headPitch;
     double yaw = brain->data->headYaw;
 
     if (!iSeeBall || !bboxValid)
     {
-        // Explicit stop for directional head API.
+        // Hold the current head target when the ball box is not valid.
         brain->client->moveHead(pitch, yaw);
         turnTowardRecentlyLostBall(brain, true, 1200.0, 0.25, 0.08);
         return NodeStatus::SUCCESS;
@@ -194,21 +193,20 @@ NodeStatus CamTrackBall::tick()
     const double deadbandX = 35.0;
     const double deadbandY = 35.0;
 
-    // Small virtual angle offset. It only needs to exceed RobotClient::moveHead deadband.
-    const double step = 0.04;
+    const double yawStep = cap(std::fabs(dx) / xCenter * 0.10, 0.08, 0.035);
+    const double pitchStep = cap(std::fabs(dy) / yCenter * 0.12, 0.10, 0.04);
 
     if (std::fabs(dx) > deadbandX)
     {
         // Existing sign convention from original code:
         // ball right -> yaw target decreases.
-        yaw += (dx > 0.0) ? -step : step;
+        yaw += (dx > 0.0) ? -yawStep : yawStep;
     }
 
     if (std::fabs(dy) > deadbandY)
     {
-        // Existing sign convention from original code:
-        // ball low -> pitch target increases.
-        pitch += (dy > 0.0) ? step : -step;
+        // On T1, lower/downward pitch is negative. Ball low in image -> look down.
+        pitch += (dy > 0.0) ? -pitchStep : pitchStep;
     }
 
     // If both errors are inside deadband, pitch/yaw remain current values,
@@ -311,7 +309,7 @@ NodeStatus Chase::tick()
     };
     log("ticked");
     
-    double vxLimit, vyLimit, vthetaLimit, dist, safeDist;
+    double vxLimit, vyLimit, vthetaLimit, dist, safeDist, directStopX, directStopY, directStopYaw;
     bool directToBall;
     getInput("vx_limit", vxLimit);
     getInput("vy_limit", vyLimit);
@@ -319,6 +317,9 @@ NodeStatus Chase::tick()
     getInput("dist", dist);
     getInput("safe_dist", safeDist);
     getInput("direct_to_ball", directToBall);
+    getInput("direct_stop_x", directStopX);
+    getInput("direct_stop_y", directStopY);
+    getInput("direct_stop_yaw", directStopYaw);
 
     bool avoidObstacle = brain->config->get_avoid_during_chase();
     double oaSafeDist = brain->config->get_chase_ao_safe_dist();
@@ -353,9 +354,15 @@ NodeStatus Chase::tick()
     if (directToBall) {
         log("targetType = direct_to_ball");
         targetType = "direct_to_ball";
-        // Lab mode: approach the ball from the robot's current side instead of circling behind it.
-        target_f.x = ballPos.x - dist * cos(theta_rb);
-        target_f.y = ballPos.y - dist * sin(theta_rb);
+        // Lab mode: use the projected/depth ball position in robot coordinates.
+        target_r.x = brain->data->ball.posToRobot.x - dist;
+        target_r.y = brain->data->ball.posToRobot.y;
+        target_r.theta = 0.0;
+        if (brain->data->ball.posToRobot.x < 0.05) {
+            log("direct_to_ball waiting for valid forward ball projection");
+            brain->client->setVelocity(0, 0, 0);
+            return NodeStatus::SUCCESS;
+        }
     } else if (fabs(toPInPI(kickDir - theta_rb)) < dirThreshold) {
         log("targetType = direct");
         targetType = "direct";
@@ -371,10 +378,19 @@ NodeStatus Chase::tick()
         target_f.x = ballPos.x + safeDist * cos(tanTheta);
         target_f.y = ballPos.y + safeDist * sin(tanTheta);
     }
-    target_r = brain->data->field2robot(target_f);
+    if (!directToBall) target_r = brain->data->field2robot(target_f);
             
     double targetDir = atan2(target_r.y, target_r.x);
     double distToObstacle = brain->distToObstacle(targetDir);
+    const bool directXReady = directToBall && std::fabs(target_r.x) < directStopX;
+    const bool directYReady = directToBall && std::fabs(target_r.y) < directStopY;
+    const bool directYawReady = directToBall && std::fabs(ballYaw) < directStopYaw;
+
+    if (directXReady && directYReady && directYawReady) {
+        log("direct_to_ball target reached");
+        brain->client->setVelocity(0, 0, 0);
+        return NodeStatus::SUCCESS;
+    }
 
     if (avoidObstacle && distToObstacle < oaSafeDist) {
         log("avoid obstacle");
@@ -391,15 +407,9 @@ NodeStatus Chase::tick()
         vtheta = ballYaw;
     } else {
         if (directToBall) {
-            double targetRange = norm(target_r.x, target_r.y);
-            vx = cap(target_r.x, vxLimit, -vxLimit * 0.5);
-            vy = target_r.y;
-            vtheta = ballYaw;
-            if (targetRange < 0.05) {
-                vx = 0.0;
-                vy = 0.0;
-            }
-            if (fabs(vtheta) < 0.08) vtheta = 0.0;
+            vx = directXReady ? 0.0 : cap(target_r.x * 0.6, vxLimit, 0.0);
+            vy = directYReady ? 0.0 : cap(target_r.y * 0.6, vyLimit, -vyLimit);
+            vtheta = directYawReady ? 0.0 : cap(ballYaw * 1.2, vthetaLimit, -vthetaLimit);
         } else {
             vx = min(vxLimit, brain->data->ball.range);
             vy = 0;

@@ -30,7 +30,7 @@ int RobotClient::call(booster_interface::msg::BoosterApiReqMsg msg)
 int RobotClient::moveHead(double pitch, double yaw)
 {
     yaw = cap(yaw, brain->config->get_head_yaw_limit_left(), brain->config->get_head_yaw_limit_right());
-    pitch = max(pitch, brain->config->get_head_pitch_limit_up());
+    pitch = cap(pitch, brain->config->get_head_pitch_limit_up(), brain->config->get_head_pitch_limit_down());
 
     brain->log->debug("move_head_2004", format("pitch: %.3f, yaw: %.3f", pitch, yaw));
 

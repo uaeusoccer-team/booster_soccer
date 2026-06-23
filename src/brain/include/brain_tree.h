@@ -142,7 +142,7 @@ public:
     static PortsList providedPorts()
     {
         return {
-            InputPort<double>("low_pitch", 1.0, "Lowest pitch used while sweeping for the ball"),
+            InputPort<double>("low_pitch", -0.314, "Lowest/downward pitch used while sweeping for the ball"),
             InputPort<double>("high_pitch", 0.45, "Highest pitch used while sweeping for the ball"),
             InputPort<double>("yaw_limit", 1.1, "Maximum absolute yaw used while sweeping for the ball"),
             InputPort<double>("sweep_msec", 3000.0, "Milliseconds for one left-right-left head sweep"),
@@ -267,6 +267,9 @@ public:
             InputPort<double>("dist", 0.1, "Target distance behind the ball when chasing"),
             InputPort<double>("safe_dist", 4.0, "Safe distance to maintain when circling back"),
             InputPort<bool>("direct_to_ball", false, "Approach the ball directly without circling behind it"),
+            InputPort<double>("direct_stop_x", 0.12, "Forward tolerance for direct_to_ball mode"),
+            InputPort<double>("direct_stop_y", 0.08, "Side tolerance for direct_to_ball mode"),
+            InputPort<double>("direct_stop_yaw", 0.12, "Yaw tolerance for direct_to_ball mode"),
         };
     }
 

@@ -101,6 +101,10 @@ double BrainConfig::get_head_pitch_limit_up() {
     return static_cast<rclcpp::Node*>(brain)->get_parameter_or("robot.head_pitch_limit_up", 0.45);
 }
 
+double BrainConfig::get_head_pitch_limit_down() {
+    return static_cast<rclcpp::Node*>(brain)->get_parameter_or("robot.head_pitch_limit_down", -0.314);
+}
+
 double BrainConfig::get_min_vx() {
     return static_cast<rclcpp::Node*>(brain)->get_parameter_or("robot.min_vx", 0.4);
 }
@@ -564,6 +568,8 @@ void BrainConfig::print(ostream &os)
     os << "    vxLimit = " << get_vx_limit() << endl;
     os << "    vyLimit = " << get_vy_limit() << endl;
     os << "    vthetaLimit = " << get_vtheta_limit() << endl;
+    os << "    headPitchLimitUp = " << get_head_pitch_limit_up() << endl;
+    os << "    headPitchLimitDown = " << get_head_pitch_limit_down() << endl;
     os << "----------------------------------------" << endl;
     os << "Strategy:" << endl;
     os << "    ballConfidenceThreshold = " << get_ball_confidence_threshold() << endl;
