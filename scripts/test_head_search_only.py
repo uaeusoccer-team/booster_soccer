@@ -13,7 +13,7 @@ import rclpy
 from rclpy.node import Node
 
 from booster_msgs.msg import RpcReqMsg
-from booster_ros2_interface.msg import LowState
+from booster_interface.msg import LowState
 from vision_interface.msg import Detections
 
 
