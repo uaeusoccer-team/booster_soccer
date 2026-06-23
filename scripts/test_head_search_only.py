@@ -49,7 +49,6 @@ class HeadSearchOnly(Node):
         self.head_yaw: Optional[float] = None
         self.head_pitch: Optional[float] = None
         self.last_command_time = 0.0
-        self.last_head_print_time = 0.0
 
         self.label_filter = {
             label.strip().lower()
@@ -73,7 +72,7 @@ class HeadSearchOnly(Node):
         if self.args.head_api == "absolute":
             msg.header = json.dumps({"api_id": self.args.absolute_api_id})
             msg.body = json.dumps({"pitch": pitch, "yaw": yaw})
-        elif self.args.head_api == "direction":
+        else:
             pitch_direction, yaw_direction = self.direction_for_target(pitch, yaw)
             msg.header = json.dumps(
                 {"api_id": self.args.direction_api_id, "expect_response": True}
@@ -84,8 +83,6 @@ class HeadSearchOnly(Node):
                     "yaw_direction": yaw_direction,
                 }
             )
-        else:
-            return
 
         self.publisher.publish(msg)
         self.last_command_time = time.monotonic()
@@ -106,132 +103,13 @@ class HeadSearchOnly(Node):
         pitch_direction = 0
         yaw_direction = 0
 
-        if abs(pitch_error) > self.args.direction_deadband:
-            pitch_direction = 1 if pitch_error > 0.0 else -1
-
         if abs(yaw_error) > self.args.direction_deadband:
-            yaw_direction = 1 if yaw_error > 0.0 else -1
+            pitch_direction = 1 if yaw_error > 0.0 else -1
+
+        if abs(pitch_error) > self.args.direction_deadband:
+            yaw_direction = 1 if pitch_error > 0.0 else -1
 
         return pitch_direction, yaw_direction
-
-    def publish_direction(
-        self, pan_direction: int, tilt_direction: int, reason: str = ""
-    ) -> None:
-        if self.args.invert_pan:
-            pan_direction = -pan_direction
-        if self.args.invert_tilt:
-            tilt_direction = -tilt_direction
-
-        msg = RpcReqMsg()
-        msg.uuid = str(uuid.uuid4())
-        msg.header = json.dumps(
-            {"api_id": self.args.direction_api_id, "expect_response": True}
-        )
-        msg.body = json.dumps(
-            {
-                "pitch_direction": int(tilt_direction),
-                "yaw_direction": int(pan_direction),
-            }
-        )
-        self.publisher.publish(msg)
-        self.last_command_time = time.monotonic()
-
-        now = time.monotonic()
-        should_print = (
-            reason
-            and now - self.last_head_print_time >= self.args.head_print_period
-        )
-        if should_print:
-            print(
-                f"[HEAD_PWM] pan_dir={pan_direction:+d} tilt_dir={tilt_direction:+d}"
-                f" {reason} measured={self.measured_head_text()}",
-                flush=True,
-            )
-            self.last_head_print_time = now
-
-    def spin_with_detections(self, duration: float) -> None:
-        end_time = time.monotonic() + max(duration, 0.0)
-        while rclpy.ok() and time.monotonic() < end_time:
-            rclpy.spin_once(self, timeout_sec=0.05)
-            self.maybe_print_detections()
-
-    def pwm_direction(
-        self,
-        pan_direction: int,
-        tilt_direction: int,
-        duration: float,
-        reason: str = "",
-    ) -> None:
-        end_time = time.monotonic() + max(duration, 0.0)
-        on_time = max(0.02, self.args.pwm_period * self.args.pwm_duty)
-        off_time = max(0.02, self.args.pwm_period - on_time)
-
-        while rclpy.ok() and time.monotonic() < end_time:
-            self.publish_direction(pan_direction, tilt_direction, reason)
-            self.spin_with_detections(min(on_time, end_time - time.monotonic()))
-            self.publish_direction(0, 0)
-            self.spin_with_detections(min(off_time, end_time - time.monotonic()))
-
-    def move_pitch_to_target(self, target_pitch: float) -> None:
-        print(
-            f"[PITCH] moving toward {target_pitch:+.3f} with PWM duty "
-            f"{self.args.pwm_duty:.2f}",
-            flush=True,
-        )
-        deadline = time.monotonic() + self.args.pitch_timeout
-        while rclpy.ok() and time.monotonic() < deadline:
-            if self.head_pitch is not None:
-                error = target_pitch - self.head_pitch
-                if abs(error) <= self.args.pitch_tolerance:
-                    break
-                tilt_direction = 1 if error > 0.0 else -1
-            else:
-                tilt_direction = 1 if target_pitch >= 0.0 else -1
-
-            self.pwm_direction(
-                0,
-                tilt_direction,
-                self.args.pwm_period,
-                reason=f"pitch_target={target_pitch:+.3f}",
-            )
-
-        self.publish_direction(0, 0)
-        print(f"[PITCH] done, measured={self.measured_head_text()}", flush=True)
-
-    def sweep_yaw_to_target(self, target_yaw: float, fallback_duration: float) -> None:
-        print(
-            f"[YAW] sweeping toward {target_yaw:+.3f} with PWM duty "
-            f"{self.args.pwm_duty:.2f}",
-            flush=True,
-        )
-        deadline = time.monotonic() + max(
-            fallback_duration, self.args.sweep_sec, self.args.yaw_timeout
-        )
-        open_loop_deadline = time.monotonic() + fallback_duration
-
-        while rclpy.ok():
-            if self.head_yaw is not None:
-                error = target_yaw - self.head_yaw
-                if abs(error) <= self.args.yaw_tolerance:
-                    break
-                pan_direction = 1 if error > 0.0 else -1
-                if time.monotonic() > deadline:
-                    print("[YAW] timeout before target; stopping sweep", flush=True)
-                    break
-            else:
-                pan_direction = 1 if target_yaw >= 0.0 else -1
-                if time.monotonic() > open_loop_deadline:
-                    break
-
-            self.pwm_direction(
-                pan_direction,
-                0,
-                self.args.pwm_period,
-                reason=f"yaw_target={target_yaw:+.3f}",
-            )
-
-        self.publish_direction(0, 0)
-        print(f"[YAW] done, measured={self.measured_head_text()}", flush=True)
 
     def measured_head_text(self) -> str:
         if self.head_pitch is None or self.head_yaw is None:
@@ -323,10 +201,6 @@ class HeadSearchOnly(Node):
         for _ in range(10):
             rclpy.spin_once(self, timeout_sec=0.1)
 
-        if self.args.head_api == "pwm":
-            self.run_pwm_scan(pitches)
-            return
-
         for cycle in range(self.args.cycles):
             print(f"---- scan cycle {cycle + 1}/{self.args.cycles} ----", flush=True)
             for pitch_index, pitch in enumerate(pitches):
@@ -350,42 +224,6 @@ class HeadSearchOnly(Node):
         self.maybe_print_detections(force=True)
         if self.args.center_on_exit:
             self.hold_target(self.args.center_pitch, 0.0, self.args.settle_sec)
-
-    def run_pwm_scan(self, pitches: list[float]) -> None:
-        print(
-            "PWM mode uses API 2006 direction pulses, not absolute head targets.",
-            flush=True,
-        )
-        print(
-            "API fields follow the Booster app logs: "
-            "pitch_direction tilts up/down, yaw_direction pans left/right.",
-            flush=True,
-        )
-
-        for cycle in range(self.args.cycles):
-            print(f"---- PWM scan cycle {cycle + 1}/{self.args.cycles} ----", flush=True)
-            for pitch_index, pitch in enumerate(pitches):
-                self.move_pitch_to_target(pitch)
-
-                left_to_right = pitch_index % 2 == 0
-                start_yaw = self.args.left_yaw if left_to_right else self.args.right_yaw
-                end_yaw = self.args.right_yaw if left_to_right else self.args.left_yaw
-                direction = "left -> right" if left_to_right else "right -> left"
-                print(
-                    f"[SCAN_PWM] pitch level {pitch_index + 1}/{len(pitches)} "
-                    f"pitch={pitch:+.3f}, yaw {direction}",
-                    flush=True,
-                )
-
-                if self.args.seek_sweep_start:
-                    self.sweep_yaw_to_target(start_yaw, self.args.sweep_sec)
-                self.sweep_yaw_to_target(end_yaw, self.args.sweep_sec)
-
-        self.publish_direction(0, 0)
-        self.maybe_print_detections(force=True)
-        if self.args.center_on_exit:
-            self.move_pitch_to_target(self.args.center_pitch)
-            self.sweep_yaw_to_target(0.0, self.args.sweep_sec)
 
 
 def run_stop_script() -> None:
@@ -444,16 +282,6 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--waypoints", type=int, default=5, help="coarse yaw waypoints per sweep; use 2 for endpoint-only")
     parser.add_argument("--center-on-exit", action="store_true", help="return head to yaw 0 at the end")
     parser.add_argument("--center-pitch", type=float, default=0.65, help="pitch used with --center-on-exit")
-    parser.add_argument("--pwm-duty", type=float, default=0.35, help="PWM duty cycle for direction mode, 0.0-1.0")
-    parser.add_argument("--pwm-period", type=float, default=0.24, help="PWM pulse period in seconds")
-    parser.add_argument("--yaw-tolerance", type=float, default=0.04, help="measured yaw tolerance for PWM sweep")
-    parser.add_argument("--pitch-tolerance", type=float, default=0.04, help="measured pitch tolerance for PWM pitch levels")
-    parser.add_argument("--pitch-timeout", type=float, default=5.0, help="max seconds to reach each pitch level")
-    parser.add_argument("--yaw-timeout", type=float, default=12.0, help="max seconds to reach a measured yaw target")
-    parser.add_argument("--head-print-period", type=float, default=0.8, help="seconds between PWM head command logs")
-    parser.add_argument("--no-seek-sweep-start", dest="seek_sweep_start", action="store_false", help="do not first move to the starting yaw side")
-    parser.add_argument("--invert-pan", action="store_true", help="invert yaw_direction sign for horizontal pan")
-    parser.add_argument("--invert-tilt", action="store_true", help="invert pitch_direction sign for vertical tilt")
 
     parser.add_argument("--labels", default="", help="comma-separated labels to print; default prints all")
     parser.add_argument("--min-confidence", type=float, default=0.0, help="minimum confidence percentage to print")
@@ -463,13 +291,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--loco-topic", default="/LocoApiTopicReq", help="head command topic")
     parser.add_argument("--detection-topic", default="/booster_soccer/detection", help="detection topic")
     parser.add_argument("--low-state-topic", default="/low_state", help="low-state topic for measured head angles")
-    parser.add_argument("--head-api", choices=["pwm", "absolute", "direction"], default="pwm", help="head command API mode")
+    parser.add_argument("--head-api", choices=["absolute", "direction"], default="absolute", help="head command API mode")
     parser.add_argument("--absolute-api-id", type=int, default=2004, help="absolute RotateHead API id")
     parser.add_argument("--direction-api-id", type=int, default=2006, help="direction RotateHead API id")
     parser.add_argument("--direction-deadband", type=float, default=0.02, help="direction mode deadband in radians")
     parser.add_argument("--command-period", type=float, default=0.35, help="direction mode republish period")
     parser.set_defaults(stop_first=True)
-    parser.set_defaults(seek_sweep_start=True)
     return parser
 
 
@@ -477,12 +304,6 @@ def main() -> int:
     args = build_parser().parse_args()
     if args.waypoints < 2:
         print("--waypoints must be at least 2", file=sys.stderr)
-        return 2
-    if args.pwm_duty <= 0.0 or args.pwm_duty > 1.0:
-        print("--pwm-duty must be > 0.0 and <= 1.0", file=sys.stderr)
-        return 2
-    if args.pwm_period <= 0.0:
-        print("--pwm-period must be > 0.0", file=sys.stderr)
         return 2
 
     vision_process = start_vision(args)
