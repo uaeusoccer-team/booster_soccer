@@ -106,11 +106,11 @@ class HeadSearchOnly(Node):
         pitch_direction = 0
         yaw_direction = 0
 
-        if abs(yaw_error) > self.args.direction_deadband:
-            pitch_direction = 1 if yaw_error > 0.0 else -1
-
         if abs(pitch_error) > self.args.direction_deadband:
-            yaw_direction = 1 if pitch_error > 0.0 else -1
+            pitch_direction = 1 if pitch_error > 0.0 else -1
+
+        if abs(yaw_error) > self.args.direction_deadband:
+            yaw_direction = 1 if yaw_error > 0.0 else -1
 
         return pitch_direction, yaw_direction
 
@@ -129,8 +129,8 @@ class HeadSearchOnly(Node):
         )
         msg.body = json.dumps(
             {
-                "pitch_direction": int(pan_direction),
-                "yaw_direction": int(tilt_direction),
+                "pitch_direction": int(tilt_direction),
+                "yaw_direction": int(pan_direction),
             }
         )
         self.publisher.publish(msg)
@@ -357,8 +357,8 @@ class HeadSearchOnly(Node):
             flush=True,
         )
         print(
-            "API fields follow the T1 app-style mapping seen in old robot code: "
-            "pitch_direction pans left/right, yaw_direction tilts up/down.",
+            "API fields follow the Booster app logs: "
+            "pitch_direction tilts up/down, yaw_direction pans left/right.",
             flush=True,
         )
 
@@ -452,8 +452,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--yaw-timeout", type=float, default=12.0, help="max seconds to reach a measured yaw target")
     parser.add_argument("--head-print-period", type=float, default=0.8, help="seconds between PWM head command logs")
     parser.add_argument("--no-seek-sweep-start", dest="seek_sweep_start", action="store_false", help="do not first move to the starting yaw side")
-    parser.add_argument("--invert-pan", action="store_true", help="invert pitch_direction sign for horizontal pan")
-    parser.add_argument("--invert-tilt", action="store_true", help="invert yaw_direction sign for vertical tilt")
+    parser.add_argument("--invert-pan", action="store_true", help="invert yaw_direction sign for horizontal pan")
+    parser.add_argument("--invert-tilt", action="store_true", help="invert pitch_direction sign for vertical tilt")
 
     parser.add_argument("--labels", default="", help="comma-separated labels to print; default prints all")
     parser.add_argument("--min-confidence", type=float, default=0.0, help="minimum confidence percentage to print")
