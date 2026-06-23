@@ -54,7 +54,7 @@ Brain::Brain() : rclcpp::Node("brain_node")
     declare_parameter<double>("robot.vx_limit", 1.0);
     declare_parameter<double>("robot.vy_limit", 0.4);
     declare_parameter<double>("robot.vtheta_limit", 1.0);
-    declare_parameter<double>("robot.head_pitch_limit_up", 0.80);
+    declare_parameter<double>("robot.head_pitch_limit_up", 0.45);
     declare_parameter<double>("robot.head_pitch_limit_down", -0.314);
     declare_parameter<double>("robot.min_vx", 0.4);
     declare_parameter<double>("robot.min_vy", 0.3);

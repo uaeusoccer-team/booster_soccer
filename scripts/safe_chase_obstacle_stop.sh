@@ -86,12 +86,7 @@ cat > "$TREE_PATH" <<'XML'
         <IfThenElse>
           <ScriptCondition name="Ball location known?" code="ball_location_known || tm_ball_pos_reliable" />
           <CamTrackBall />
-          <CamFindBall low_pitch="0.80"
-                       mid_pitch="0.65"
-                       high_pitch="0.50"
-                       sweep_msec="6500"
-                       cmd_interval_msec="800"
-                       turn_body_on_loss="false" />
+          <CamFindBall low_pitch="-0.314" high_pitch="0.75" turn_body_on_loss="false" />
         </IfThenElse>
 
         <ReactiveSequence _while="ball_location_known" name="no-kick direct obstacle-avoid chase">
@@ -144,7 +139,7 @@ ros2 param set /brain_node obstacle_avoidance.occupancy_threshold 5.0 >/dev/null
 ros2 param set /brain_node obstacle_avoidance.chase_ao_safe_dist 1.4 >/dev/null 2>&1 || true
 ros2 param set /brain_node obstacle_avoidance.collision_threshold 0.35 >/dev/null 2>&1 || true
 ros2 param set /brain_node game.treat_person_as_robot true >/dev/null 2>&1 || true
-ros2 param set /brain_node robot.head_pitch_limit_up 0.80 >/dev/null 2>&1 || true
+ros2 param set /brain_node robot.head_pitch_limit_up 0.75 >/dev/null 2>&1 || true
 ros2 param set /brain_node robot.head_pitch_limit_down -0.314 >/dev/null 2>&1 || true
 ros2 param set /brain_node robot.min_vx 0.05 >/dev/null 2>&1 || true
 ros2 param set /brain_node robot.min_vy 0.04 >/dev/null 2>&1 || true

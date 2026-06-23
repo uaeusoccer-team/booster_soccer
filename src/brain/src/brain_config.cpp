@@ -98,7 +98,7 @@ double BrainConfig::get_head_yaw_limit_right() {
 }
 
 double BrainConfig::get_head_pitch_limit_up() {
-    return static_cast<rclcpp::Node*>(brain)->get_parameter_or("robot.head_pitch_limit_up", 0.80);
+    return static_cast<rclcpp::Node*>(brain)->get_parameter_or("robot.head_pitch_limit_up", 0.45);
 }
 
 double BrainConfig::get_head_pitch_limit_down() {

@@ -239,11 +239,10 @@ NodeStatus CamFindBall::tick()
         return NodeStatus::SUCCESS;
     } // Currently, all nodes return Success. Returning Failure would affect the execution of subsequent nodes.
 
-    double lowPitch, midPitch, highPitch, yawLimit, sweepMsec, pitchCycleMsec, cmdIntervalMsec;
+    double lowPitch, highPitch, yawLimit, sweepMsec, pitchCycleMsec, cmdIntervalMsec;
     bool turnBodyOnLoss;
     double lostTurnMsec, lostTurnSpeed, lostTurnMinYaw;
     getInput("low_pitch", lowPitch);
-    getInput("mid_pitch", midPitch);
     getInput("high_pitch", highPitch);
     getInput("yaw_limit", yawLimit);
     getInput("sweep_msec", sweepMsec);
@@ -254,9 +253,9 @@ NodeStatus CamFindBall::tick()
     getInput("lost_turn_speed", lostTurnSpeed);
     getInput("lost_turn_min_yaw", lostTurnMinYaw);
 
-    cmdIntervalMsec = std::max(300.0, cmdIntervalMsec);
-    sweepMsec = std::max(2500.0, sweepMsec);
-    pitchCycleMsec = std::max(sweepMsec * 3.0, pitchCycleMsec);
+    cmdIntervalMsec = std::max(20.0, cmdIntervalMsec);
+    sweepMsec = std::max(500.0, sweepMsec);
+    pitchCycleMsec = std::max(500.0, pitchCycleMsec);
 
     auto timeSinceLastCmd = (curTime - _timeLastCmd).nanoseconds() / 1e6;
     if (_timeLastCmd.nanoseconds() > 0 && timeSinceLastCmd < cmdIntervalMsec)
@@ -271,16 +270,11 @@ NodeStatus CamFindBall::tick()
         searchMsec = 0.0;
     }
 
-    const double pitchLevels[3] = {lowPitch, midPitch, highPitch};
-    const double cycleMsec = std::fmod(searchMsec, pitchCycleMsec);
-    const int sweepIndex = static_cast<int>(std::floor(cycleMsec / sweepMsec));
-    const int pitchIndex = sweepIndex % 3;
-    const double sweepProgress = cap(std::fmod(cycleMsec, sweepMsec) / sweepMsec, 1.0, 0.0);
-    const bool leftToRight = (sweepIndex % 2) == 0;
-    const double yawStart = leftToRight ? -yawLimit : yawLimit;
-    const double yawEnd = leftToRight ? yawLimit : -yawLimit;
-    const double yaw = yawStart + (yawEnd - yawStart) * sweepProgress;
-    const double pitch = pitchLevels[pitchIndex];
+    const double yawPhase = 2.0 * M_PI * std::fmod(searchMsec, sweepMsec) / sweepMsec;
+    const double pitchPhase = 2.0 * M_PI * std::fmod(searchMsec, pitchCycleMsec) / pitchCycleMsec;
+    const double pitchBlend = 0.5 * (1.0 - std::cos(pitchPhase));
+    const double yaw = yawLimit * std::sin(yawPhase);
+    const double pitch = highPitch + (lowPitch - highPitch) * pitchBlend;
 
     brain->client->moveHead(pitch, yaw);
     turnTowardRecentlyLostBall(brain, turnBodyOnLoss, lostTurnMsec, lostTurnSpeed, lostTurnMinYaw);
