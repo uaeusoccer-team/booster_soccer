@@ -142,12 +142,13 @@ public:
     static PortsList providedPorts()
     {
         return {
-            InputPort<double>("low_pitch", -0.314, "Lowest/downward pitch used while sweeping for the ball"),
-            InputPort<double>("high_pitch", 0.45, "Highest pitch used while sweeping for the ball"),
+            InputPort<double>("low_pitch", 0.80, "Lowest/downward pitch used while sweeping for the ball"),
+            InputPort<double>("mid_pitch", 0.65, "Middle pitch used while sweeping for the ball"),
+            InputPort<double>("high_pitch", 0.50, "Highest pitch used while sweeping for the ball"),
             InputPort<double>("yaw_limit", 1.1, "Maximum absolute yaw used while sweeping for the ball"),
-            InputPort<double>("sweep_msec", 3000.0, "Milliseconds for one left-right-left head sweep"),
-            InputPort<double>("pitch_cycle_msec", 6000.0, "Milliseconds for one high-low-high pitch cycle"),
-            InputPort<double>("cmd_interval_msec", 100.0, "Minimum time between head commands"),
+            InputPort<double>("sweep_msec", 6500.0, "Milliseconds for one left-to-right or right-to-left sweep"),
+            InputPort<double>("pitch_cycle_msec", 19500.0, "Milliseconds for all pitch levels"),
+            InputPort<double>("cmd_interval_msec", 800.0, "Minimum time between head commands"),
             InputPort<bool>("turn_body_on_loss", true, "Rotate toward the most recent ball yaw for a short time after losing sight"),
             InputPort<double>("lost_turn_msec", 1200.0, "Milliseconds to keep turning toward the recent lost-ball direction"),
             InputPort<double>("lost_turn_speed", 0.25, "Body yaw speed while turning toward a recently lost ball"),

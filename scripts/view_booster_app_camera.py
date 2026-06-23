@@ -260,10 +260,10 @@ class RosDetectionParser:
             return
 
         if stripped.startswith("- "):
-            self.finish_current()
-            self.current = {}
             rest = stripped[2:].strip()
-            if rest:
+            if rest.startswith("label:"):
+                self.finish_current()
+                self.current = {}
                 self.parse_field(rest)
             return
 
