@@ -138,6 +138,7 @@ ros2 param set /brain_node obstacle_avoidance.avoid_during_chase true >/dev/null
 ros2 param set /brain_node obstacle_avoidance.occupancy_threshold 5.0 >/dev/null 2>&1 || true
 ros2 param set /brain_node obstacle_avoidance.chase_ao_safe_dist 1.4 >/dev/null 2>&1 || true
 ros2 param set /brain_node obstacle_avoidance.collision_threshold 0.35 >/dev/null 2>&1 || true
+ros2 param set /brain_node game.treat_person_as_robot true >/dev/null 2>&1 || true
 ros2 param set /brain_node robot.head_pitch_limit_up 0.75 >/dev/null 2>&1 || true
 ros2 param set /brain_node robot.head_pitch_limit_down -0.314 >/dev/null 2>&1 || true
 ros2 param set /brain_node robot.min_vx 0.05 >/dev/null 2>&1 || true

@@ -382,9 +382,39 @@ NodeStatus Chase::tick()
             
     double targetDir = atan2(target_r.y, target_r.x);
     double distToObstacle = brain->distToObstacle(targetDir);
+    auto personBlocksFront = [&]() {
+        auto robots = brain->data->getRobots();
+        for (const auto &obj : robots) {
+            if (obj.label != "Person" || obj.confidence < 50.0) continue;
+
+            bool projectedFront =
+                obj.posToRobot.x > 0.05 &&
+                obj.posToRobot.x < 3.0 &&
+                std::fabs(obj.posToRobot.y) < 0.65;
+
+            double boxWidth = obj.boundingBox.xmax - obj.boundingBox.xmin;
+            double boxHeight = obj.boundingBox.ymax - obj.boundingBox.ymin;
+            double boxCenterX = mean(obj.boundingBox.xmax, obj.boundingBox.xmin);
+            bool centeredBox =
+                boxWidth > 70.0 &&
+                boxHeight > 120.0 &&
+                boxCenterX > brain->config->cameraImageWidth * 0.20 &&
+                boxCenterX < brain->config->cameraImageWidth * 0.80;
+
+            if (projectedFront || centeredBox) return true;
+        }
+        return false;
+    };
+    bool personInFront = directToBall && personBlocksFront();
     const bool directXReady = directToBall && std::fabs(target_r.x) < directStopX;
     const bool directYReady = directToBall && std::fabs(target_r.y) < directStopY;
     const bool directYawReady = directToBall && std::fabs(ballYaw) < directStopYaw;
+
+    if (directToBall && !brain->data->ballDetected && personInFront) {
+        log("person in front while ball not visible");
+        brain->client->setVelocity(0, 0, 0);
+        return NodeStatus::SUCCESS;
+    }
 
     if (directXReady && directYReady && directYawReady) {
         log("direct_to_ball target reached");
@@ -392,7 +422,12 @@ NodeStatus Chase::tick()
         return NodeStatus::SUCCESS;
     }
 
-    if (avoidObstacle && distToObstacle < oaSafeDist) {
+    if (directToBall && brain->data->ballDetected && personInFront && distToObstacle >= oaSafeDist) {
+        log("person in front with ball visible: sidestep around person");
+        vx = 0.0;
+        vy = brain->data->ball.yawToRobot >= 0.0 ? vyLimit : -vyLimit;
+        vtheta = cap(ballYaw * 1.2, vthetaLimit, -vthetaLimit);
+    } else if (avoidObstacle && distToObstacle < oaSafeDist) {
         log("avoid obstacle");
         auto safeDirs = brain->findSafeDirections(targetDir, oaSafeDist);
         if (directToBall && safeDirs[0] < 0.5 && safeDirs[2] < 0.5) {

@@ -1247,16 +1247,7 @@ void Brain::detectionsCallback(const vision_interface::msg::Detections &msg)
     for (int i = 0; i < gameObjects.size(); i++)
     {
         const auto &obj = gameObjects[i];
-        if (
-            obj.label == "Ball" ||
-            (
-                obj.label == "Person" &&
-                obj.boundingBox.xmin > 700 &&
-                obj.boundingBox.ymin > 350 &&
-                (obj.boundingBox.xmax - obj.boundingBox.xmin) > 80 &&
-                (obj.boundingBox.ymax - obj.boundingBox.ymin) > 120
-            )
-        )
+        if (obj.label == "Ball")
             balls.push_back(obj);
         if (obj.label == "Goalpost")
             goalposts.push_back(obj);
@@ -2176,14 +2167,19 @@ void Brain::processDepthImage(const cv::Mat &depthFloat, int width, int height, 
 
 double Brain::distToObstacle(double angle) {
     auto obs = data->getObstacles();
+    auto robots = data->getRobots();
+    obs.insert(obs.end(), robots.begin(), robots.end());
     double minDist = 1e9;
     double obstacleThreshold = config->get_occupancy_threshold();
     double collisionThreshold = config->get_collision_threshold();
 
     for (int i = 0; i < obs.size(); i++) {
-        if (obs[i].confidence < obstacleThreshold) continue;
-
         auto o = obs[i];
+        double confidenceThreshold =
+            (o.label == "Person" || o.label == "Opponent") ? 50.0 : obstacleThreshold;
+        if (o.confidence < confidenceThreshold) continue;
+        if (o.posToRobot.x <= 0.05) continue;
+
         Line line = {
             0, 0,
             cos(angle) * 100, sin(angle) * 100
