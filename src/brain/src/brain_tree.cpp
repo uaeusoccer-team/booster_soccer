@@ -9,56 +9,27 @@
 #include "locator.h"
 #include "std_msgs/msg/string.hpp"
 #include "visualization_msgs/msg/marker_array.hpp"
-#include <algorithm>
-#include <cctype>
 #include <fstream>
 #include <ios>
-#include <sstream>
-#include <utility>
-#include <vector>
 
 namespace
 {
-std::vector<double> parseDoubleList(const std::string &text, const std::vector<double> &fallback)
+void turnTowardRecentlyLostBall(Brain *brain, bool enabled, double maxRecentLostMsec, double turnSpeed, double minYaw)
 {
-    std::vector<double> values;
-    std::stringstream stream(text);
-    std::string item;
-
-    while (std::getline(stream, item, ','))
+    if (!enabled || maxRecentLostMsec <= 0.0 || turnSpeed <= 0.0)
     {
-        try
-        {
-            double value = std::stod(item);
-            if (std::isfinite(value))
-            {
-                values.push_back(value);
-            }
-        }
-        catch (...)
-        {
-        }
+        return;
     }
 
-    return values.empty() ? fallback : values;
-}
+    const double lostMsec = brain->msecsSince(brain->data->ball.timePoint);
+    const double lastYaw = brain->data->ball.yawToRobot;
+    if (lostMsec >= 0.0 && lostMsec < maxRecentLostMsec && std::fabs(lastYaw) > minYaw)
+    {
+        brain->client->setVelocity(0.0, 0.0, lastYaw > 0.0 ? turnSpeed : -turnSpeed);
+        return;
+    }
 
-std::pair<double, double> smoothSearchTarget(const std::vector<double> &pitches, double minYaw, double maxYaw, size_t targetIndex)
-{
-    const size_t pitchRow = (targetIndex / 2) % pitches.size();
-    const bool leftToRight = ((targetIndex / 2) % 2) == 0;
-    const bool firstSide = (targetIndex % 2) == 0;
-    const double yaw = leftToRight
-        ? (firstSide ? minYaw : maxYaw)
-        : (firstSide ? maxYaw : minYaw);
-
-    return {pitches[pitchRow], yaw};
-}
-
-double easeInOut(double t)
-{
-    t = cap(t, 1.0, 0.0);
-    return 0.5 - 0.5 * std::cos(M_PI * t);
+    brain->client->setVelocity(0.0, 0.0, 0.0);
 }
 }
 
@@ -209,7 +180,7 @@ NodeStatus CamTrackBall::tick()
     {
         // Hold the current head target when the ball box is not valid.
         brain->client->moveHead(pitch, yaw);
-        brain->client->setVelocity(0.0, 0.0, 0.0);
+        turnTowardRecentlyLostBall(brain, true, 1200.0, 0.25, 0.08);
         return NodeStatus::SUCCESS;
     }
 
@@ -258,76 +229,6 @@ CamFindBall::CamFindBall(const string &name, const NodeConfig &config, Brain *_b
     _cmdRestartIntervalMSec = 60000;
 }
 
-void CamFindBall::resetLostBallTurn(bool stopBody)
-{
-    if (stopBody && _lostTurnActive)
-    {
-        brain->client->setVelocity(0.0, 0.0, 0.0);
-    }
-
-    _lostTurnActive = false;
-    _lostTurnComplete = false;
-    _lostTurnAccumAngle = 0.0;
-    _lostTurnTargetAngle = 0.0;
-}
-
-void CamFindBall::updateLostBallTurn(bool enabled, double maxRecentLostMsec, double turnSpeed, double minYaw,
-                                     double turnDegrees, double toleranceDegrees, double timeoutMsec)
-{
-    if (!enabled || maxRecentLostMsec <= 0.0 || turnSpeed <= 0.0 || turnDegrees <= 0.0)
-    {
-        resetLostBallTurn(true);
-        return;
-    }
-
-    const double lostMsec = brain->msecsSince(brain->data->ball.timePoint);
-    const double lastYaw = brain->data->ball.yawToRobot;
-
-    if (_lostTurnComplete)
-    {
-        brain->client->setVelocity(0.0, 0.0, 0.0);
-        return;
-    }
-
-    if (!_lostTurnActive && (lostMsec < 0.0 || lostMsec > maxRecentLostMsec || std::fabs(lastYaw) <= minYaw))
-    {
-        resetLostBallTurn(true);
-        return;
-    }
-
-    turnSpeed = std::max(0.01, std::fabs(turnSpeed));
-    const double targetAbs = std::max(deg2rad(1.0), std::fabs(deg2rad(turnDegrees)));
-    const double tolerance = std::max(deg2rad(1.0), std::fabs(deg2rad(toleranceDegrees)));
-    timeoutMsec = std::max(250.0, timeoutMsec);
-
-    if (!_lostTurnActive)
-    {
-        _lostTurnActive = true;
-        _lostTurnStartTime = brain->get_clock()->now();
-        _lostTurnLastOdomTheta = brain->data->robotPoseToOdom.theta;
-        _lostTurnAccumAngle = 0.0;
-        _lostTurnTargetAngle = lastYaw > 0.0 ? targetAbs : -targetAbs;
-    }
-
-    const double curTheta = brain->data->robotPoseToOdom.theta;
-    const double deltaTheta = toPInPI(curTheta - _lostTurnLastOdomTheta);
-    _lostTurnLastOdomTheta = curTheta;
-    _lostTurnAccumAngle += deltaTheta;
-
-    const double remaining = _lostTurnTargetAngle - _lostTurnAccumAngle;
-    const double turnMsec = brain->msecsSince(_lostTurnStartTime);
-    if (std::fabs(remaining) <= tolerance || turnMsec > timeoutMsec)
-    {
-        brain->client->setVelocity(0.0, 0.0, 0.0);
-        _lostTurnActive = false;
-        _lostTurnComplete = true;
-        return;
-    }
-
-    const double command = cap(remaining * 2.0, turnSpeed, -turnSpeed);
-    brain->client->setVelocity(0.0, 0.0, command);
-}
-
 NodeStatus CamFindBall::tick()
 {
     auto curTime = brain->get_clock()->now();
@@ -335,29 +236,12 @@ NodeStatus CamFindBall::tick()
     if (brain->data->ballDetected)
     {
         _timeSearchStart = curTime;
-        _smoothSearchActive = false;
-        _smoothDwellActive = false;
-        resetLostBallTurn(true);
         return NodeStatus::SUCCESS;
     } // Currently, all nodes return Success. Returning Failure would affect the execution of subsequent nodes.
 
-    string searchMode, smoothPitchesText;
-    getInput("search_mode", searchMode);
-    getInput("smooth_pitches", smoothPitchesText);
-    std::transform(searchMode.begin(), searchMode.end(), searchMode.begin(),
-                   [](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
-
-    double minYaw, maxYaw, yawSpeed, pitchSpeed, commandHz, dwellMsec;
-    getInput("min_yaw", minYaw);
-    getInput("max_yaw", maxYaw);
-    getInput("yaw_speed", yawSpeed);
-    getInput("pitch_speed", pitchSpeed);
-    getInput("command_hz", commandHz);
-    getInput("dwell_msec", dwellMsec);
-
     double lowPitch, highPitch, yawLimit, sweepMsec, pitchCycleMsec, cmdIntervalMsec;
     bool turnBodyOnLoss;
-    double lostTurnMsec, lostTurnSpeed, lostTurnMinYaw, lostTurnDegrees, lostTurnToleranceDegrees, lostTurnTimeoutMsec;
+    double lostTurnMsec, lostTurnSpeed, lostTurnMinYaw;
     getInput("low_pitch", lowPitch);
     getInput("high_pitch", highPitch);
     getInput("yaw_limit", yawLimit);
@@ -368,103 +252,6 @@ NodeStatus CamFindBall::tick()
     getInput("lost_turn_msec", lostTurnMsec);
     getInput("lost_turn_speed", lostTurnSpeed);
     getInput("lost_turn_min_yaw", lostTurnMinYaw);
-    getInput("lost_turn_degrees", lostTurnDegrees);
-    getInput("lost_turn_tolerance_degrees", lostTurnToleranceDegrees);
-    getInput("lost_turn_timeout_msec", lostTurnTimeoutMsec);
-
-    if (searchMode == "smooth" || searchMode == "sdk" || searchMode == "sdk_smooth")
-    {
-        if (maxYaw < minYaw)
-        {
-            std::swap(maxYaw, minYaw);
-        }
-
-        yawSpeed = std::max(0.01, std::fabs(yawSpeed));
-        pitchSpeed = std::max(0.01, std::fabs(pitchSpeed));
-        commandHz = std::max(1.0, commandHz);
-        dwellMsec = std::max(0.0, dwellMsec);
-        const double commandIntervalMsec = 1000.0 / commandHz;
-
-        auto timeSinceLastCmd = (curTime - _timeLastCmd).nanoseconds() / 1e6;
-        if (_timeLastCmd.nanoseconds() > 0 && timeSinceLastCmd < commandIntervalMsec)
-        {
-            return NodeStatus::SUCCESS;
-        }
-
-        const std::vector<double> pitches = parseDoubleList(smoothPitchesText, {0.75, 0.50, 0.35});
-
-        auto startSmoothSegment = [&]() {
-            const auto target = smoothSearchTarget(pitches, minYaw, maxYaw, _smoothTargetIndex);
-            _smoothStartPitch = _smoothCurrentPitch;
-            _smoothStartYaw = _smoothCurrentYaw;
-            _smoothTargetPitch = target.first;
-            _smoothTargetYaw = target.second;
-
-            const double deltaPitch = _smoothTargetPitch - _smoothStartPitch;
-            const double deltaYaw = _smoothTargetYaw - _smoothStartYaw;
-            const double durationSec = std::max({
-                std::fabs(deltaPitch) / pitchSpeed,
-                std::fabs(deltaYaw) / yawSpeed,
-                1.0 / commandHz
-            });
-
-            _smoothSegmentMsec = durationSec * 1000.0;
-            _smoothSegmentStartTime = curTime;
-            _smoothDwellActive = false;
-        };
-
-        if (!_smoothSearchActive)
-        {
-            _smoothSearchActive = true;
-            _smoothDwellActive = false;
-            _smoothTargetIndex = 0;
-            _smoothCurrentPitch = std::isfinite(brain->data->headPitch) ? brain->data->headPitch : pitches.front();
-            _smoothCurrentYaw = std::isfinite(brain->data->headYaw) ? brain->data->headYaw : 0.0;
-            startSmoothSegment();
-        }
-
-        if (_smoothDwellActive)
-        {
-            const double dwellElapsedMsec = (curTime - _smoothDwellStartTime).nanoseconds() / 1e6;
-            if (dwellElapsedMsec < dwellMsec)
-            {
-                brain->client->moveHead(_smoothCurrentPitch, _smoothCurrentYaw);
-                updateLostBallTurn(turnBodyOnLoss, lostTurnMsec, lostTurnSpeed, lostTurnMinYaw,
-                                   lostTurnDegrees, lostTurnToleranceDegrees, lostTurnTimeoutMsec);
-                _timeLastCmd = curTime;
-                return NodeStatus::SUCCESS;
-            }
-
-            startSmoothSegment();
-        }
-
-        const double segmentElapsedMsec = (curTime - _smoothSegmentStartTime).nanoseconds() / 1e6;
-        const double progress = _smoothSegmentMsec > 0.0 ? cap(segmentElapsedMsec / _smoothSegmentMsec, 1.0, 0.0) : 1.0;
-        const double easedProgress = easeInOut(progress);
-        const double pitch = _smoothStartPitch + (_smoothTargetPitch - _smoothStartPitch) * easedProgress;
-        const double yaw = _smoothStartYaw + (_smoothTargetYaw - _smoothStartYaw) * easedProgress;
-
-        brain->client->moveHead(pitch, yaw);
-        _smoothCurrentPitch = pitch;
-        _smoothCurrentYaw = yaw;
-
-        if (progress >= 1.0)
-        {
-            _smoothCurrentPitch = _smoothTargetPitch;
-            _smoothCurrentYaw = _smoothTargetYaw;
-            _smoothTargetIndex++;
-            _smoothDwellActive = true;
-            _smoothDwellStartTime = curTime;
-        }
-
-        updateLostBallTurn(turnBodyOnLoss, lostTurnMsec, lostTurnSpeed, lostTurnMinYaw,
-                           lostTurnDegrees, lostTurnToleranceDegrees, lostTurnTimeoutMsec);
-        _timeLastCmd = curTime;
-        return NodeStatus::SUCCESS;
-    }
-
-    _smoothSearchActive = false;
-    _smoothDwellActive = false;
 
     cmdIntervalMsec = std::max(20.0, cmdIntervalMsec);
     sweepMsec = std::max(500.0, sweepMsec);
@@ -490,8 +277,7 @@ NodeStatus CamFindBall::tick()
     const double pitch = highPitch + (lowPitch - highPitch) * pitchBlend;
 
     brain->client->moveHead(pitch, yaw);
-    updateLostBallTurn(turnBodyOnLoss, lostTurnMsec, lostTurnSpeed, lostTurnMinYaw,
-                       lostTurnDegrees, lostTurnToleranceDegrees, lostTurnTimeoutMsec);
+    turnTowardRecentlyLostBall(brain, turnBodyOnLoss, lostTurnMsec, lostTurnSpeed, lostTurnMinYaw);
     _timeLastCmd = brain->get_clock()->now();
     return NodeStatus::SUCCESS;
 }
@@ -1616,16 +1402,12 @@ NodeStatus TurnOnSpot::onStart()
     bool towardsBall = false;
     _angle = getInput<double>("rad").value();
     getInput("towards_ball", towardsBall);
-    _tolerance = std::max(deg2rad(0.5), std::fabs(deg2rad(getInput<double>("tolerance_deg").value())));
-    _msecLimit = std::max(500.0, getInput<double>("timeout_msec").value());
-    _maxVtheta = std::max(0.01, std::fabs(getInput<double>("max_vtheta").value()));
-    _kp = std::max(0.1, std::fabs(getInput<double>("kp").value()));
     if (towardsBall) {
         double ballPixX = (brain->data->ball.boundingBox.xmin + brain->data->ball.boundingBox.xmax) / 2;
         _angle = fabs(_angle) * (ballPixX < brain->config->cameraImageWidth / 2 ? 1 : -1);
     }
 
-    brain->client->setVelocity(0, 0, cap(_angle * _kp, _maxVtheta, -_maxVtheta));
+    brain->client->setVelocity(0, 0, _angle);
     return NodeStatus::RUNNING;
 }
 
@@ -1636,19 +1418,17 @@ NodeStatus TurnOnSpot::onRunning()
     _lastAngle = curAngle;
     _cumAngle += deltaAngle;
     double turnTime = brain->msecsSince(_timeStart);
-    const double remaining = _angle - _cumAngle;
-    if (fabs(remaining) <= _tolerance || turnTime > _msecLimit) {
+    if (
+        fabs(_cumAngle) - fabs(_angle) > -0.1
+        || turnTime > _msecLimit
+    ) {
         brain->client->setVelocity(0, 0, 0);
         return NodeStatus::SUCCESS;
     }
 
-    brain->client->setVelocity(0, 0, cap(remaining * _kp, _maxVtheta, -_maxVtheta));
+    // else 
+    brain->client->setVelocity(0, 0, (_angle - _cumAngle)*2);
     return NodeStatus::RUNNING;
-}
-
-void TurnOnSpot::onHalted()
-{
-    brain->client->setVelocity(0, 0, 0);
 }
 
 NodeStatus MoveToPoseOnField::tick()

@@ -142,58 +142,25 @@ public:
     static PortsList providedPorts()
     {
         return {
-            InputPort<string>("search_mode", "smooth", "smooth | sine"),
-            InputPort<string>("smooth_pitches", "0.75,0.50,0.35", "Comma-separated pitch rows for smooth ball search"),
-            InputPort<double>("min_yaw", -1.0, "Minimum yaw used by smooth ball search"),
-            InputPort<double>("max_yaw", 1.0, "Maximum yaw used by smooth ball search"),
-            InputPort<double>("yaw_speed", 0.75, "Nominal smooth search yaw speed in rad/s"),
-            InputPort<double>("pitch_speed", 0.35, "Nominal smooth search pitch speed in rad/s"),
-            InputPort<double>("command_hz", 25.0, "Smooth search head command rate"),
-            InputPort<double>("dwell_msec", 80.0, "Smooth search pause at each pitch/yaw target"),
             InputPort<double>("low_pitch", -0.314, "Lowest/downward pitch used while sweeping for the ball"),
             InputPort<double>("high_pitch", 0.45, "Highest pitch used while sweeping for the ball"),
             InputPort<double>("yaw_limit", 1.1, "Maximum absolute yaw used while sweeping for the ball"),
             InputPort<double>("sweep_msec", 3000.0, "Milliseconds for one left-right-left head sweep"),
             InputPort<double>("pitch_cycle_msec", 6000.0, "Milliseconds for one high-low-high pitch cycle"),
             InputPort<double>("cmd_interval_msec", 100.0, "Minimum time between head commands"),
-            InputPort<bool>("turn_body_on_loss", true, "Rotate toward the most recent ball yaw by a limited angle after losing sight"),
-            InputPort<double>("lost_turn_msec", 3500.0, "Maximum age of the recent lost-ball direction before body turn is allowed"),
+            InputPort<bool>("turn_body_on_loss", true, "Rotate toward the most recent ball yaw for a short time after losing sight"),
+            InputPort<double>("lost_turn_msec", 1200.0, "Milliseconds to keep turning toward the recent lost-ball direction"),
             InputPort<double>("lost_turn_speed", 0.25, "Body yaw speed while turning toward a recently lost ball"),
             InputPort<double>("lost_turn_min_yaw", 0.08, "Minimum remembered ball yaw required before body turn is used"),
-            InputPort<double>("lost_turn_degrees", 25.0, "Maximum body yaw angle to turn toward the recently lost ball"),
-            InputPort<double>("lost_turn_tolerance_degrees", 4.0, "Yaw tolerance before the lost-ball body turn stops"),
-            InputPort<double>("lost_turn_timeout_msec", 3000.0, "Safety timeout for a single lost-ball body turn"),
         };
     }
 
     NodeStatus tick() override;
 
 private:
-    void resetLostBallTurn(bool stopBody);
-    void updateLostBallTurn(bool enabled, double maxRecentLostMsec, double turnSpeed, double minYaw,
-                            double turnDegrees, double toleranceDegrees, double timeoutMsec);
-
     rclcpp::Time _timeSearchStart;
     rclcpp::Time _timeLastCmd;
     long _cmdRestartIntervalMSec;
-    bool _smoothSearchActive = false;
-    bool _smoothDwellActive = false;
-    size_t _smoothTargetIndex = 0;
-    double _smoothStartPitch = 0.0;
-    double _smoothStartYaw = 0.0;
-    double _smoothTargetPitch = 0.0;
-    double _smoothTargetYaw = 0.0;
-    double _smoothCurrentPitch = 0.0;
-    double _smoothCurrentYaw = 0.0;
-    double _smoothSegmentMsec = 0.0;
-    rclcpp::Time _smoothSegmentStartTime;
-    rclcpp::Time _smoothDwellStartTime;
-    bool _lostTurnActive = false;
-    bool _lostTurnComplete = false;
-    double _lostTurnLastOdomTheta = 0.0;
-    double _lostTurnAccumAngle = 0.0;
-    double _lostTurnTargetAngle = 0.0;
-    rclcpp::Time _lostTurnStartTime;
 
     Brain *brain;
 
@@ -240,7 +207,7 @@ public:
 
     NodeStatus onRunning() override;
 
-    void onHalted() override;
+    void onHalted() override {};
 
 private:
     double _cmdSequence[7][2] = {
@@ -266,11 +233,7 @@ public:
     {
         return {
             InputPort<double>("rad", 0, "How many radians to turn, positive for left"),
-            InputPort<bool>("towards_ball", false, "If true, ignore the sign of rad and turn towards the last seen ball direction"),
-            InputPort<double>("tolerance_deg", 2.0, "Stop when the remaining yaw angle is within this tolerance"),
-            InputPort<double>("timeout_msec", 8000.0, "Safety timeout for the turn"),
-            InputPort<double>("max_vtheta", 0.35, "Maximum yaw velocity command"),
-            InputPort<double>("kp", 1.6, "Proportional gain from remaining angle to yaw velocity"),
+            InputPort<bool>("towards_ball", false, "If true, ignore the sign of rad and turn towards the last seen ball direction")
         };
     }
 
@@ -278,16 +241,13 @@ public:
 
     NodeStatus onRunning() override;
 
-    void onHalted() override;
+    void onHalted() override {};
 
 private:
-    double _lastAngle;
+    double _lastAngle; 
     double _angle;
-    double _cumAngle;
-    double _msecLimit = 8000;
-    double _tolerance = 0.034906585;
-    double _maxVtheta = 0.35;
-    double _kp = 1.6;
+    double _cumAngle; 
+    double _msecLimit = 5000;  
     rclcpp::Time _timeStart;
     Brain *brain;
 };
