@@ -33,6 +33,13 @@ from sensor_msgs.msg import CameraInfo, Image, PointCloud2
 from std_msgs.msg import Header
 
 try:
+    from vision_interface.msg import Ball as VisionBall
+    from vision_interface.msg import Detections
+except ImportError:  # The monitor still works without the soccer vision messages.
+    VisionBall = None
+    Detections = None
+
+try:
     from sensor_msgs_py import point_cloud2
 except ImportError:  # Keep terminal detection usable even if point cloud helpers are absent.
     point_cloud2 = None
@@ -79,6 +86,16 @@ class ObstacleReport:
     nearest_x: float
     median_y: float
     max_height: float
+
+
+@dataclass
+class BallObservation:
+    """Recent ball position from the YOLO/vision pipeline."""
+
+    x: float
+    y: float
+    confidence: float
+    updated_at: float
 
 
 def load_vision_config(path: str) -> dict:
@@ -275,6 +292,7 @@ class DepthObstacleMonitor(Node):
         self.detector = FrontObstacleDetector(args)
         self.last_print_time = 0.0
         self.last_detection_state = False
+        self.ball_observations: list[BallObservation] = []
 
         self.create_subscription(
             CameraInfo,
@@ -288,6 +306,29 @@ class DepthObstacleMonitor(Node):
             self.on_depth,
             qos_profile_sensor_data,
         )
+
+        if args.filter_ball:
+            if Detections is not None:
+                self.create_subscription(
+                    Detections,
+                    args.detection_topic,
+                    self.on_detections,
+                    10,
+                )
+                self.get_logger().info(f"Filtering ball from obstacles using {args.detection_topic}")
+            else:
+                self.get_logger().warning("vision_interface/Detections unavailable; detection ball filter disabled")
+
+            if VisionBall is not None:
+                self.create_subscription(
+                    VisionBall,
+                    args.ball_topic,
+                    self.on_ball,
+                    10,
+                )
+                self.get_logger().info(f"Filtering ball from obstacles using {args.ball_topic}")
+            else:
+                self.get_logger().warning("vision_interface/Ball unavailable; ball topic filter disabled")
 
         self.point_pub = None
         self.obstacle_point_pub = None
@@ -304,6 +345,39 @@ class DepthObstacleMonitor(Node):
     def on_camera_info(self, msg: CameraInfo) -> None:
         self.intrinsics = CameraIntrinsics.from_camera_info(msg)
 
+    def on_detections(self, msg) -> None:
+        now = time.time()
+        for obj in msg.detected_objects:
+            if obj.label.strip().lower() != "ball":
+                continue
+            if obj.confidence < self.args.ball_filter_min_confidence:
+                continue
+            if len(obj.position_projection) < 2:
+                continue
+            self.ball_observations.append(
+                BallObservation(
+                    x=float(obj.position_projection[0]),
+                    y=float(obj.position_projection[1]),
+                    confidence=float(obj.confidence),
+                    updated_at=now,
+                )
+            )
+        self.prune_ball_observations(now)
+
+    def on_ball(self, msg) -> None:
+        if msg.confidence < self.args.ball_filter_min_confidence:
+            return
+        now = time.time()
+        self.ball_observations.append(
+            BallObservation(
+                x=float(msg.x),
+                y=float(msg.y),
+                confidence=float(msg.confidence),
+                updated_at=now,
+            )
+        )
+        self.prune_ball_observations(now)
+
     def on_depth(self, msg: Image) -> None:
         if self.intrinsics is None:
             self.get_logger().warning("No CameraInfo/intrinsics yet; skipping depth frame")
@@ -316,6 +390,7 @@ class DepthObstacleMonitor(Node):
             return
 
         local_map = self.projector.project(depth_m, self.intrinsics)
+        local_map = self.remove_ball_from_obstacles(local_map)
         report = self.detector.detect(local_map.obstacle_points)
 
         if self.point_pub is not None:
@@ -355,6 +430,41 @@ class DepthObstacleMonitor(Node):
             f"obstacle_like={len(local_map.obstacle_points)} front_points={report.count}"
         )
 
+    def fresh_ball_observations(self) -> list[BallObservation]:
+        now = time.time()
+        self.prune_ball_observations(now)
+        return list(self.ball_observations)
+
+    def prune_ball_observations(self, now: float) -> None:
+        cutoff = now - self.args.ball_filter_max_age
+        self.ball_observations = [
+            observation
+            for observation in self.ball_observations
+            if observation.updated_at >= cutoff
+        ][-self.args.ball_filter_max_observations :]
+
+    def remove_ball_from_obstacles(self, local_map: LocalMap) -> LocalMap:
+        if not self.args.filter_ball or local_map.obstacle_points.size == 0:
+            return local_map
+
+        observations = self.fresh_ball_observations()
+        if not observations:
+            return local_map
+
+        keep = np.ones(local_map.obstacle_points.shape[0], dtype=bool)
+        for ball in observations:
+            dx = np.abs(local_map.obstacle_points[:, 0] - ball.x)
+            dy = np.abs(local_map.obstacle_points[:, 1] - ball.y)
+            matches_ball = dx <= self.args.ball_filter_x_radius
+            matches_ball &= dy <= self.args.ball_filter_y_radius
+            keep &= ~matches_ball
+
+        return LocalMap(
+            points=local_map.points,
+            flat_points=local_map.flat_points,
+            obstacle_points=local_map.obstacle_points[keep],
+        )
+
 
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Monitor T1 depth camera for nearby obstacles.")
@@ -379,6 +489,15 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--min-obstacle-points", type=int, default=30)
     parser.add_argument("--print-interval", type=float, default=0.5)
     parser.add_argument("--frame-id", default="head")
+    parser.add_argument("--filter-ball", action="store_true", default=True)
+    parser.add_argument("--no-filter-ball", action="store_false", dest="filter_ball")
+    parser.add_argument("--detection-topic", default="/booster_soccer/detection")
+    parser.add_argument("--ball-topic", default="/booster_soccer/ball")
+    parser.add_argument("--ball-filter-min-confidence", type=float, default=0.35)
+    parser.add_argument("--ball-filter-max-age", type=float, default=0.75)
+    parser.add_argument("--ball-filter-x-radius", type=float, default=0.35)
+    parser.add_argument("--ball-filter-y-radius", type=float, default=0.30)
+    parser.add_argument("--ball-filter-max-observations", type=int, default=8)
     parser.add_argument("--publish-point-cloud", action="store_true")
     parser.add_argument("--point-cloud-topic", default="/booster_soccer/local_depth_points")
     parser.add_argument("--obstacle-point-cloud-topic", default="/booster_soccer/local_obstacle_points")
@@ -396,6 +515,8 @@ def main() -> None:
     args = build_arg_parser().parse_args()
     if args.sample_step < 1:
         raise SystemExit("--sample-step must be >= 1")
+    if args.ball_filter_max_observations < 1:
+        raise SystemExit("--ball-filter-max-observations must be >= 1")
 
     rclpy.init()
     node = DepthObstacleMonitor(args)

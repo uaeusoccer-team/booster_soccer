@@ -44,6 +44,13 @@ except ImportError:  # Depth overlay is optional and only starts when requested.
     Image = None
 
 try:
+    from vision_interface.msg import Ball as VisionBall
+    from vision_interface.msg import Detections as VisionDetections
+except ImportError:
+    VisionBall = None
+    VisionDetections = None
+
+try:
     import yaml
 except ImportError:
     yaml = None
@@ -77,6 +84,16 @@ class Detection:
 
     def is_ball(self) -> bool:
         return self.label.strip().lower() == "ball"
+
+
+@dataclass
+class BallObservation:
+    """Recent Ball position from the vision pipeline, used to gate depth obstacles."""
+
+    x: float
+    y: float
+    confidence: float
+    updated_at: float
 
 
 @dataclass
@@ -709,7 +726,12 @@ class DepthOverlayBuilder:
         self.args = args
         self.transform = transform
 
-    def build_regions(self, depth_m: object, intrinsics: CameraIntrinsics) -> list[DepthRegion]:
+    def build_regions(
+        self,
+        depth_m: object,
+        intrinsics: CameraIntrinsics,
+        ball_observations: Optional[list[BallObservation]] = None,
+    ) -> list[DepthRegion]:
         samples = self.project(depth_m, intrinsics)
         points = samples.local_points
         if points.size == 0:
@@ -734,8 +756,30 @@ class DepthOverlayBuilder:
         obstacle_regions = self.obstacle_regions_for_components(
             samples, obstacle_mask, height_above_ground
         )
+        obstacle_regions = [
+            region
+            for region in obstacle_regions
+            if not self.region_matches_ball_observation(region, ball_observations or [])
+        ]
         regions.extend(self.merge_obstacle_regions(obstacle_regions))
         return regions
+
+    def region_matches_ball_observation(
+        self,
+        region: DepthRegion,
+        ball_observations: list[BallObservation],
+    ) -> bool:
+        if region.kind != "obstacle":
+            return False
+
+        for ball in ball_observations:
+            close_x = abs(region.mean_x - ball.x) <= self.args.depth_ball_filter_x_radius
+            close_x |= abs(region.nearest_x - ball.x) <= self.args.depth_ball_filter_x_radius
+            close_y = abs(region.mean_y - ball.y) <= self.args.depth_ball_filter_y_radius
+            ball_sized = region.count <= self.args.depth_ball_filter_max_region_points
+            if close_x and close_y and ball_sized:
+                return True
+        return False
 
     def fit_ground_plane(self, samples: DepthPixelMap) -> object:
         """Fit z = ax + by + c for the currently visible floor.
@@ -1247,6 +1291,8 @@ class DepthOverlayNode(Node):
     def __init__(self, store: FrameStore, args: argparse.Namespace) -> None:
         super().__init__("booster_camera_depth_overlay")
         self.store = store
+        self.args = args
+        self.ball_observations: list[BallObservation] = []
         camera_config = load_vision_config(args.depth_vision_config)
         self.intrinsics = intrinsics_from_config(camera_config)
 
@@ -1262,12 +1308,100 @@ class DepthOverlayNode(Node):
             qos_profile_sensor_data,
         )
         self.create_subscription(Image, args.depth_topic, self.on_depth, qos_profile_sensor_data)
+
+        if args.depth_filter_ball:
+            if VisionDetections is not None:
+                self.create_subscription(
+                    VisionDetections,
+                    args.depth_detection_topic,
+                    self.on_detections,
+                    10,
+                )
+                self.get_logger().info(f"Depth overlay ball filter listening on {args.depth_detection_topic}")
+            else:
+                self.get_logger().warning("vision_interface/Detections unavailable; detection ball filter disabled")
+
+            if VisionBall is not None:
+                self.create_subscription(
+                    VisionBall,
+                    args.depth_ball_topic,
+                    self.on_ball,
+                    10,
+                )
+                self.get_logger().info(f"Depth overlay ball filter listening on {args.depth_ball_topic}")
+            else:
+                self.get_logger().warning("vision_interface/Ball unavailable; ball topic filter disabled")
+
         self.store.set_depth_status(connected=True)
         self.get_logger().info(f"Depth overlay listening on {args.depth_topic}")
         self.get_logger().info(f"Depth overlay camera info on {args.depth_camera_info_topic}")
 
     def on_camera_info(self, msg: CameraInfo) -> None:
         self.intrinsics = CameraIntrinsics.from_camera_info(msg)
+
+    def on_detections(self, msg) -> None:
+        now = time.time()
+        draw_detections = []
+        for obj in msg.detected_objects:
+            xmin = int(obj.xmin)
+            ymin = int(obj.ymin)
+            xmax = int(obj.xmax)
+            ymax = int(obj.ymax)
+            if xmax > xmin and ymax > ymin:
+                draw_detections.append(
+                    Detection(
+                        label=str(obj.label),
+                        confidence=float(obj.confidence),
+                        xmin=xmin,
+                        ymin=ymin,
+                        xmax=xmax,
+                        ymax=ymax,
+                    )
+                )
+
+            if obj.label.strip().lower() != "ball":
+                continue
+            if obj.confidence < self.args.depth_ball_filter_min_confidence:
+                continue
+            if len(obj.position_projection) < 2:
+                continue
+            self.ball_observations.append(
+                BallObservation(
+                    x=float(obj.position_projection[0]),
+                    y=float(obj.position_projection[1]),
+                    confidence=float(obj.confidence),
+                    updated_at=now,
+                )
+            )
+        self.prune_ball_observations(now)
+        self.store.set_detections(draw_detections)
+
+    def on_ball(self, msg) -> None:
+        if msg.confidence < self.args.depth_ball_filter_min_confidence:
+            return
+        now = time.time()
+        self.ball_observations.append(
+            BallObservation(
+                x=float(msg.x),
+                y=float(msg.y),
+                confidence=float(msg.confidence),
+                updated_at=now,
+            )
+        )
+        self.prune_ball_observations(now)
+
+    def fresh_ball_observations(self) -> list[BallObservation]:
+        now = time.time()
+        self.prune_ball_observations(now)
+        return list(self.ball_observations)
+
+    def prune_ball_observations(self, now: float) -> None:
+        cutoff = now - self.args.depth_ball_filter_max_age
+        self.ball_observations = [
+            observation
+            for observation in self.ball_observations
+            if observation.updated_at >= cutoff
+        ][-self.args.depth_ball_filter_max_observations :]
 
     def on_depth(self, msg: Image) -> None:
         if self.intrinsics is None:
@@ -1276,7 +1410,11 @@ class DepthOverlayNode(Node):
 
         try:
             depth_m = image_to_depth_meters(msg)
-            regions = self.builder.build_regions(depth_m, self.intrinsics)
+            regions = self.builder.build_regions(
+                depth_m,
+                self.intrinsics,
+                self.fresh_ball_observations(),
+            )
         except Exception as exc:
             self.store.set_depth_status(connected=True, error=str(exc))
             return
@@ -1768,6 +1906,22 @@ def parse_args() -> argparse.Namespace:
         default="src/vision/config/vision.yaml",
         help="vision.yaml path used for fallback intrinsics/extrinsics",
     )
+    parser.add_argument("--depth-detection-topic", default="/booster_soccer/detection")
+    parser.add_argument("--depth-ball-topic", default="/booster_soccer/ball")
+    parser.add_argument(
+        "--depth-filter-ball",
+        nargs="?",
+        const=True,
+        default=True,
+        type=str_to_bool,
+        help="remove depth obstacle regions that match recent vision Ball detections",
+    )
+    parser.add_argument("--depth-ball-filter-min-confidence", type=float, default=0.35)
+    parser.add_argument("--depth-ball-filter-max-age", type=float, default=0.75)
+    parser.add_argument("--depth-ball-filter-x-radius", type=float, default=0.40)
+    parser.add_argument("--depth-ball-filter-y-radius", type=float, default=0.35)
+    parser.add_argument("--depth-ball-filter-max-region-points", type=int, default=450)
+    parser.add_argument("--depth-ball-filter-max-observations", type=int, default=8)
     parser.add_argument("--depth-sample-step", type=int, default=8, help="sample every Nth depth pixel")
     parser.add_argument("--depth-min-depth", type=float, default=0.15)
     parser.add_argument("--depth-max-depth", type=float, default=6.0)
@@ -1931,6 +2085,10 @@ def parse_args() -> argparse.Namespace:
         raise SystemExit("--depth-obstacle-component-min-points-per-cell must be >= 1")
     if args.depth_obstacle_component_gap_cells < 0:
         raise SystemExit("--depth-obstacle-component-gap-cells must be >= 0")
+    if args.depth_ball_filter_max_observations < 1:
+        raise SystemExit("--depth-ball-filter-max-observations must be >= 1")
+    if args.depth_ball_filter_max_region_points < 1:
+        raise SystemExit("--depth-ball-filter-max-region-points must be >= 1")
     args.depth_ground_image_min_v_ratio = min(1.0, max(0.0, args.depth_ground_image_min_v_ratio))
     args.depth_ground_fit_min_v_ratio = min(1.0, max(0.0, args.depth_ground_fit_min_v_ratio))
     args.depth_ground_fit_percentile = min(100.0, max(0.0, args.depth_ground_fit_percentile))
