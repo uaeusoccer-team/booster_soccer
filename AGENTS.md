@@ -387,6 +387,7 @@ sudo tcpdump -ni any udp
 ## Development Rules
 
 - Prefer existing behavior tree nodes and `RobotClient` functions over new motion pathways.
+- For new robot features or advanced SDK behavior, inspect `/Users/Ahmad/booster_robotics_sdk` as a reference; do not modify it unless explicitly asked.
 - Keep changes focused; avoid unrelated refactors and generated artifact churn.
 - Do not copy `build/`, `install/`, or `log/` from laptop to robot.
 - Do not edit `/opt/booster/BoosterRos2/fastdds_profile.xml` unless the user explicitly approves it.
