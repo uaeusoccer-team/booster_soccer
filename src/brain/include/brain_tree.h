@@ -142,6 +142,14 @@ public:
     static PortsList providedPorts()
     {
         return {
+            InputPort<string>("search_mode", "smooth", "smooth | sine"),
+            InputPort<string>("smooth_pitches", "0.75,0.50,0.35", "Comma-separated pitch rows for smooth ball search"),
+            InputPort<double>("min_yaw", -1.0, "Minimum yaw used by smooth ball search"),
+            InputPort<double>("max_yaw", 1.0, "Maximum yaw used by smooth ball search"),
+            InputPort<double>("yaw_speed", 0.75, "Nominal smooth search yaw speed in rad/s"),
+            InputPort<double>("pitch_speed", 0.35, "Nominal smooth search pitch speed in rad/s"),
+            InputPort<double>("command_hz", 25.0, "Smooth search head command rate"),
+            InputPort<double>("dwell_msec", 80.0, "Smooth search pause at each pitch/yaw target"),
             InputPort<double>("low_pitch", -0.314, "Lowest/downward pitch used while sweeping for the ball"),
             InputPort<double>("high_pitch", 0.45, "Highest pitch used while sweeping for the ball"),
             InputPort<double>("yaw_limit", 1.1, "Maximum absolute yaw used while sweeping for the ball"),
@@ -161,6 +169,18 @@ private:
     rclcpp::Time _timeSearchStart;
     rclcpp::Time _timeLastCmd;
     long _cmdRestartIntervalMSec;
+    bool _smoothSearchActive = false;
+    bool _smoothDwellActive = false;
+    size_t _smoothTargetIndex = 0;
+    double _smoothStartPitch = 0.0;
+    double _smoothStartYaw = 0.0;
+    double _smoothTargetPitch = 0.0;
+    double _smoothTargetYaw = 0.0;
+    double _smoothCurrentPitch = 0.0;
+    double _smoothCurrentYaw = 0.0;
+    double _smoothSegmentMsec = 0.0;
+    rclcpp::Time _smoothSegmentStartTime;
+    rclcpp::Time _smoothDwellStartTime;
 
     Brain *brain;
 
