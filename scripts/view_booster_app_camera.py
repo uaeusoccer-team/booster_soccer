@@ -14,6 +14,7 @@ import base64
 import hashlib
 import http.server
 import json
+import math
 import os
 import subprocess
 import socket
@@ -25,10 +26,34 @@ import webbrowser
 from dataclasses import dataclass, field
 from typing import Optional, Union
 
+try:
+    import numpy as np
+except ImportError:  # The camera stream still works when ROS/numpy is unavailable.
+    np = None
+
+try:
+    import rclpy
+    from rclpy.node import Node
+    from rclpy.qos import qos_profile_sensor_data
+    from sensor_msgs.msg import CameraInfo, Image
+except ImportError:  # Depth overlay is optional and only starts when requested.
+    rclpy = None
+    Node = object
+    qos_profile_sensor_data = None
+    CameraInfo = None
+    Image = None
+
+try:
+    import yaml
+except ImportError:
+    yaml = None
+
 
 JPEG_SOI = b"\xff\xd8"
 JPEG_EOI = b"\xff\xd9"
 DETECTION_FIELDS = {"label", "confidence", "xmin", "ymin", "xmax", "ymax"}
+DEFAULT_DEPTH_TOPIC = "/boostercamera/head/depth"
+DEFAULT_DEPTH_CAMERA_INFO_TOPIC = "/boostercamera/head/depth/camera_info"
 
 
 @dataclass
@@ -55,10 +80,66 @@ class Detection:
 
 
 @dataclass
+class CameraIntrinsics:
+    """Pinhole camera intrinsics used to turn depth pixels into 3D rays."""
+
+    fx: float
+    fy: float
+    cx: float
+    cy: float
+
+    @classmethod
+    def from_camera_info(cls, msg: CameraInfo) -> "CameraIntrinsics":
+        return cls(fx=msg.k[0], fy=msg.k[4], cx=msg.k[2], cy=msg.k[5])
+
+
+@dataclass
+class DepthPixelMap:
+    """Projected depth samples plus the source image pixels they came from."""
+
+    local_points: object
+    pixel_u: object
+    pixel_v: object
+    image_width: int
+    image_height: int
+
+
+@dataclass
+class DepthRegion:
+    """One drawable depth classification region for the browser overlay."""
+
+    kind: str
+    polygon: list[list[int]]
+    count: int
+    mean_x: float
+    mean_y: float
+    nearest_x: float
+    max_height: float
+    source_width: int
+    source_height: int
+    front: bool = False
+
+    def as_dict(self) -> dict[str, object]:
+        return {
+            "kind": self.kind,
+            "polygon": self.polygon,
+            "count": self.count,
+            "mean_x": self.mean_x,
+            "mean_y": self.mean_y,
+            "nearest_x": self.nearest_x,
+            "max_height": self.max_height,
+            "source_width": self.source_width,
+            "source_height": self.source_height,
+            "front": self.front,
+        }
+
+
+@dataclass
 class FrameStore:
     condition: threading.Condition = field(default_factory=threading.Condition)
     jpeg: Optional[bytes] = None
     detections: list[Detection] = field(default_factory=list)
+    depth_regions: list[DepthRegion] = field(default_factory=list)
     yolo_only_ball: bool = False
     frame_id: int = 0
     last_error: str = ""
@@ -67,6 +148,9 @@ class FrameStore:
     detections_connected: bool = False
     detections_last_error: str = ""
     detections_last_update: float = 0.0
+    depth_connected: bool = False
+    depth_last_error: str = ""
+    depth_last_update: float = 0.0
 
     def set_frame(self, jpeg: bytes) -> None:
         with self.condition:
@@ -105,12 +189,29 @@ class FrameStore:
                 self.detections_last_error = error
             self.condition.notify_all()
 
+    def set_depth_regions(self, regions: list[DepthRegion]) -> None:
+        with self.condition:
+            self.depth_regions = regions
+            self.depth_last_update = time.time()
+            self.depth_last_error = ""
+            self.depth_connected = True
+            self.condition.notify_all()
+
+    def set_depth_status(self, *, connected: Optional[bool] = None, error: str = "") -> None:
+        with self.condition:
+            if connected is not None:
+                self.depth_connected = connected
+            if error:
+                self.depth_last_error = error
+            self.condition.notify_all()
+
     def snapshot(self) -> tuple[int, Optional[bytes], dict[str, object]]:
         with self.condition:
             age = time.time() - self.last_update if self.last_update else None
             detections_age = (
                 time.time() - self.detections_last_update if self.detections_last_update else None
             )
+            depth_age = time.time() - self.depth_last_update if self.depth_last_update else None
             stats = {
                 "connected": self.connected,
                 "frame_id": self.frame_id,
@@ -120,6 +221,10 @@ class FrameStore:
                 "detections_count": len(self.detections),
                 "detections_last_update_age_sec": detections_age,
                 "detections_last_error": self.detections_last_error,
+                "depth_connected": self.depth_connected,
+                "depth_region_count": len(self.depth_regions),
+                "depth_last_update_age_sec": depth_age,
+                "depth_last_error": self.depth_last_error,
             }
             return self.frame_id, self.jpeg, stats
 
@@ -135,6 +240,19 @@ class FrameStore:
                     "count": len(self.detections),
                     "last_update_age_sec": age,
                     "last_error": self.detections_last_error,
+                },
+            }
+
+    def depth_snapshot(self) -> dict[str, object]:
+        with self.condition:
+            age = time.time() - self.depth_last_update if self.depth_last_update else None
+            return {
+                "regions": [region.as_dict() for region in self.depth_regions],
+                "stats": {
+                    "connected": self.depth_connected,
+                    "count": len(self.depth_regions),
+                    "last_update_age_sec": age,
+                    "last_error": self.depth_last_error,
                 },
             }
 
@@ -248,6 +366,13 @@ def camera_reader(store: FrameStore, host: str, port: int, path: str, timeout: f
 
 
 class RosDetectionParser:
+    """Parse `ros2 topic echo` text into lightweight Detection objects.
+
+    The viewer is mostly standard-library code, so the YOLO layer can work by
+    shelling out to `ros2 topic echo` instead of importing the custom detection
+    message package into this script.
+    """
+
     def __init__(self, on_message) -> None:
         self.on_message = on_message
         self.objects: list[dict[str, object]] = []
@@ -365,6 +490,288 @@ def detection_reader(
         time.sleep(restart_delay)
 
 
+def load_vision_config(path: str) -> dict[str, object]:
+    """Load camera defaults from vision.yaml when the file is available."""
+
+    if not path or yaml is None or not os.path.exists(path):
+        return {}
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            data = yaml.safe_load(handle) or {}
+    except Exception:
+        return {}
+    return data.get("camera", {}) or {}
+
+
+def matrix_from_config(camera_config: dict[str, object]) -> Optional[object]:
+    """Return the 4x4 camera extrinsic matrix from vision.yaml, if present."""
+
+    if np is None:
+        return None
+    extrin = camera_config.get("extrin")
+    if not extrin:
+        return None
+    matrix = np.array(extrin, dtype=np.float32)
+    if matrix.shape != (4, 4):
+        return None
+    return matrix
+
+
+def default_optical_to_local_matrix() -> object:
+    """Fallback transform: ROS optical frame -> local forward/left/up frame.
+
+    Depth camera optical frame is normally x-right, y-down, z-forward. The map
+    layer uses a robot-like frame because it makes obstacle metrics easier to
+    read in the browser:
+        local x = forward, local y = left, local z = up
+    """
+
+    return np.array(
+        [
+            [0.0, 0.0, 1.0, 0.0],
+            [-1.0, 0.0, 0.0, 0.0],
+            [0.0, -1.0, 0.0, 0.0],
+            [0.0, 0.0, 0.0, 1.0],
+        ],
+        dtype=np.float32,
+    )
+
+
+def intrinsics_from_config(camera_config: dict[str, object]) -> Optional[CameraIntrinsics]:
+    """Read fallback intrinsics from vision.yaml before CameraInfo arrives."""
+
+    intrin = camera_config.get("intrin")
+    if not isinstance(intrin, dict):
+        return None
+    required = ("fx", "fy", "cx", "cy")
+    if not all(name in intrin for name in required):
+        return None
+    return CameraIntrinsics(
+        fx=float(intrin["fx"]),
+        fy=float(intrin["fy"]),
+        cx=float(intrin["cx"]),
+        cy=float(intrin["cy"]),
+    )
+
+
+def image_to_depth_meters(msg: Image) -> object:
+    """Decode ROS depth image data into a float32 depth array in meters."""
+
+    encoding = msg.encoding.lower()
+    if encoding in ("16uc1", "mono16"):
+        dtype = ">u2" if msg.is_bigendian else "<u2"
+        row_width = msg.step // np.dtype(dtype).itemsize
+        raw = np.frombuffer(msg.data, dtype=dtype).reshape(msg.height, row_width)
+        return raw[:, : msg.width].astype(np.float32) / 1000.0
+
+    if encoding == "32fc1":
+        dtype = ">f4" if msg.is_bigendian else "<f4"
+        row_width = msg.step // np.dtype(dtype).itemsize
+        raw = np.frombuffer(msg.data, dtype=dtype).reshape(msg.height, row_width)
+        return raw[:, : msg.width].astype(np.float32)
+
+    raise ValueError(f"unsupported depth encoding: {msg.encoding}")
+
+
+class DepthOverlayBuilder:
+    """Builds green flat-surface and red obstacle polygons from depth frames."""
+
+    def __init__(self, args: argparse.Namespace, transform: object) -> None:
+        self.args = args
+        self.transform = transform
+
+    def build_regions(self, depth_m: object, intrinsics: CameraIntrinsics) -> list[DepthRegion]:
+        samples = self.project(depth_m, intrinsics)
+        points = samples.local_points
+        if points.size == 0:
+            return []
+
+        # These labels intentionally use simple height thresholds. They are
+        # easy to tune on the robot and match the standalone terminal monitor.
+        flat_mask = points[:, 2] >= self.args.depth_ground_min_height
+        flat_mask &= points[:, 2] <= self.args.depth_ground_max_height
+
+        obstacle_mask = points[:, 2] >= self.args.depth_obstacle_min_height
+        obstacle_mask &= points[:, 2] <= self.args.depth_obstacle_max_height
+
+        regions = []
+        regions.extend(self.regions_for_mask("flat", samples, flat_mask))
+        regions.extend(self.regions_for_mask("obstacle", samples, obstacle_mask))
+        return regions
+
+    def project(self, depth_m: object, intrinsics: CameraIntrinsics) -> DepthPixelMap:
+        height, width = depth_m.shape
+        ys = np.arange(0, height, self.args.depth_sample_step)
+        xs = np.arange(0, width, self.args.depth_sample_step)
+        grid_x, grid_y = np.meshgrid(xs, ys)
+        sampled_depth = depth_m[grid_y, grid_x]
+
+        valid = np.isfinite(sampled_depth)
+        valid &= sampled_depth >= self.args.depth_min_depth
+        valid &= sampled_depth <= self.args.depth_max_depth
+        if not np.any(valid):
+            empty = np.empty((0, 3), dtype=np.float32)
+            return DepthPixelMap(empty, np.empty(0), np.empty(0), width, height)
+
+        u = grid_x[valid].astype(np.float32)
+        v = grid_y[valid].astype(np.float32)
+        z_cam = sampled_depth[valid].astype(np.float32)
+        x_cam = (u - intrinsics.cx) * z_cam / intrinsics.fx
+        y_cam = (v - intrinsics.cy) * z_cam / intrinsics.fy
+
+        ones = np.ones_like(z_cam)
+        points_cam = np.vstack((x_cam, y_cam, z_cam, ones))
+        points_local = (self.transform @ points_cam)[:3, :].T
+
+        # Keep only the near-field region that matters for the robot's local
+        # obstacle awareness, and ignore the robot body directly below camera.
+        x = points_local[:, 0]
+        y = points_local[:, 1]
+        in_map = x >= self.args.depth_map_min_x
+        in_map &= x <= self.args.depth_map_max_x
+        in_map &= np.abs(y) <= self.args.depth_map_half_width
+
+        self_body = x <= self.args.depth_self_exclusion_x
+        self_body &= np.abs(y) <= self.args.depth_self_exclusion_y
+        keep = in_map & ~self_body
+
+        return DepthPixelMap(points_local[keep], u[keep], v[keep], width, height)
+
+    def regions_for_mask(
+        self,
+        kind: str,
+        samples: DepthPixelMap,
+        mask: object,
+    ) -> list[DepthRegion]:
+        if not np.any(mask):
+            return []
+
+        points = samples.local_points[mask]
+        u = samples.pixel_u[mask]
+        v = samples.pixel_v[mask]
+        cols = max(1, self.args.depth_region_cols)
+        rows = max(1, self.args.depth_region_rows)
+        max_polygons = max(0, self.args.depth_max_polygons_per_class)
+        min_points = max(1, self.args.depth_min_region_points)
+        pad = max(0, self.args.depth_polygon_padding_px)
+
+        cell_x = np.clip((u / max(1, samples.image_width) * cols).astype(np.int32), 0, cols - 1)
+        cell_y = np.clip((v / max(1, samples.image_height) * rows).astype(np.int32), 0, rows - 1)
+        cell_id = cell_y * cols + cell_x
+
+        regions = []
+        for key in np.unique(cell_id):
+            indices = np.flatnonzero(cell_id == key)
+            if indices.size < min_points:
+                continue
+
+            region_u = u[indices]
+            region_v = v[indices]
+            region_points = points[indices]
+            xmin = int(max(0, math.floor(float(np.min(region_u)) - pad)))
+            ymin = int(max(0, math.floor(float(np.min(region_v)) - pad)))
+            xmax = int(min(samples.image_width - 1, math.ceil(float(np.max(region_u)) + pad)))
+            ymax = int(min(samples.image_height - 1, math.ceil(float(np.max(region_v)) + pad)))
+            if xmax <= xmin or ymax <= ymin:
+                continue
+
+            mean_x = float(np.mean(region_points[:, 0]))
+            mean_y = float(np.mean(region_points[:, 1]))
+            nearest_x = float(np.min(region_points[:, 0]))
+            max_height = float(np.max(region_points[:, 2]))
+            front = (
+                kind == "obstacle"
+                and self.args.depth_front_min_x <= nearest_x <= self.args.depth_front_max_x
+                and abs(mean_y) <= self.args.depth_front_half_width
+            )
+            regions.append(
+                DepthRegion(
+                    kind=kind,
+                    polygon=[[xmin, ymin], [xmax, ymin], [xmax, ymax], [xmin, ymax]],
+                    count=int(indices.size),
+                    mean_x=mean_x,
+                    mean_y=mean_y,
+                    nearest_x=nearest_x,
+                    max_height=max_height,
+                    source_width=samples.image_width,
+                    source_height=samples.image_height,
+                    front=front,
+                )
+            )
+
+        # Show the strongest evidence first. Obstacles with many points produce
+        # larger, more stable red polygons in the overlay.
+        regions.sort(key=lambda region: region.count, reverse=True)
+        return regions[:max_polygons] if max_polygons else regions
+
+
+class DepthOverlayNode(Node):
+    """ROS node that feeds depth-derived regions into the web server store."""
+
+    def __init__(self, store: FrameStore, args: argparse.Namespace) -> None:
+        super().__init__("booster_camera_depth_overlay")
+        self.store = store
+        camera_config = load_vision_config(args.depth_vision_config)
+        self.intrinsics = intrinsics_from_config(camera_config)
+
+        transform = matrix_from_config(camera_config) if args.depth_use_config_extrin else None
+        if transform is None:
+            transform = default_optical_to_local_matrix()
+
+        self.builder = DepthOverlayBuilder(args, transform)
+        self.create_subscription(
+            CameraInfo,
+            args.depth_camera_info_topic,
+            self.on_camera_info,
+            qos_profile_sensor_data,
+        )
+        self.create_subscription(Image, args.depth_topic, self.on_depth, qos_profile_sensor_data)
+        self.store.set_depth_status(connected=True)
+        self.get_logger().info(f"Depth overlay listening on {args.depth_topic}")
+        self.get_logger().info(f"Depth overlay camera info on {args.depth_camera_info_topic}")
+
+    def on_camera_info(self, msg: CameraInfo) -> None:
+        self.intrinsics = CameraIntrinsics.from_camera_info(msg)
+
+    def on_depth(self, msg: Image) -> None:
+        if self.intrinsics is None:
+            self.store.set_depth_status(connected=True, error="waiting for depth CameraInfo")
+            return
+
+        try:
+            depth_m = image_to_depth_meters(msg)
+            regions = self.builder.build_regions(depth_m, self.intrinsics)
+        except Exception as exc:
+            self.store.set_depth_status(connected=True, error=str(exc))
+            return
+
+        self.store.set_depth_regions(regions)
+
+
+def depth_overlay_reader(store: FrameStore, args: argparse.Namespace) -> None:
+    """Run the optional ROS depth subscriber in a background thread."""
+
+    if np is None or rclpy is None:
+        store.set_depth_status(
+            connected=False,
+            error="depth overlay needs numpy, rclpy, and sensor_msgs on the robot",
+        )
+        return
+
+    node = None
+    try:
+        rclpy.init(args=None)
+        node = DepthOverlayNode(store, args)
+        rclpy.spin(node)
+    except Exception as exc:
+        store.set_depth_status(connected=False, error=str(exc))
+    finally:
+        if node is not None:
+            node.destroy_node()
+        if rclpy.ok():
+            rclpy.shutdown()
+
+
 def make_handler(store: FrameStore):
     class Handler(http.server.BaseHTTPRequestHandler):
         server_version = "BoosterCameraViewer/1.0"
@@ -411,6 +818,16 @@ def make_handler(store: FrameStore):
 
             if self.path == "/detections.json":
                 data = json.dumps(store.detections_snapshot()).encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Cache-Control", "no-store")
+                self.send_header("Content-Length", str(len(data)))
+                self.end_headers()
+                self.wfile.write(data)
+                return
+
+            if self.path == "/depth_overlay.json":
+                data = json.dumps(store.depth_snapshot()).encode("utf-8")
                 self.send_response(200)
                 self.send_header("Content-Type", "application/json")
                 self.send_header("Cache-Control", "no-store")
@@ -477,6 +894,10 @@ INDEX_HTML = """<!doctype html>
     .box-text { fill: #fff; font-size: 22px; font-weight: 700; paint-order: stroke; stroke: #000; stroke-width: 4px; stroke-linejoin: round; }
     .center-dot { fill: #ff2d16; stroke: #7a0e06; stroke-width: 2; vector-effect: non-scaling-stroke; }
     .center-text { fill: #ffe94a; font-size: 22px; font-weight: 800; paint-order: stroke; stroke: #000; stroke-width: 4px; stroke-linejoin: round; }
+    .flat-poly { fill: rgba(0, 230, 118, .22); stroke: #00e676; stroke-width: 3; vector-effect: non-scaling-stroke; }
+    .obstacle-poly { fill: rgba(255, 45, 22, .30); stroke: #ff2d16; stroke-width: 4; vector-effect: non-scaling-stroke; }
+    .front-obstacle-poly { fill: rgba(255, 45, 22, .42); stroke: #fff; stroke-width: 5; vector-effect: non-scaling-stroke; }
+    .depth-text { fill: #fff; font-size: 20px; font-weight: 800; paint-order: stroke; stroke: #000; stroke-width: 4px; stroke-linejoin: round; }
   </style>
 </head>
 <body>
@@ -494,6 +915,8 @@ INDEX_HTML = """<!doctype html>
     const img = document.getElementById('camera');
     const overlay = document.getElementById('overlay');
     const svgNS = 'http://www.w3.org/2000/svg';
+    let latestDetections = [];
+    let latestDepthRegions = [];
 
     function setOverlayViewBox() {
       if (img.naturalWidth && img.naturalHeight) {
@@ -509,9 +932,70 @@ INDEX_HTML = """<!doctype html>
       return el;
     }
 
+    function depthScale(region) {
+      const sourceWidth = Number(region.source_width);
+      const sourceHeight = Number(region.source_height);
+      return {
+        x: img.naturalWidth && sourceWidth ? img.naturalWidth / sourceWidth : 1,
+        y: img.naturalHeight && sourceHeight ? img.naturalHeight / sourceHeight : 1,
+      };
+    }
+
+    function scaledDepthPoint(point, region) {
+      const scale = depthScale(region);
+      return [Number(point[0]) * scale.x, Number(point[1]) * scale.y];
+    }
+
+    function polygonPoints(region) {
+      return (region.polygon ?? [])
+        .map((point) => {
+          const [x, y] = scaledDepthPoint(point, region);
+          return `${x},${y}`;
+        })
+        .join(' ');
+    }
+
+    function renderDepthRegions(regions) {
+      // The depth layer is drawn first so YOLO boxes remain readable on top.
+      for (const region of regions) {
+        const points = polygonPoints(region);
+        if (!points) {
+          continue;
+        }
+
+        const isObstacle = region.kind === 'obstacle';
+        const className = isObstacle
+          ? (region.front ? 'front-obstacle-poly' : 'obstacle-poly')
+          : 'flat-poly';
+        overlay.appendChild(makeSvg('polygon', {class: className, points}));
+
+        if (!isObstacle) {
+          continue;
+        }
+
+        const firstPoint = scaledDepthPoint(region.polygon?.[0] ?? [0, 0], region);
+        const labelX = firstPoint[0] + 4;
+        const labelY = Math.max(22, firstPoint[1] - 8);
+        const meanX = Number(region.mean_x);
+        const meanY = Number(region.mean_y);
+        const nearestX = Number(region.nearest_x);
+        const maxHeight = Number(region.max_height);
+        const label = [
+          region.front ? 'FRONT obstacle' : 'obstacle',
+          Number.isFinite(meanX) ? `x=${meanX.toFixed(2)}m` : '',
+          Number.isFinite(meanY) ? `y=${meanY.toFixed(2)}m` : '',
+          Number.isFinite(nearestX) ? `near=${nearestX.toFixed(2)}m` : '',
+          Number.isFinite(maxHeight) ? `h=${maxHeight.toFixed(2)}m` : '',
+          `n=${region.count ?? 0}`,
+        ].filter(Boolean).join(' ');
+        overlay.appendChild(makeSvg('text', {class: 'depth-text', x: labelX, y: labelY}, label));
+        overlay.lastChild.textContent = label;
+      }
+    }
+
     function renderDetections(detections) {
+      // YOLO boxes are still drawn in the original image coordinate space.
       setOverlayViewBox();
-      overlay.replaceChildren();
       for (const det of detections) {
         const x = Number(det.xmin);
         const y = Number(det.ymin);
@@ -535,14 +1019,22 @@ INDEX_HTML = """<!doctype html>
       }
     }
 
+    function renderOverlay() {
+      setOverlayViewBox();
+      overlay.replaceChildren();
+      renderDepthRegions(latestDepthRegions);
+      renderDetections(latestDetections);
+    }
+
     async function updateStats() {
       try {
         const res = await fetch('/stats.json', {cache: 'no-store'});
         const stats = await res.json();
         const age = stats.last_frame_age_sec == null ? 'no frame' : `${stats.last_frame_age_sec.toFixed(1)}s`;
         const detAge = stats.detections_last_update_age_sec == null ? 'no detections' : `${stats.detections_last_update_age_sec.toFixed(1)}s`;
+        const depthAge = stats.depth_last_update_age_sec == null ? 'no depth' : `${stats.depth_last_update_age_sec.toFixed(1)}s`;
         document.getElementById('stats').textContent =
-          `${stats.connected ? 'camera' : 'camera reconnecting'} | frame ${stats.frame_id} | age ${age} | boxes ${stats.detections_count} | det ${detAge}`;
+          `${stats.connected ? 'camera' : 'camera reconnecting'} | frame ${stats.frame_id} | age ${age} | boxes ${stats.detections_count} | depth ${stats.depth_region_count} (${depthAge}) | det ${detAge}`;
       } catch (_) {
         document.getElementById('stats').textContent = 'stats unavailable';
       }
@@ -552,17 +1044,31 @@ INDEX_HTML = """<!doctype html>
       try {
         const res = await fetch('/detections.json', {cache: 'no-store'});
         const payload = await res.json();
-        renderDetections(payload.detections ?? []);
+        latestDetections = payload.detections ?? [];
       } catch (_) {
-        renderDetections([]);
+        latestDetections = [];
       }
+      renderOverlay();
+    }
+
+    async function updateDepthOverlay() {
+      try {
+        const res = await fetch('/depth_overlay.json', {cache: 'no-store'});
+        const payload = await res.json();
+        latestDepthRegions = payload.regions ?? [];
+      } catch (_) {
+        latestDepthRegions = [];
+      }
+      renderOverlay();
     }
 
     updateStats();
     updateDetections();
+    updateDepthOverlay();
     setInterval(updateDetections, 100);
+    setInterval(updateDepthOverlay, 100);
     setInterval(updateStats, 1000);
-    setInterval(setOverlayViewBox, 1000);
+    setInterval(renderOverlay, 1000);
   </script>
 </body>
 </html>
@@ -617,8 +1123,53 @@ def parse_args() -> argparse.Namespace:
         type=str_to_bool,
         help="show only Ball detections; default shows all YOLO objects",
     )
+    parser.add_argument(
+        "--depth-overlay",
+        action="store_true",
+        help="overlay green flat-surface and red obstacle regions from the depth camera",
+    )
+    parser.add_argument("--depth-topic", default=DEFAULT_DEPTH_TOPIC, help="ROS depth image topic")
+    parser.add_argument(
+        "--depth-camera-info-topic",
+        default=DEFAULT_DEPTH_CAMERA_INFO_TOPIC,
+        help="ROS depth camera info topic",
+    )
+    parser.add_argument(
+        "--depth-vision-config",
+        default="src/vision/config/vision.yaml",
+        help="vision.yaml path used for fallback intrinsics/extrinsics",
+    )
+    parser.add_argument("--depth-sample-step", type=int, default=8, help="sample every Nth depth pixel")
+    parser.add_argument("--depth-min-depth", type=float, default=0.15)
+    parser.add_argument("--depth-max-depth", type=float, default=4.0)
+    parser.add_argument("--depth-map-min-x", type=float, default=0.0)
+    parser.add_argument("--depth-map-max-x", type=float, default=3.0)
+    parser.add_argument("--depth-map-half-width", type=float, default=2.0)
+    parser.add_argument("--depth-self-exclusion-x", type=float, default=0.20)
+    parser.add_argument("--depth-self-exclusion-y", type=float, default=0.35)
+    parser.add_argument("--depth-ground-min-height", type=float, default=-0.08)
+    parser.add_argument("--depth-ground-max-height", type=float, default=0.08)
+    parser.add_argument("--depth-obstacle-min-height", type=float, default=0.15)
+    parser.add_argument("--depth-obstacle-max-height", type=float, default=2.0)
+    parser.add_argument("--depth-front-min-x", type=float, default=0.20)
+    parser.add_argument("--depth-front-max-x", type=float, default=1.20)
+    parser.add_argument("--depth-front-half-width", type=float, default=0.35)
+    parser.add_argument("--depth-region-cols", type=int, default=8)
+    parser.add_argument("--depth-region-rows", type=int, default=6)
+    parser.add_argument("--depth-min-region-points", type=int, default=6)
+    parser.add_argument("--depth-max-polygons-per-class", type=int, default=20)
+    parser.add_argument("--depth-polygon-padding-px", type=int, default=6)
+    parser.add_argument(
+        "--no-depth-config-extrin",
+        action="store_false",
+        dest="depth_use_config_extrin",
+        help="ignore vision.yaml camera.extrin and use a simple optical-frame conversion",
+    )
+    parser.set_defaults(depth_use_config_extrin=True)
     args, extras = parser.parse_known_args()
     apply_legacy_key_value_args(args, extras)
+    if args.depth_sample_step < 1:
+        raise SystemExit("--depth-sample-step must be >= 1")
     return args
 
 
@@ -663,6 +1214,15 @@ def main() -> int:
             daemon=True,
         )
         detections.start()
+
+    if args.depth_overlay:
+        depth_overlay = threading.Thread(
+            target=depth_overlay_reader,
+            args=(store, args),
+            daemon=True,
+        )
+        depth_overlay.start()
+        print(f"Depth overlay source: {args.depth_topic}", flush=True)
 
     handler = make_handler(store)
     server = http.server.ThreadingHTTPServer((args.listen_host, args.listen_port), handler)
