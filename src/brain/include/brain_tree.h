@@ -159,6 +159,9 @@ private:
     bool _smoothSearchActive = false;
     bool _smoothDwellActive = false;
     size_t _smoothTargetIndex = 0;
+    size_t _smoothStartPitchIndex = 0;
+    int _smoothPitchDir = 1;
+    int _smoothYawDir = 1;
     double _smoothStartPitch = 0.0;
     double _smoothStartYaw = 0.0;
     double _smoothTargetPitch = 0.0;

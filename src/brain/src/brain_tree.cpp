@@ -12,12 +12,19 @@
 #include <algorithm>
 #include <fstream>
 #include <ios>
+#include <limits>
 #include <sstream>
 #include <utility>
 #include <vector>
 
 namespace
 {
+bool gHadTrackedBall = false;
+double gLastTrackedBallX = 0.0;
+double gLastTrackedBallY = 0.0;
+double gLastTrackedBallVx = 0.0;
+double gLastTrackedBallVy = 0.0;
+
 std::vector<double> parseDoubleList(const std::string &text, const std::vector<double> &fallback)
 {
     std::vector<double> values;
@@ -42,16 +49,47 @@ std::vector<double> parseDoubleList(const std::string &text, const std::vector<d
     return values.empty() ? fallback : values;
 }
 
-std::pair<double, double> smoothSearchTarget(const std::vector<double> &pitches, double minYaw, double maxYaw, size_t targetIndex)
+size_t nearestPitchIndex(const std::vector<double> &pitches, double pitch)
 {
-    const size_t pitchRow = (targetIndex / 2) % pitches.size();
-    const bool leftToRight = ((targetIndex / 2) % 2) == 0;
-    const bool firstSide = (targetIndex % 2) == 0;
-    const double yaw = leftToRight
-        ? (firstSide ? minYaw : maxYaw)
-        : (firstSide ? maxYaw : minYaw);
+    size_t nearestIndex = 0;
+    double nearestDist = std::numeric_limits<double>::infinity();
 
-    return {pitches[pitchRow], yaw};
+    for (size_t i = 0; i < pitches.size(); ++i)
+    {
+        const double dist = std::fabs(pitches[i] - pitch);
+        if (dist < nearestDist)
+        {
+            nearestDist = dist;
+            nearestIndex = i;
+        }
+    }
+
+    return nearestIndex;
+}
+
+std::pair<double, double> directionalSmoothSearchTarget(
+    const std::vector<double> &pitches,
+    double minYaw,
+    double maxYaw,
+    size_t startPitchIndex,
+    int pitchDir,
+    int yawDir,
+    size_t targetIndex)
+{
+    const int pitchCount = static_cast<int>(pitches.size());
+    const int rowStep = static_cast<int>(targetIndex / 2);
+    const int rowDir = pitchDir >= 0 ? 1 : -1;
+    const int pitchIndex = ((static_cast<int>(startPitchIndex) + rowDir * rowStep) % pitchCount + pitchCount) % pitchCount;
+
+    const double firstYaw = yawDir >= 0 ? maxYaw : minYaw;
+    const double secondYaw = yawDir >= 0 ? minYaw : maxYaw;
+    const bool firstSide = (targetIndex % 2) == 0;
+    const bool reverseRow = (rowStep % 2) != 0;
+    const double yaw = reverseRow
+        ? (firstSide ? secondYaw : firstYaw)
+        : (firstSide ? firstYaw : secondYaw);
+
+    return {pitches[pitchIndex], yaw};
 }
 
 double easeInOut(double t)
@@ -219,33 +257,56 @@ NodeStatus CamTrackBall::tick()
     const double dx = ballX - xCenter;  // + means ball is right of image center
     const double dy = ballY - yCenter;  // + means ball is below image center
 
-    const double deadbandX = 35.0;
-    const double deadbandY = 35.0;
+    if (gHadTrackedBall)
+    {
+        gLastTrackedBallVx = ballX - gLastTrackedBallX;
+        gLastTrackedBallVy = ballY - gLastTrackedBallY;
+    }
+    else
+    {
+        gLastTrackedBallVx = dx;
+        gLastTrackedBallVy = dy;
+    }
+    gLastTrackedBallX = ballX;
+    gLastTrackedBallY = ballY;
+    gHadTrackedBall = true;
 
-    const double yawStep = cap(std::fabs(dx) / xCenter * 0.10, 0.08, 0.035);
-    const double pitchStep = cap(std::fabs(dy) / yCenter * 0.12, 0.10, 0.04);
+    const double deadbandX = 15.0;
+    const double deadbandY = 15.0;
+    const double yawGain = 0.65;
+    const double pitchGain = 0.65;
+    const double maxYawStep = 0.055;
+    const double maxPitchStep = 0.055;
+    const double halfFovX = std::isfinite(brain->config->depthCameraFovX) && brain->config->depthCameraFovX > 0.0
+        ? brain->config->depthCameraFovX / 2.0
+        : deg2rad(45.0);
+    const double halfFovY = std::isfinite(brain->config->depthCameraFovY) && brain->config->depthCameraFovY > 0.0
+        ? brain->config->depthCameraFovY / 2.0
+        : deg2rad(32.5);
+
+    double yawCorrection = 0.0;
+    double pitchCorrection = 0.0;
 
     if (std::fabs(dx) > deadbandX)
     {
-        // Existing sign convention from original code:
         // ball right -> yaw target decreases.
-        yaw += (dx > 0.0) ? -yawStep : yawStep;
+        yawCorrection = cap(-(dx / xCenter) * halfFovX * yawGain, maxYawStep, -maxYawStep);
+        yaw += yawCorrection;
     }
 
     if (std::fabs(dy) > deadbandY)
     {
-        // On T1, lower/downward pitch is negative. Ball low in image -> look down.
-        pitch += (dy > 0.0) ? -pitchStep : pitchStep;
+        // T1 RotateHead uses positive pitch downward and negative pitch upward.
+        pitchCorrection = cap((dy / yCenter) * halfFovY * pitchGain, maxPitchStep, -maxPitchStep);
+        pitch += pitchCorrection;
     }
 
-    // If both errors are inside deadband, pitch/yaw remain current values,
-    // causing RobotClient::moveHead() to publish direction 0,0.
     brain->client->moveHead(pitch, yaw);
 
     brain->log->log(
         "CamTrackBall/direct_pixel",
-        format("ballX: %.1f ballY: %.1f dx: %.1f dy: %.1f pitch: %.2f yaw: %.2f",
-               ballX, ballY, dx, dy, pitch, yaw));
+        format("ballX: %.1f ballY: %.1f dx: %.1f dy: %.1f vx: %.1f vy: %.1f pitch: %.2f yaw: %.2f dpitch: %.3f dyaw: %.3f",
+               ballX, ballY, dx, dy, gLastTrackedBallVx, gLastTrackedBallVy, pitch, yaw, pitchCorrection, yawCorrection));
 
     return NodeStatus::SUCCESS;
 }
@@ -295,10 +356,18 @@ NodeStatus CamFindBall::tick()
         return NodeStatus::SUCCESS;
     }
 
-    const std::vector<double> pitches = parseDoubleList(smoothPitchesText, {0.75, 0.50, 0.35});
+    std::vector<double> pitches = parseDoubleList(smoothPitchesText, {0.75, 0.50, 0.35});
+    std::sort(pitches.begin(), pitches.end());
 
     auto startSmoothSegment = [&]() {
-        const auto target = smoothSearchTarget(pitches, minYaw, maxYaw, _smoothTargetIndex);
+        const auto target = directionalSmoothSearchTarget(
+            pitches,
+            minYaw,
+            maxYaw,
+            _smoothStartPitchIndex,
+            _smoothPitchDir,
+            _smoothYawDir,
+            _smoothTargetIndex);
         _smoothStartPitch = _smoothCurrentPitch;
         _smoothStartYaw = _smoothCurrentYaw;
         _smoothTargetPitch = target.first;
@@ -324,6 +393,21 @@ NodeStatus CamFindBall::tick()
         _smoothTargetIndex = 0;
         _smoothCurrentPitch = std::isfinite(brain->data->headPitch) ? brain->data->headPitch : pitches.front();
         _smoothCurrentYaw = std::isfinite(brain->data->headYaw) ? brain->data->headYaw : 0.0;
+        _smoothStartPitchIndex = nearestPitchIndex(pitches, _smoothCurrentPitch);
+
+        const double xCenter = brain->config->cameraImageWidth / 2.0;
+        const double yCenter = brain->config->cameraImageHeight / 2.0;
+        const double yawEvidence = gHadTrackedBall && std::fabs(gLastTrackedBallVx) > 2.0
+            ? gLastTrackedBallVx
+            : (gHadTrackedBall ? gLastTrackedBallX - xCenter : _smoothCurrentYaw);
+        const double pitchEvidence = gHadTrackedBall && std::fabs(gLastTrackedBallVy) > 2.0
+            ? gLastTrackedBallVy
+            : (gHadTrackedBall ? gLastTrackedBallY - yCenter : _smoothCurrentPitch);
+
+        // Pixel x grows to the right; yaw target decreases to look right.
+        _smoothYawDir = yawEvidence > 0.0 ? -1 : 1;
+        // Pixel y grows downward; positive pitch looks down on T1.
+        _smoothPitchDir = pitchEvidence >= 0.0 ? 1 : -1;
         startSmoothSegment();
     }
 
