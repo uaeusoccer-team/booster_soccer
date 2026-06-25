@@ -62,7 +62,7 @@ detection_model:
   post_process:
     single_ball_assumption: false
     confidence_thresholds:
-      Ball: 0.7 #123456789 it was 0.3
+      Ball: 0.4 #123456789 it was 0.3
       Goalpost: 0.2
       Person: 0.2
       LCross: 0.1
