@@ -31,6 +31,83 @@ void turnTowardRecentlyLostBall(Brain *brain, bool enabled, double maxRecentLost
 
     brain->client->setVelocity(0.0, 0.0, 0.0);
 }
+
+bool planChaseDodge(
+    Brain *brain,
+    const string &logName,
+    bool enabled,
+    double desiredDir,
+    double ballYaw,
+    double safeDist,
+    double vxLimit,
+    double vyLimit,
+    double vthetaLimit,
+    double &vx,
+    double &vy,
+    double &vtheta)
+{
+    if (!enabled || safeDist <= 0.0)
+    {
+        return false;
+    }
+
+    const double obstacleDist = brain->distToObstacle(desiredDir);
+    if (obstacleDist >= safeDist)
+    {
+        return false;
+    }
+
+    auto safeDirs = brain->findSafeDirections(desiredDir, safeDist, deg2rad(10.0));
+    const bool leftFound = safeDirs[0] > 0.5;
+    const bool rightFound = safeDirs[2] > 0.5;
+
+    if (!leftFound && !rightFound)
+    {
+        vx = 0.0;
+        vy = 0.0;
+        vtheta = cap(fabs(ballYaw) > 0.1 ? ballYaw : desiredDir, vthetaLimit, -vthetaLimit);
+        brain->log->debug(
+            logName,
+            format("dodge stop: obstacle %.2fm on %.2frad, no safe direction inside %.2fm",
+                   obstacleDist, desiredDir, safeDist));
+        return true;
+    }
+
+    double avoidDir;
+    if (leftFound && rightFound)
+    {
+        avoidDir = fabs(toPInPI(safeDirs[1] - desiredDir)) < fabs(toPInPI(safeDirs[3] - desiredDir))
+            ? safeDirs[1]
+            : safeDirs[3];
+    }
+    else
+    {
+        avoidDir = leftFound ? safeDirs[1] : safeDirs[3];
+    }
+
+    const double proximity = cap((safeDist - obstacleDist) / safeDist, 1.0, 0.0);
+    const double dodgeSpeed = min(vxLimit, 0.45 - 0.20 * proximity);
+
+    vx = dodgeSpeed * cos(avoidDir);
+    vy = dodgeSpeed * sin(avoidDir);
+
+    // Avoid backing into unknown space. If the free ray points behind us, strafe and rotate instead.
+    if (vx < 0.0)
+    {
+        vx = 0.0;
+        vy = (sin(avoidDir) >= 0.0 ? 1.0 : -1.0) * min(vyLimit, dodgeSpeed);
+    }
+
+    vtheta = cap(ballYaw * 0.5 + avoidDir * 0.5, vthetaLimit, -vthetaLimit);
+    vx = cap(vx, vxLimit, -vxLimit);
+    vy = cap(vy, vyLimit, -vyLimit);
+
+    brain->log->debug(
+        logName,
+        format("dodge active: obstacle %.2fm on %.2frad, avoid %.2frad -> vx %.2f vy %.2f vtheta %.2f",
+               obstacleDist, desiredDir, avoidDir, vx, vy, vtheta));
+    return true;
+}
 }
 
 /**
@@ -366,15 +443,7 @@ NodeStatus Chase::tick()
     target_r = brain->data->field2robot(target_f);
             
     double targetDir = atan2(target_r.y, target_r.x);
-    double distToObstacle = brain->distToObstacle(targetDir);
-    if (avoidObstacle && distToObstacle < oaSafeDist) {
-        log("avoid obstacle");
-        auto avoidDir = brain->calcAvoidDir(targetDir, oaSafeDist);
-        const double speed = 0.5;
-        vx = speed * cos(avoidDir);
-        vy = speed * sin(avoidDir);
-        vtheta = ballYaw;
-    } else {
+    if (!planChaseDodge(brain, "Chase/dodge", avoidObstacle, targetDir, ballYaw, oaSafeDist, vxLimit, vyLimit, vthetaLimit, vx, vy, vtheta)) {
         vx = min(vxLimit, brain->data->ball.range);
         vy = 0;
         vtheta = targetDir;
@@ -399,11 +468,15 @@ NodeStatus Chase::tick()
 
 NodeStatus SimpleChase::tick()
 {
-    double stopDist, stopAngle, vyLimit, vxLimit;
+    double stopDist, stopAngle, vyLimit, vxLimit, safeDist, vthetaLimit;
+    bool avoidObstacle;
     getInput("stop_dist", stopDist);
     getInput("stop_angle", stopAngle);
     getInput("vx_limit", vxLimit);
     getInput("vy_limit", vyLimit);
+    getInput("safe_dist", safeDist);
+    getInput("vtheta_limit", vthetaLimit);
+    getInput("avoid_obstacle", avoidObstacle);
 
     if (!brain->tree->getEntry<bool>("ball_location_known"))
     {
@@ -426,6 +499,17 @@ NodeStatus SimpleChase::tick()
     {
         vx = 0;
         vy = 0;
+    }
+    else
+    {
+        if (safeDist <= 0.0)
+        {
+            safeDist = brain->config->get_chase_ao_safe_dist();
+        }
+
+        const bool useDodge = avoidObstacle && brain->config->get_avoid_during_chase();
+        const double desiredDir = norm(vx, vy) > 1e-5 ? atan2(vy, vx) : brain->data->ball.yawToRobot;
+        planChaseDodge(brain, "SimpleChase/dodge", useDodge, desiredDir, brain->data->ball.yawToRobot, safeDist, vxLimit, vyLimit, vthetaLimit, vx, vy, vtheta);
     }
 
     brain->client->setVelocity(vx, vy, vtheta);

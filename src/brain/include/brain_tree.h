@@ -692,6 +692,9 @@ public:
             InputPort<double>("stop_angle", 0.1, "Angle of the ball to stop turning towards it"),
             InputPort<double>("vy_limit", 0.2, "Limit Y direction speed to prevent walking instability. Must be less than the robot's maximum speed 0.4 to take effect"),
             InputPort<double>("vx_limit", 0.6, "Limit X direction speed to prevent walking instability. Must be less than the robot's maximum speed 1.2 to take effect"),
+            InputPort<bool>("avoid_obstacle", true, "Use the local depth obstacle map to override chase when the path is blocked"),
+            InputPort<double>("safe_dist", -1.0, "Obstacle clearance distance. Negative uses obstacle_avoidance.chase_ao_safe_dist from config"),
+            InputPort<double>("vtheta_limit", 0.8, "Maximum angular speed while dodging obstacles"),
         };
     }
 

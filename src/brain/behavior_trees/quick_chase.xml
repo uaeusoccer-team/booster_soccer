@@ -1,0 +1,22 @@
+<root BTCPP_format="4">
+  <include path="./subtrees/subtree_cam_find_and_track_ball.xml" />
+
+  <BehaviorTree ID="MainTree">
+    <ReactiveSequence name="quick_chase">
+      <SubTree ID="CamFindAndTrackBall" _autoremap="true" />
+
+      <IfThenElse>
+        <ScriptCondition code="ball_location_known" />
+        <SimpleChase
+          vx_limit="0.20"
+          vy_limit="0.08"
+          stop_dist="1.2"
+          stop_angle="0.3"
+          avoid_obstacle="true"
+          safe_dist="1.2"
+          vtheta_limit="0.6" />
+        <SetVelocity />
+      </IfThenElse>
+    </ReactiveSequence>
+  </BehaviorTree>
+</root>
