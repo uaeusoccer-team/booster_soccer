@@ -79,26 +79,22 @@ cat > "$TREE_PATH" <<'XML'
         <SetVelocity x="0" y="0" theta="0" />
       </ReactiveSequence>
 
-      <ReactiveSequence _while="gc_game_state!='END'" name="direct chase with obstacle avoidance">
+      <ReactiveSequence _while="gc_game_state!='END'" name="slow chase with obstacle avoidance">
         <CheckAndStandUp />
         <SetVelocity _while="!ball_location_known" x="0" y="0" theta="0" />
 
         <IfThenElse>
           <ScriptCondition name="Ball location known?" code="ball_location_known || tm_ball_pos_reliable" />
           <CamTrackBall />
-          <CamFindBall low_pitch="-0.314" high_pitch="0.75" turn_body_on_loss="false" />
+          <CamFindBall />
         </IfThenElse>
 
-        <ReactiveSequence _while="ball_location_known" name="no-kick direct obstacle-avoid chase">
+        <ReactiveSequence _while="ball_location_known" name="no-kick obstacle-avoid chase">
           <Chase vx_limit="0.22"
                  vy_limit="0.08"
                  vtheta_limit="0.7"
                  dist="0.50"
-                 safe_dist="0.5"
-                 direct_to_ball="true"
-                 direct_stop_x="0.16"
-                 direct_stop_y="0.10"
-                 direct_stop_yaw="0.16" />
+                 safe_dist="0.5" />
         </ReactiveSequence>
       </ReactiveSequence>
     </Sequence>
@@ -112,7 +108,7 @@ sleep 8
 
 wait_for_ball
 
-echo "Starting no-kick direct chase with obstacle avoidance. Press s to stop. Press Ctrl-C to exit."
+echo "Starting no-kick Chase with obstacle avoidance. Press s to stop. Press Ctrl-C to exit."
 echo "Obstacle debug topics:"
 echo "  /booster_soccer/visualization_markers"
 echo "  /booster_soccer/visualization_obstacle_grid"

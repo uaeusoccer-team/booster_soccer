@@ -10,7 +10,6 @@
 #include "std_msgs/msg/string.hpp"
 #include "visualization_msgs/msg/marker_array.hpp"
 #include <algorithm>
-#include <cctype>
 #include <fstream>
 #include <ios>
 #include <sstream>
@@ -19,24 +18,6 @@
 
 namespace
 {
-void turnTowardRecentlyLostBall(Brain *brain, bool enabled, double maxRecentLostMsec, double turnSpeed, double minYaw)
-{
-    if (!enabled || maxRecentLostMsec <= 0.0 || turnSpeed <= 0.0)
-    {
-        return;
-    }
-
-    const double lostMsec = brain->msecsSince(brain->data->ball.timePoint);
-    const double lastYaw = brain->data->ball.yawToRobot;
-    if (lostMsec >= 0.0 && lostMsec < maxRecentLostMsec && std::fabs(lastYaw) > minYaw)
-    {
-        brain->client->setVelocity(0.0, 0.0, lastYaw > 0.0 ? turnSpeed : -turnSpeed);
-        return;
-    }
-
-    brain->client->setVelocity(0.0, 0.0, 0.0);
-}
-
 std::vector<double> parseDoubleList(const std::string &text, const std::vector<double> &fallback)
 {
     std::vector<double> values;
@@ -229,7 +210,6 @@ NodeStatus CamTrackBall::tick()
     {
         // Hold the current head target when the ball box is not valid.
         brain->client->moveHead(pitch, yaw);
-        turnTowardRecentlyLostBall(brain, true, 1200.0, 0.25, 0.08);
         return NodeStatus::SUCCESS;
     }
 
@@ -273,9 +253,7 @@ NodeStatus CamTrackBall::tick()
 
 CamFindBall::CamFindBall(const string &name, const NodeConfig &config, Brain *_brain) : SyncActionNode(name, config), brain(_brain)
 {
-    _timeSearchStart = brain->get_clock()->now();
     _timeLastCmd = rclcpp::Time(0, 0, RCL_ROS_TIME);
-    _cmdRestartIntervalMSec = 60000;
 }
 
 NodeStatus CamFindBall::tick()
@@ -284,17 +262,13 @@ NodeStatus CamFindBall::tick()
 
     if (brain->data->ballDetected)
     {
-        _timeSearchStart = curTime;
         _smoothSearchActive = false;
         _smoothDwellActive = false;
         return NodeStatus::SUCCESS;
     } // Currently, all nodes return Success. Returning Failure would affect the execution of subsequent nodes.
 
-    string searchMode, smoothPitchesText;
-    getInput("search_mode", searchMode);
+    string smoothPitchesText;
     getInput("smooth_pitches", smoothPitchesText);
-    std::transform(searchMode.begin(), searchMode.end(), searchMode.begin(),
-                   [](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
 
     double minYaw, maxYaw, yawSpeed, pitchSpeed, commandHz, dwellMsec;
     getInput("min_yaw", minYaw);
@@ -304,138 +278,88 @@ NodeStatus CamFindBall::tick()
     getInput("command_hz", commandHz);
     getInput("dwell_msec", dwellMsec);
 
-    double lowPitch, highPitch, yawLimit, sweepMsec, pitchCycleMsec, cmdIntervalMsec;
-    bool turnBodyOnLoss;
-    double lostTurnMsec, lostTurnSpeed, lostTurnMinYaw;
-    getInput("low_pitch", lowPitch);
-    getInput("high_pitch", highPitch);
-    getInput("yaw_limit", yawLimit);
-    getInput("sweep_msec", sweepMsec);
-    getInput("pitch_cycle_msec", pitchCycleMsec);
-    getInput("cmd_interval_msec", cmdIntervalMsec);
-    getInput("turn_body_on_loss", turnBodyOnLoss);
-    getInput("lost_turn_msec", lostTurnMsec);
-    getInput("lost_turn_speed", lostTurnSpeed);
-    getInput("lost_turn_min_yaw", lostTurnMinYaw);
-
-    if (searchMode == "smooth" || searchMode == "sdk" || searchMode == "sdk_smooth")
+    if (maxYaw < minYaw)
     {
-        if (maxYaw < minYaw)
-        {
-            std::swap(maxYaw, minYaw);
-        }
+        std::swap(maxYaw, minYaw);
+    }
 
-        yawSpeed = std::max(0.01, std::fabs(yawSpeed));
-        pitchSpeed = std::max(0.01, std::fabs(pitchSpeed));
-        commandHz = std::max(1.0, commandHz);
-        dwellMsec = std::max(0.0, dwellMsec);
-        const double commandIntervalMsec = 1000.0 / commandHz;
+    yawSpeed = std::max(0.01, std::fabs(yawSpeed));
+    pitchSpeed = std::max(0.01, std::fabs(pitchSpeed));
+    commandHz = std::max(1.0, commandHz);
+    dwellMsec = std::max(0.0, dwellMsec);
+    const double commandIntervalMsec = 1000.0 / commandHz;
 
-        auto timeSinceLastCmd = (curTime - _timeLastCmd).nanoseconds() / 1e6;
-        if (_timeLastCmd.nanoseconds() > 0 && timeSinceLastCmd < commandIntervalMsec)
+    auto timeSinceLastCmd = (curTime - _timeLastCmd).nanoseconds() / 1e6;
+    if (_timeLastCmd.nanoseconds() > 0 && timeSinceLastCmd < commandIntervalMsec)
+    {
+        return NodeStatus::SUCCESS;
+    }
+
+    const std::vector<double> pitches = parseDoubleList(smoothPitchesText, {0.75, 0.50, 0.35});
+
+    auto startSmoothSegment = [&]() {
+        const auto target = smoothSearchTarget(pitches, minYaw, maxYaw, _smoothTargetIndex);
+        _smoothStartPitch = _smoothCurrentPitch;
+        _smoothStartYaw = _smoothCurrentYaw;
+        _smoothTargetPitch = target.first;
+        _smoothTargetYaw = target.second;
+
+        const double deltaPitch = _smoothTargetPitch - _smoothStartPitch;
+        const double deltaYaw = _smoothTargetYaw - _smoothStartYaw;
+        const double durationSec = std::max({
+            std::fabs(deltaPitch) / pitchSpeed,
+            std::fabs(deltaYaw) / yawSpeed,
+            1.0 / commandHz
+        });
+
+        _smoothSegmentMsec = durationSec * 1000.0;
+        _smoothSegmentStartTime = curTime;
+        _smoothDwellActive = false;
+    };
+
+    if (!_smoothSearchActive)
+    {
+        _smoothSearchActive = true;
+        _smoothDwellActive = false;
+        _smoothTargetIndex = 0;
+        _smoothCurrentPitch = std::isfinite(brain->data->headPitch) ? brain->data->headPitch : pitches.front();
+        _smoothCurrentYaw = std::isfinite(brain->data->headYaw) ? brain->data->headYaw : 0.0;
+        startSmoothSegment();
+    }
+
+    if (_smoothDwellActive)
+    {
+        const double dwellElapsedMsec = (curTime - _smoothDwellStartTime).nanoseconds() / 1e6;
+        if (dwellElapsedMsec < dwellMsec)
         {
+            brain->client->moveHead(_smoothCurrentPitch, _smoothCurrentYaw);
+            _timeLastCmd = curTime;
             return NodeStatus::SUCCESS;
         }
 
-        const std::vector<double> pitches = parseDoubleList(smoothPitchesText, {0.75, 0.50, 0.35});
-
-        auto startSmoothSegment = [&]() {
-            const auto target = smoothSearchTarget(pitches, minYaw, maxYaw, _smoothTargetIndex);
-            _smoothStartPitch = _smoothCurrentPitch;
-            _smoothStartYaw = _smoothCurrentYaw;
-            _smoothTargetPitch = target.first;
-            _smoothTargetYaw = target.second;
-
-            const double deltaPitch = _smoothTargetPitch - _smoothStartPitch;
-            const double deltaYaw = _smoothTargetYaw - _smoothStartYaw;
-            const double durationSec = std::max({
-                std::fabs(deltaPitch) / pitchSpeed,
-                std::fabs(deltaYaw) / yawSpeed,
-                1.0 / commandHz
-            });
-
-            _smoothSegmentMsec = durationSec * 1000.0;
-            _smoothSegmentStartTime = curTime;
-            _smoothDwellActive = false;
-        };
-
-        if (!_smoothSearchActive)
-        {
-            _smoothSearchActive = true;
-            _smoothDwellActive = false;
-            _smoothTargetIndex = 0;
-            _smoothCurrentPitch = std::isfinite(brain->data->headPitch) ? brain->data->headPitch : pitches.front();
-            _smoothCurrentYaw = std::isfinite(brain->data->headYaw) ? brain->data->headYaw : 0.0;
-            startSmoothSegment();
-        }
-
-        if (_smoothDwellActive)
-        {
-            const double dwellElapsedMsec = (curTime - _smoothDwellStartTime).nanoseconds() / 1e6;
-            if (dwellElapsedMsec < dwellMsec)
-            {
-                brain->client->moveHead(_smoothCurrentPitch, _smoothCurrentYaw);
-                turnTowardRecentlyLostBall(brain, turnBodyOnLoss, lostTurnMsec, lostTurnSpeed, lostTurnMinYaw);
-                _timeLastCmd = curTime;
-                return NodeStatus::SUCCESS;
-            }
-
-            startSmoothSegment();
-        }
-
-        const double segmentElapsedMsec = (curTime - _smoothSegmentStartTime).nanoseconds() / 1e6;
-        const double progress = _smoothSegmentMsec > 0.0 ? cap(segmentElapsedMsec / _smoothSegmentMsec, 1.0, 0.0) : 1.0;
-        const double easedProgress = easeInOut(progress);
-        const double pitch = _smoothStartPitch + (_smoothTargetPitch - _smoothStartPitch) * easedProgress;
-        const double yaw = _smoothStartYaw + (_smoothTargetYaw - _smoothStartYaw) * easedProgress;
-
-        brain->client->moveHead(pitch, yaw);
-        _smoothCurrentPitch = pitch;
-        _smoothCurrentYaw = yaw;
-
-        if (progress >= 1.0)
-        {
-            _smoothCurrentPitch = _smoothTargetPitch;
-            _smoothCurrentYaw = _smoothTargetYaw;
-            _smoothTargetIndex++;
-            _smoothDwellActive = true;
-            _smoothDwellStartTime = curTime;
-        }
-
-        turnTowardRecentlyLostBall(brain, turnBodyOnLoss, lostTurnMsec, lostTurnSpeed, lostTurnMinYaw);
-        _timeLastCmd = curTime;
-        return NodeStatus::SUCCESS;
+        startSmoothSegment();
     }
 
-    _smoothSearchActive = false;
-    _smoothDwellActive = false;
-
-    cmdIntervalMsec = std::max(20.0, cmdIntervalMsec);
-    sweepMsec = std::max(500.0, sweepMsec);
-    pitchCycleMsec = std::max(500.0, pitchCycleMsec);
-
-    auto timeSinceLastCmd = (curTime - _timeLastCmd).nanoseconds() / 1e6;
-    if (_timeLastCmd.nanoseconds() > 0 && timeSinceLastCmd < cmdIntervalMsec)
-    {
-        return NodeStatus::SUCCESS;
-    }
-
-    auto searchMsec = (curTime - _timeSearchStart).nanoseconds() / 1e6;
-    if (searchMsec < 0.0 || searchMsec > _cmdRestartIntervalMSec)
-    {
-        _timeSearchStart = curTime;
-        searchMsec = 0.0;
-    }
-
-    const double yawPhase = 2.0 * M_PI * std::fmod(searchMsec, sweepMsec) / sweepMsec;
-    const double pitchPhase = 2.0 * M_PI * std::fmod(searchMsec, pitchCycleMsec) / pitchCycleMsec;
-    const double pitchBlend = 0.5 * (1.0 - std::cos(pitchPhase));
-    const double yaw = yawLimit * std::sin(yawPhase);
-    const double pitch = highPitch + (lowPitch - highPitch) * pitchBlend;
+    const double segmentElapsedMsec = (curTime - _smoothSegmentStartTime).nanoseconds() / 1e6;
+    const double progress = _smoothSegmentMsec > 0.0 ? cap(segmentElapsedMsec / _smoothSegmentMsec, 1.0, 0.0) : 1.0;
+    const double easedProgress = easeInOut(progress);
+    const double pitch = _smoothStartPitch + (_smoothTargetPitch - _smoothStartPitch) * easedProgress;
+    const double yaw = _smoothStartYaw + (_smoothTargetYaw - _smoothStartYaw) * easedProgress;
 
     brain->client->moveHead(pitch, yaw);
-    turnTowardRecentlyLostBall(brain, turnBodyOnLoss, lostTurnMsec, lostTurnSpeed, lostTurnMinYaw);
-    _timeLastCmd = brain->get_clock()->now();
+    _smoothCurrentPitch = pitch;
+    _smoothCurrentYaw = yaw;
+
+    if (progress >= 1.0)
+    {
+        _smoothCurrentPitch = _smoothTargetPitch;
+        _smoothCurrentYaw = _smoothTargetYaw;
+        _smoothTargetIndex++;
+        _smoothDwellActive = true;
+        _smoothDwellStartTime = curTime;
+    }
+
+    _timeLastCmd = curTime;
     return NodeStatus::SUCCESS;
 }
 
@@ -466,17 +390,12 @@ NodeStatus Chase::tick()
     };
     log("ticked");
     
-    double vxLimit, vyLimit, vthetaLimit, dist, safeDist, directStopX, directStopY, directStopYaw;
-    bool directToBall;
+    double vxLimit, vyLimit, vthetaLimit, dist, safeDist;
     getInput("vx_limit", vxLimit);
     getInput("vy_limit", vyLimit);
     getInput("vtheta_limit", vthetaLimit);
     getInput("dist", dist);
     getInput("safe_dist", safeDist);
-    getInput("direct_to_ball", directToBall);
-    getInput("direct_stop_x", directStopX);
-    getInput("direct_stop_y", directStopY);
-    getInput("direct_stop_yaw", directStopYaw);
 
     bool avoidObstacle = brain->config->get_avoid_during_chase();
     double oaSafeDist = brain->config->get_chase_ao_safe_dist();
@@ -508,19 +427,7 @@ NodeStatus Chase::tick()
 
 
     // Calculate target point
-    if (directToBall) {
-        log("targetType = direct_to_ball");
-        targetType = "direct_to_ball";
-        // Lab mode: use the projected/depth ball position in robot coordinates.
-        target_r.x = brain->data->ball.posToRobot.x - dist;
-        target_r.y = brain->data->ball.posToRobot.y;
-        target_r.theta = 0.0;
-        if (brain->data->ball.posToRobot.x < 0.05) {
-            log("direct_to_ball waiting for valid forward ball projection");
-            brain->client->setVelocity(0, 0, 0);
-            return NodeStatus::SUCCESS;
-        }
-    } else if (fabs(toPInPI(kickDir - theta_rb)) < dirThreshold) {
+    if (fabs(toPInPI(kickDir - theta_rb)) < dirThreshold) {
         log("targetType = direct");
         targetType = "direct";
         target_f.x = ballPos.x - dist * cos(kickDir);
@@ -535,80 +442,23 @@ NodeStatus Chase::tick()
         target_f.x = ballPos.x + safeDist * cos(tanTheta);
         target_f.y = ballPos.y + safeDist * sin(tanTheta);
     }
-    if (!directToBall) target_r = brain->data->field2robot(target_f);
+    target_r = brain->data->field2robot(target_f);
             
     double targetDir = atan2(target_r.y, target_r.x);
     double distToObstacle = brain->distToObstacle(targetDir);
-    auto personBlocksFront = [&]() {
-        auto robots = brain->data->getRobots();
-        for (const auto &obj : robots) {
-            if (obj.label != "Person" || obj.confidence < 50.0) continue;
-
-            bool projectedFront =
-                obj.posToRobot.x > 0.05 &&
-                obj.posToRobot.x < 3.0 &&
-                std::fabs(obj.posToRobot.y) < 0.65;
-
-            double boxWidth = obj.boundingBox.xmax - obj.boundingBox.xmin;
-            double boxHeight = obj.boundingBox.ymax - obj.boundingBox.ymin;
-            double boxCenterX = mean(obj.boundingBox.xmax, obj.boundingBox.xmin);
-            bool centeredBox =
-                boxWidth > 70.0 &&
-                boxHeight > 120.0 &&
-                boxCenterX > brain->config->cameraImageWidth * 0.20 &&
-                boxCenterX < brain->config->cameraImageWidth * 0.80;
-
-            if (projectedFront || centeredBox) return true;
-        }
-        return false;
-    };
-    bool personInFront = directToBall && personBlocksFront();
-    const bool directXReady = directToBall && std::fabs(target_r.x) < directStopX;
-    const bool directYReady = directToBall && std::fabs(target_r.y) < directStopY;
-    const bool directYawReady = directToBall && std::fabs(ballYaw) < directStopYaw;
-
-    if (directToBall && !brain->data->ballDetected && personInFront) {
-        log("person in front while ball not visible");
-        brain->client->setVelocity(0, 0, 0);
-        return NodeStatus::SUCCESS;
-    }
-
-    if (directXReady && directYReady && directYawReady) {
-        log("direct_to_ball target reached");
-        brain->client->setVelocity(0, 0, 0);
-        return NodeStatus::SUCCESS;
-    }
-
-    if (directToBall && brain->data->ballDetected && personInFront && distToObstacle >= oaSafeDist) {
-        log("person in front with ball visible: sidestep around person");
-        vx = 0.0;
-        vy = brain->data->ball.yawToRobot >= 0.0 ? vyLimit : -vyLimit;
-        vtheta = cap(ballYaw * 1.2, vthetaLimit, -vthetaLimit);
-    } else if (avoidObstacle && distToObstacle < oaSafeDist) {
+    if (avoidObstacle && distToObstacle < oaSafeDist) {
         log("avoid obstacle");
-        auto safeDirs = brain->findSafeDirections(targetDir, oaSafeDist);
-        if (directToBall && safeDirs[0] < 0.5 && safeDirs[2] < 0.5) {
-            log("no clear avoidance direction");
-            brain->client->setVelocity(0, 0, 0);
-            return NodeStatus::SUCCESS;
-        }
         auto avoidDir = brain->calcAvoidDir(targetDir, oaSafeDist);
-        const double speed = directToBall ? vxLimit : 0.5;
+        const double speed = 0.5;
         vx = speed * cos(avoidDir);
         vy = speed * sin(avoidDir);
         vtheta = ballYaw;
     } else {
-        if (directToBall) {
-            vx = directXReady ? 0.0 : cap(target_r.x * 0.6, vxLimit, 0.0);
-            vy = directYReady ? 0.0 : cap(target_r.y * 0.6, vyLimit, -vyLimit);
-            vtheta = directYawReady ? 0.0 : cap(ballYaw * 1.2, vthetaLimit, -vthetaLimit);
-        } else {
-            vx = min(vxLimit, brain->data->ball.range);
-            vy = 0;
-            vtheta = targetDir;
-            if (fabs(targetDir) < 0.1 && ballRange > 2.0) vtheta = 0.0;
-            vx *= sigmoid((fabs(vtheta)), 1, 3);
-        }
+        vx = min(vxLimit, brain->data->ball.range);
+        vy = 0;
+        vtheta = targetDir;
+        if (fabs(targetDir) < 0.1 && ballRange > 2.0) vtheta = 0.0;
+        vx *= sigmoid((fabs(vtheta)), 1, 3);
     }
 
     vx = cap(vx, vxLimit, -vxLimit);

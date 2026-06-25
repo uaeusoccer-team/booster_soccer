@@ -8,15 +8,9 @@ Usage:
 
 Starts vision and a ball tracking behavior tree that uses CamFindBall's smooth
 search mode. When the ball is visible, the head tracks it and body velocity is
-held at zero. When the ball is lost, CamFindBall can optionally rotate the body
-toward the last seen ball yaw using turn_body_on_loss.
+held at zero.
 
 Options:
-      --turn-body-on-loss true|false   Enable body yaw after losing the ball, default false
-      --no-turn-body-on-loss           Same as --turn-body-on-loss false
-      --lost-turn-msec MSEC            How long to turn after ball loss, default 1200
-      --lost-turn-speed RAD_PER_SEC    Body yaw speed while turning, default 0.18
-      --lost-turn-min-yaw RAD          Minimum remembered yaw before turning, default 0.08
       --pitches LIST                   Smooth search pitch rows, default 0.75,0.50,0.35
       --min-yaw RAD                    Smooth search minimum yaw, default -1.0
       --max-yaw RAD                    Smooth search maximum yaw, default 1.0
@@ -30,22 +24,7 @@ Press s to stop after launch, or Ctrl-C at any time.
 EOF
 }
 
-normalize_bool() {
-  case "${1,,}" in
-    1|true|yes|y|on) echo "true" ;;
-    0|false|no|n|off) echo "false" ;;
-    *)
-      echo "Invalid boolean value: $1" >&2
-      exit 2
-      ;;
-  esac
-}
-
 WORKSPACE="${WORKSPACE:-$HOME/booster_soccer}"
-TURN_BODY_ON_LOSS="${TURN_BODY_ON_LOSS:-false}"
-LOST_TURN_MSEC="${LOST_TURN_MSEC:-1200}"
-LOST_TURN_SPEED="${LOST_TURN_SPEED:-0.18}"
-LOST_TURN_MIN_YAW="${LOST_TURN_MIN_YAW:-0.08}"
 SMOOTH_PITCHES="${SMOOTH_PITCHES:-0.75,0.50,0.35}"
 MIN_YAW="${HEAD_MIN_YAW:--1.0}"
 MAX_YAW="${HEAD_MAX_YAW:-1.0}"
@@ -56,26 +35,6 @@ DWELL_MSEC="${HEAD_DWELL_MSEC:-80}"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --turn-body-on-loss)
-      TURN_BODY_ON_LOSS="${2:?missing value for $1}"
-      shift 2
-      ;;
-    --no-turn-body-on-loss)
-      TURN_BODY_ON_LOSS=false
-      shift
-      ;;
-    --lost-turn-msec)
-      LOST_TURN_MSEC="${2:?missing value for $1}"
-      shift 2
-      ;;
-    --lost-turn-speed)
-      LOST_TURN_SPEED="${2:?missing value for $1}"
-      shift 2
-      ;;
-    --lost-turn-min-yaw)
-      LOST_TURN_MIN_YAW="${2:?missing value for $1}"
-      shift 2
-      ;;
     --pitches)
       SMOOTH_PITCHES="${2:?missing value for $1}"
       shift 2
@@ -115,8 +74,6 @@ while [[ $# -gt 0 ]]; do
       ;;
   esac
 done
-
-TURN_BODY_ON_LOSS="$(normalize_bool "$TURN_BODY_ON_LOSS")"
 
 cd "$WORKSPACE"
 
@@ -170,18 +127,13 @@ cat > "$TREE_PATH" <<XML
         </Sequence>
 
         <Sequence name="[No] smooth find ball">
-          <CamFindBall search_mode="smooth"
-                       smooth_pitches="${SMOOTH_PITCHES}"
+          <CamFindBall smooth_pitches="${SMOOTH_PITCHES}"
                        min_yaw="${MIN_YAW}"
                        max_yaw="${MAX_YAW}"
                        yaw_speed="${YAW_SPEED}"
                        pitch_speed="${PITCH_SPEED}"
                        command_hz="${COMMAND_HZ}"
-                       dwell_msec="${DWELL_MSEC}"
-                       turn_body_on_loss="${TURN_BODY_ON_LOSS}"
-                       lost_turn_msec="${LOST_TURN_MSEC}"
-                       lost_turn_speed="${LOST_TURN_SPEED}"
-                       lost_turn_min_yaw="${LOST_TURN_MIN_YAW}" />
+                       dwell_msec="${DWELL_MSEC}" />
         </Sequence>
       </IfThenElse>
     </ReactiveSequence>
@@ -191,9 +143,6 @@ XML
 
 echo "---- smooth ball tracking config ----"
 echo "tree: ${TREE_PATH}"
-echo "turn_body_on_loss: ${TURN_BODY_ON_LOSS}"
-echo "lost_turn_msec: ${LOST_TURN_MSEC}"
-echo "lost_turn_speed: ${LOST_TURN_SPEED}"
 echo "smooth_pitches: ${SMOOTH_PITCHES}"
 echo "yaw range: ${MIN_YAW} to ${MAX_YAW}"
 echo
@@ -207,11 +156,7 @@ timeout 5 ros2 topic echo /booster_soccer/detection --once \
   | grep -E 'label:|confidence:|xmin:|ymin:|xmax:|ymax:|position_projection|detected_objects' || true
 
 echo "---- start smooth ball tracking ----"
-if [[ "$TURN_BODY_ON_LOSS" == "true" ]]; then
-  echo "Body yaw can move briefly after ball loss. Use only on the floor with space and an operator ready to stop."
-else
-  echo "Body yaw on ball loss is disabled; head search and head tracking only."
-fi
+echo "Head search and head tracking only; body velocity is held at zero."
 
 ros2 launch brain launch.py \
   tree:=smooth_ball_tracking.xml \

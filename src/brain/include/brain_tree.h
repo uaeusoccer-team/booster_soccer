@@ -142,7 +142,6 @@ public:
     static PortsList providedPorts()
     {
         return {
-            InputPort<string>("search_mode", "smooth", "smooth | sine"),
             InputPort<string>("smooth_pitches", "0.75,0.50,0.35", "Comma-separated pitch rows for smooth ball search"),
             InputPort<double>("min_yaw", -1.0, "Minimum yaw used by smooth ball search"),
             InputPort<double>("max_yaw", 1.0, "Maximum yaw used by smooth ball search"),
@@ -150,25 +149,13 @@ public:
             InputPort<double>("pitch_speed", 0.35, "Nominal smooth search pitch speed in rad/s"),
             InputPort<double>("command_hz", 25.0, "Smooth search head command rate"),
             InputPort<double>("dwell_msec", 80.0, "Smooth search pause at each pitch/yaw target"),
-            InputPort<double>("low_pitch", -0.314, "Lowest/downward pitch used while sweeping for the ball"),
-            InputPort<double>("high_pitch", 0.45, "Highest pitch used while sweeping for the ball"),
-            InputPort<double>("yaw_limit", 1.1, "Maximum absolute yaw used while sweeping for the ball"),
-            InputPort<double>("sweep_msec", 3000.0, "Milliseconds for one left-right-left head sweep"),
-            InputPort<double>("pitch_cycle_msec", 6000.0, "Milliseconds for one high-low-high pitch cycle"),
-            InputPort<double>("cmd_interval_msec", 100.0, "Minimum time between head commands"),
-            InputPort<bool>("turn_body_on_loss", true, "Rotate toward the most recent ball yaw for a short time after losing sight"),
-            InputPort<double>("lost_turn_msec", 1200.0, "Milliseconds to keep turning toward the recent lost-ball direction"),
-            InputPort<double>("lost_turn_speed", 0.25, "Body yaw speed while turning toward a recently lost ball"),
-            InputPort<double>("lost_turn_min_yaw", 0.08, "Minimum remembered ball yaw required before body turn is used"),
         };
     }
 
     NodeStatus tick() override;
 
 private:
-    rclcpp::Time _timeSearchStart;
     rclcpp::Time _timeLastCmd;
-    long _cmdRestartIntervalMSec;
     bool _smoothSearchActive = false;
     bool _smoothDwellActive = false;
     size_t _smoothTargetIndex = 0;
@@ -286,10 +273,6 @@ public:
             InputPort<double>("vtheta_limit", 1.0, "Maximum angular speed when chasing the ball"),
             InputPort<double>("dist", 0.1, "Target distance behind the ball when chasing"),
             InputPort<double>("safe_dist", 4.0, "Safe distance to maintain when circling back"),
-            InputPort<bool>("direct_to_ball", false, "Approach the ball directly without circling behind it"),
-            InputPort<double>("direct_stop_x", 0.12, "Forward tolerance for direct_to_ball mode"),
-            InputPort<double>("direct_stop_y", 0.08, "Side tolerance for direct_to_ball mode"),
-            InputPort<double>("direct_stop_yaw", 0.12, "Yaw tolerance for direct_to_ball mode"),
         };
     }
 
