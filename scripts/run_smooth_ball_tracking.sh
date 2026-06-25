@@ -12,7 +12,7 @@ held at zero. When the ball is lost, CamFindBall can optionally rotate the body
 toward the last seen ball yaw using turn_body_on_loss.
 
 Options:
-      --turn-body-on-loss true|false   Enable body yaw after losing the ball, default true
+      --turn-body-on-loss true|false   Enable body yaw after losing the ball, default false
       --no-turn-body-on-loss           Same as --turn-body-on-loss false
       --lost-turn-msec MSEC            How long to turn after ball loss, default 1200
       --lost-turn-speed RAD_PER_SEC    Body yaw speed while turning, default 0.18
@@ -42,7 +42,7 @@ normalize_bool() {
 }
 
 WORKSPACE="${WORKSPACE:-$HOME/booster_soccer}"
-TURN_BODY_ON_LOSS="${TURN_BODY_ON_LOSS:-true}"
+TURN_BODY_ON_LOSS="${TURN_BODY_ON_LOSS:-false}"
 LOST_TURN_MSEC="${LOST_TURN_MSEC:-1200}"
 LOST_TURN_SPEED="${LOST_TURN_SPEED:-0.18}"
 LOST_TURN_MIN_YAW="${LOST_TURN_MIN_YAW:-0.08}"
@@ -162,7 +162,7 @@ cat > "$TREE_PATH" <<XML
   <BehaviorTree ID="MainTree">
     <ReactiveSequence name="smooth_ball_tracking">
       <IfThenElse>
-        <ScriptCondition name="Ball location known?" code="ball_location_known || tm_ball_pos_reliable" />
+        <ScriptCondition name="Ball visible or location known?" code="ball_detected || ball_location_known || tm_ball_pos_reliable" />
 
         <Sequence name="[Yes] track ball and hold body still">
           <CamTrackBall />

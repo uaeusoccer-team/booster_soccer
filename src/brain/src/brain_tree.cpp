@@ -141,6 +141,7 @@ void BrainTree::initEntry()
 {
     setEntry<string>("player_role", brain->config->get_player_role());
     setEntry<bool>("ball_location_known", false);
+    setEntry<bool>("ball_detected", false);
     setEntry<bool>("tm_ball_pos_reliable", false);
     setEntry<bool>("ball_out", false);
     setEntry<bool>("track_ball", true);
@@ -183,6 +184,7 @@ void BrainTree::initEntry()
 
 void BrainTree::tick()
 {
+    setEntry<bool>("ball_detected", brain->data->ballDetected);
     tree.tickOnce();
 }
 
