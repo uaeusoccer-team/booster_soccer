@@ -118,6 +118,7 @@ class DepthRegion:
     source_width: int
     source_height: int
     front: bool = False
+    mesh_lines: list[list[list[int]]] = field(default_factory=list)
 
     def as_dict(self) -> dict[str, object]:
         return {
@@ -131,6 +132,7 @@ class DepthRegion:
             "source_width": self.source_width,
             "source_height": self.source_height,
             "front": self.front,
+            "mesh_lines": self.mesh_lines,
         }
 
 
@@ -586,18 +588,109 @@ class DepthOverlayBuilder:
         if points.size == 0:
             return []
 
-        # These labels intentionally use simple height thresholds. They are
-        # easy to tune on the robot and match the standalone terminal monitor.
-        flat_mask = points[:, 2] >= self.args.depth_ground_min_height
-        flat_mask &= points[:, 2] <= self.args.depth_ground_max_height
+        ground_plane = self.fit_ground_plane(samples)
+        height_above_ground = self.height_above_ground(points, ground_plane)
 
-        obstacle_mask = points[:, 2] >= self.args.depth_obstacle_min_height
-        obstacle_mask &= points[:, 2] <= self.args.depth_obstacle_max_height
+        # Height thresholds are relative to the fitted visible floor plane.
+        # This lets the overlay follow the floor when the head pitches down.
+        flat_mask = height_above_ground >= self.args.depth_ground_min_height
+        flat_mask &= height_above_ground <= self.args.depth_ground_max_height
+
+        obstacle_mask = height_above_ground >= self.args.depth_obstacle_min_height
+        obstacle_mask &= height_above_ground <= self.args.depth_obstacle_max_height
 
         regions = []
-        regions.extend(self.regions_for_mask("flat", samples, flat_mask))
-        regions.extend(self.regions_for_mask("obstacle", samples, obstacle_mask))
+        flat_mesh = self.ground_mesh_for_mask(samples, flat_mask, height_above_ground)
+        if flat_mesh is not None:
+            regions.append(flat_mesh)
+
+        obstacle_regions = self.obstacle_regions_for_components(
+            samples, obstacle_mask, height_above_ground
+        )
+        regions.extend(self.merge_obstacle_regions(obstacle_regions))
         return regions
+
+    def fit_ground_plane(self, samples: DepthPixelMap) -> object:
+        """Fit z = ax + by + c for the currently visible floor.
+
+        The T1 head pitch changes the apparent floor slope in camera/head
+        coordinates. A fitted plane is more stable than one global floor height.
+        """
+
+        if not self.args.depth_auto_ground:
+            return np.array([0.0, 0.0, 0.0], dtype=np.float32)
+
+        points = samples.local_points
+        if points.shape[0] < 3:
+            return np.array([0.0, 0.0, 0.0], dtype=np.float32)
+
+        candidate_indices = self.ground_candidate_indices(samples)
+        if candidate_indices.size < 3:
+            ground_z = self.estimate_ground_height(samples)
+            return np.array([0.0, 0.0, ground_z], dtype=np.float32)
+
+        candidates = points[candidate_indices]
+        coeff = self.solve_ground_plane(candidates)
+        for _ in range(max(0, self.args.depth_ground_plane_refine_iterations)):
+            residual = self.height_above_ground(candidates, coeff)
+            inliers = np.abs(residual) <= self.args.depth_ground_plane_inlier_height
+            if int(np.count_nonzero(inliers)) < 3:
+                break
+            coeff = self.solve_ground_plane(candidates[inliers])
+        return coeff
+
+    def ground_candidate_indices(self, samples: DepthPixelMap) -> object:
+        points = samples.local_points
+        v = samples.pixel_v
+        min_v = samples.image_height * self.args.depth_ground_fit_min_v_ratio
+        usable = np.flatnonzero(v >= min_v)
+        if usable.size == 0:
+            usable = np.arange(points.shape[0])
+
+        rows = max(2, self.args.depth_ground_fit_rows)
+        edges = np.linspace(float(np.min(v[usable])), float(np.max(v[usable])), rows + 1)
+        selected = []
+        percentile = min(100.0, max(0.0, self.args.depth_ground_fit_percentile))
+        slack = max(0.0, self.args.depth_ground_fit_slack)
+
+        # Pick low-height samples from each image band so far floor can still
+        # help the plane fit even when nearby objects occupy the lower image.
+        for index in range(rows):
+            upper = edges[index]
+            lower = edges[index + 1]
+            below_upper = v[usable] >= upper
+            below_lower = v[usable] <= lower if index == rows - 1 else v[usable] < lower
+            in_band = usable[below_upper & below_lower]
+            if in_band.size < self.args.depth_ground_fit_min_points_per_row:
+                continue
+            z_values = points[in_band, 2]
+            cutoff = float(np.percentile(z_values, percentile)) + slack
+            selected.extend(in_band[z_values <= cutoff])
+
+        if not selected:
+            return np.empty(0, dtype=np.int32)
+        return np.array(selected, dtype=np.int32)
+
+    def solve_ground_plane(self, points: object) -> object:
+        matrix = np.column_stack((points[:, 0], points[:, 1], np.ones(points.shape[0])))
+        coeff, *_ = np.linalg.lstsq(matrix, points[:, 2], rcond=None)
+        return coeff.astype(np.float32)
+
+    def height_above_ground(self, points: object, plane: object) -> object:
+        ground_z = points[:, 0] * plane[0] + points[:, 1] * plane[1] + plane[2]
+        return points[:, 2] - ground_z
+
+    def estimate_ground_height(self, samples: DepthPixelMap) -> float:
+        points = samples.local_points
+        if points.size == 0:
+            return 0.0
+
+        # The floor usually appears lower in the image. A low z percentile keeps
+        # the estimate from jumping up when a person or robot enters the frame.
+        lower_image = samples.pixel_v >= samples.image_height * self.args.depth_ground_image_min_v_ratio
+        candidates = points[lower_image] if np.any(lower_image) else points
+        percentile = min(100.0, max(0.0, self.args.depth_ground_percentile))
+        return float(np.percentile(candidates[:, 2], percentile))
 
     def project(self, depth_m: object, intrinsics: CameraIntrinsics) -> DepthPixelMap:
         height, width = depth_m.shape
@@ -642,11 +735,13 @@ class DepthOverlayBuilder:
         kind: str,
         samples: DepthPixelMap,
         mask: object,
+        height_above_ground: object,
     ) -> list[DepthRegion]:
         if not np.any(mask):
             return []
 
         points = samples.local_points[mask]
+        heights = height_above_ground[mask]
         u = samples.pixel_u[mask]
         v = samples.pixel_v[mask]
         cols = max(1, self.args.depth_region_cols)
@@ -668,6 +763,7 @@ class DepthOverlayBuilder:
             region_u = u[indices]
             region_v = v[indices]
             region_points = points[indices]
+            region_heights = heights[indices]
             xmin = int(max(0, math.floor(float(np.min(region_u)) - pad)))
             ymin = int(max(0, math.floor(float(np.min(region_v)) - pad)))
             xmax = int(min(samples.image_width - 1, math.ceil(float(np.max(region_u)) + pad)))
@@ -678,7 +774,7 @@ class DepthOverlayBuilder:
             mean_x = float(np.mean(region_points[:, 0]))
             mean_y = float(np.mean(region_points[:, 1]))
             nearest_x = float(np.min(region_points[:, 0]))
-            max_height = float(np.max(region_points[:, 2]))
+            max_height = float(np.max(region_heights))
             front = (
                 kind == "obstacle"
                 and self.args.depth_front_min_x <= nearest_x <= self.args.depth_front_max_x
@@ -702,7 +798,291 @@ class DepthOverlayBuilder:
         # Show the strongest evidence first. Obstacles with many points produce
         # larger, more stable red polygons in the overlay.
         regions.sort(key=lambda region: region.count, reverse=True)
+        if kind == "obstacle":
+            return regions
         return regions[:max_polygons] if max_polygons else regions
+
+    def obstacle_regions_for_components(
+        self,
+        samples: DepthPixelMap,
+        mask: object,
+        height_above_ground: object,
+    ) -> list[DepthRegion]:
+        """Group obstacle points by actual connected image components.
+
+        This avoids the old coarse grid behavior where separate chairs, people,
+        and tables could all chain into one huge red rectangle.
+        """
+
+        if not np.any(mask):
+            return []
+
+        points = samples.local_points[mask]
+        heights = height_above_ground[mask]
+        u = samples.pixel_u[mask]
+        v = samples.pixel_v[mask]
+        cell_px = max(1, self.args.depth_obstacle_component_cell_px)
+        gap_cells = max(0, self.args.depth_obstacle_component_gap_cells)
+        min_points = max(1, self.args.depth_min_region_points)
+        pad = max(0, self.args.depth_polygon_padding_px)
+        cols = max(1, int(math.ceil(samples.image_width / cell_px)))
+        rows = max(1, int(math.ceil(samples.image_height / cell_px)))
+
+        cell_x = np.clip((u / cell_px).astype(np.int32), 0, cols - 1)
+        cell_y = np.clip((v / cell_px).astype(np.int32), 0, rows - 1)
+        occupied = np.zeros((rows, cols), dtype=bool)
+        cell_indices: dict[tuple[int, int], list[int]] = {}
+        for index, (cx, cy) in enumerate(zip(cell_x, cell_y)):
+            key = (int(cy), int(cx))
+            occupied[key] = True
+            cell_indices.setdefault(key, []).append(index)
+
+        visited = np.zeros((rows, cols), dtype=bool)
+        regions = []
+        for start_y, start_x in np.argwhere(occupied):
+            start = (int(start_y), int(start_x))
+            if visited[start]:
+                continue
+
+            stack = [start]
+            component_cells = []
+            visited[start] = True
+            while stack:
+                cy, cx = stack.pop()
+                component_cells.append((cy, cx))
+                for ny in range(max(0, cy - gap_cells - 1), min(rows, cy + gap_cells + 2)):
+                    for nx in range(max(0, cx - gap_cells - 1), min(cols, cx + gap_cells + 2)):
+                        if visited[ny, nx] or not occupied[ny, nx]:
+                            continue
+                        visited[ny, nx] = True
+                        stack.append((ny, nx))
+
+            indices = []
+            for key in component_cells:
+                indices.extend(cell_indices.get(key, []))
+            indices = np.array(indices, dtype=np.int32)
+            if indices.size < min_points:
+                continue
+
+            region = self.depth_region_from_indices(
+                "obstacle", samples, u, v, points, heights, indices, pad
+            )
+            if region is not None:
+                regions.append(region)
+
+        regions.sort(key=lambda region: region.count, reverse=True)
+        max_polygons = max(0, self.args.depth_max_polygons_per_class)
+        return regions[:max_polygons] if max_polygons else regions
+
+    def depth_region_from_indices(
+        self,
+        kind: str,
+        samples: DepthPixelMap,
+        u: object,
+        v: object,
+        points: object,
+        heights: object,
+        indices: object,
+        pad: int,
+    ) -> Optional[DepthRegion]:
+        region_u = u[indices]
+        region_v = v[indices]
+        region_points = points[indices]
+        region_heights = heights[indices]
+        xmin = int(max(0, math.floor(float(np.min(region_u)) - pad)))
+        ymin = int(max(0, math.floor(float(np.min(region_v)) - pad)))
+        xmax = int(min(samples.image_width - 1, math.ceil(float(np.max(region_u)) + pad)))
+        ymax = int(min(samples.image_height - 1, math.ceil(float(np.max(region_v)) + pad)))
+        if xmax <= xmin or ymax <= ymin:
+            return None
+
+        mean_x = float(np.mean(region_points[:, 0]))
+        mean_y = float(np.mean(region_points[:, 1]))
+        nearest_x = float(np.min(region_points[:, 0]))
+        max_height = float(np.max(region_heights))
+        front = (
+            kind == "obstacle"
+            and self.args.depth_front_min_x <= nearest_x <= self.args.depth_front_max_x
+            and abs(mean_y) <= self.args.depth_front_half_width
+        )
+
+        return DepthRegion(
+            kind=kind,
+            polygon=[[xmin, ymin], [xmax, ymin], [xmax, ymax], [xmin, ymax]],
+            count=int(indices.size),
+            mean_x=mean_x,
+            mean_y=mean_y,
+            nearest_x=nearest_x,
+            max_height=max_height,
+            source_width=samples.image_width,
+            source_height=samples.image_height,
+            front=front,
+        )
+
+    def ground_mesh_for_mask(
+        self,
+        samples: DepthPixelMap,
+        mask: object,
+        height_above_ground: object,
+    ) -> Optional[DepthRegion]:
+        """Create one green ground zone with mesh lines instead of floor boxes."""
+
+        if not np.any(mask):
+            return None
+
+        points = samples.local_points[mask]
+        heights = height_above_ground[mask]
+        u = samples.pixel_u[mask]
+        v = samples.pixel_v[mask]
+        min_points = max(1, self.args.depth_ground_mesh_min_points_per_row)
+        rows = max(2, self.args.depth_ground_mesh_rows)
+        edge_percentile = min(45.0, max(0.0, self.args.depth_ground_mesh_edge_percentile))
+        min_width = max(1, self.args.depth_ground_mesh_min_width_px)
+
+        v_min = float(np.min(v))
+        v_max = float(np.max(v))
+        if v_max <= v_min:
+            return None
+
+        bands = []
+        band_edges = np.linspace(v_min, v_max, rows + 1)
+        for index in range(rows):
+            upper = band_edges[index]
+            lower = band_edges[index + 1]
+            in_band = (v >= upper) & (v <= lower if index == rows - 1 else v < lower)
+            if int(np.count_nonzero(in_band)) < min_points:
+                continue
+
+            band_u = u[in_band]
+            band_v = v[in_band]
+            left = float(np.percentile(band_u, edge_percentile))
+            right = float(np.percentile(band_u, 100.0 - edge_percentile))
+            center_v = float(np.median(band_v))
+            if right - left < min_width:
+                continue
+            bands.append((left, right, center_v))
+
+        if len(bands) < 2:
+            return None
+
+        # Build a single floor-zone polygon by walking down the left edge and
+        # back up the right edge. This reads as a ground mesh, not box clutter.
+        bands.sort(key=lambda item: item[2])
+        left_edge = [[int(round(left)), int(round(y))] for left, _, y in bands]
+        right_edge = [[int(round(right)), int(round(y))] for _, right, y in reversed(bands)]
+        polygon = left_edge + right_edge
+
+        mesh_lines = []
+        for left, right, y in bands:
+            mesh_lines.append([[int(round(left)), int(round(y))], [int(round(right)), int(round(y))]])
+
+        for fraction in self.args.depth_ground_mesh_vertical_fractions:
+            column = []
+            for left, right, y in bands:
+                x = left + (right - left) * fraction
+                column.append([int(round(x)), int(round(y))])
+            if len(column) >= 2:
+                mesh_lines.append(column)
+
+        return DepthRegion(
+            kind="flat",
+            polygon=polygon,
+            count=int(points.shape[0]),
+            mean_x=float(np.mean(points[:, 0])),
+            mean_y=float(np.mean(points[:, 1])),
+            nearest_x=float(np.min(points[:, 0])),
+            max_height=float(np.max(heights)),
+            source_width=samples.image_width,
+            source_height=samples.image_height,
+            mesh_lines=mesh_lines,
+        )
+
+    def merge_obstacle_regions(self, regions: list[DepthRegion]) -> list[DepthRegion]:
+        """Merge obstacle boxes that overlap or sit right next to each other."""
+
+        gap = max(0, self.args.depth_obstacle_merge_gap_px)
+        merged = list(regions)
+        changed = True
+        while changed:
+            changed = False
+            next_regions = []
+            consumed = [False] * len(merged)
+            for index, region in enumerate(merged):
+                if consumed[index]:
+                    continue
+                current = region
+                consumed[index] = True
+                for other_index in range(index + 1, len(merged)):
+                    if consumed[other_index]:
+                        continue
+                    other = merged[other_index]
+                    if self.regions_are_close(current, other, gap):
+                        current = self.merge_two_regions(current, other)
+                        consumed[other_index] = True
+                        changed = True
+                next_regions.append(current)
+            merged = next_regions
+
+        merged.sort(key=lambda region: region.count, reverse=True)
+        max_polygons = max(0, self.args.depth_max_polygons_per_class)
+        return merged[:max_polygons] if max_polygons else merged
+
+    def regions_are_close(self, first: DepthRegion, second: DepthRegion, gap: int) -> bool:
+        if abs(first.mean_x - second.mean_x) > self.args.depth_obstacle_merge_max_x_delta:
+            return False
+        if abs(first.mean_y - second.mean_y) > self.args.depth_obstacle_merge_max_y_delta:
+            return False
+
+        first_box = self.expanded_region_box(first)
+        second_box = self.expanded_region_box(second)
+        boxes_touch = not (
+            first_box[2] + gap < second_box[0]
+            or second_box[2] + gap < first_box[0]
+            or first_box[3] + gap < second_box[1]
+            or second_box[3] + gap < first_box[1]
+        )
+        if not boxes_touch:
+            return False
+
+        union_box = (
+            min(first_box[0], second_box[0]),
+            min(first_box[1], second_box[1]),
+            max(first_box[2], second_box[2]),
+            max(first_box[3], second_box[3]),
+        )
+        union_area = self.box_area(union_box)
+        separate_area = self.box_area(first_box) + self.box_area(second_box)
+        return union_area <= separate_area * self.args.depth_obstacle_merge_max_area_growth
+
+    def expanded_region_box(self, region: DepthRegion, gap: int = 0) -> tuple[int, int, int, int]:
+        xs = [point[0] for point in region.polygon]
+        ys = [point[1] for point in region.polygon]
+        return min(xs) - gap, min(ys) - gap, max(xs) + gap, max(ys) + gap
+
+    def box_area(self, box: tuple[int, int, int, int]) -> int:
+        return max(1, box[2] - box[0]) * max(1, box[3] - box[1])
+
+    def merge_two_regions(self, first: DepthRegion, second: DepthRegion) -> DepthRegion:
+        first_box = self.expanded_region_box(first)
+        second_box = self.expanded_region_box(second)
+        xmin = min(first_box[0], second_box[0])
+        ymin = min(first_box[1], second_box[1])
+        xmax = max(first_box[2], second_box[2])
+        ymax = max(first_box[3], second_box[3])
+        total_count = max(1, first.count + second.count)
+
+        return DepthRegion(
+            kind="obstacle",
+            polygon=[[xmin, ymin], [xmax, ymin], [xmax, ymax], [xmin, ymax]],
+            count=total_count,
+            mean_x=(first.mean_x * first.count + second.mean_x * second.count) / total_count,
+            mean_y=(first.mean_y * first.count + second.mean_y * second.count) / total_count,
+            nearest_x=min(first.nearest_x, second.nearest_x),
+            max_height=max(first.max_height, second.max_height),
+            source_width=first.source_width,
+            source_height=first.source_height,
+            front=first.front or second.front,
+        )
 
 
 class DepthOverlayNode(Node):
@@ -894,7 +1274,8 @@ INDEX_HTML = """<!doctype html>
     .box-text { fill: #fff; font-size: 22px; font-weight: 700; paint-order: stroke; stroke: #000; stroke-width: 4px; stroke-linejoin: round; }
     .center-dot { fill: #ff2d16; stroke: #7a0e06; stroke-width: 2; vector-effect: non-scaling-stroke; }
     .center-text { fill: #ffe94a; font-size: 22px; font-weight: 800; paint-order: stroke; stroke: #000; stroke-width: 4px; stroke-linejoin: round; }
-    .flat-poly { fill: rgba(0, 230, 118, .22); stroke: #00e676; stroke-width: 3; vector-effect: non-scaling-stroke; }
+    .flat-poly { fill: rgba(0, 230, 118, .16); stroke: #00e676; stroke-width: 3; vector-effect: non-scaling-stroke; }
+    .flat-mesh-line { fill: none; stroke: rgba(210, 255, 225, .85); stroke-width: 2; vector-effect: non-scaling-stroke; }
     .obstacle-poly { fill: rgba(255, 45, 22, .30); stroke: #ff2d16; stroke-width: 4; vector-effect: non-scaling-stroke; }
     .front-obstacle-poly { fill: rgba(255, 45, 22, .42); stroke: #fff; stroke-width: 5; vector-effect: non-scaling-stroke; }
     .depth-text { fill: #fff; font-size: 20px; font-weight: 800; paint-order: stroke; stroke: #000; stroke-width: 4px; stroke-linejoin: round; }
@@ -955,6 +1336,15 @@ INDEX_HTML = """<!doctype html>
         .join(' ');
     }
 
+    function polylinePoints(line, region) {
+      return (line ?? [])
+        .map((point) => {
+          const [x, y] = scaledDepthPoint(point, region);
+          return `${x},${y}`;
+        })
+        .join(' ');
+    }
+
     function renderDepthRegions(regions) {
       // The depth layer is drawn first so YOLO boxes remain readable on top.
       for (const region of regions) {
@@ -968,6 +1358,15 @@ INDEX_HTML = """<!doctype html>
           ? (region.front ? 'front-obstacle-poly' : 'obstacle-poly')
           : 'flat-poly';
         overlay.appendChild(makeSvg('polygon', {class: className, points}));
+
+        if (!isObstacle) {
+          for (const line of region.mesh_lines ?? []) {
+            const linePoints = polylinePoints(line, region);
+            if (linePoints) {
+              overlay.appendChild(makeSvg('polyline', {class: 'flat-mesh-line', points: linePoints}));
+            }
+          }
+        }
 
         if (!isObstacle) {
           continue;
@@ -1141,15 +1540,73 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--depth-sample-step", type=int, default=8, help="sample every Nth depth pixel")
     parser.add_argument("--depth-min-depth", type=float, default=0.15)
-    parser.add_argument("--depth-max-depth", type=float, default=4.0)
+    parser.add_argument("--depth-max-depth", type=float, default=6.0)
     parser.add_argument("--depth-map-min-x", type=float, default=0.0)
-    parser.add_argument("--depth-map-max-x", type=float, default=3.0)
-    parser.add_argument("--depth-map-half-width", type=float, default=2.0)
+    parser.add_argument("--depth-map-max-x", type=float, default=5.0)
+    parser.add_argument("--depth-map-half-width", type=float, default=3.0)
     parser.add_argument("--depth-self-exclusion-x", type=float, default=0.20)
     parser.add_argument("--depth-self-exclusion-y", type=float, default=0.35)
-    parser.add_argument("--depth-ground-min-height", type=float, default=-0.08)
-    parser.add_argument("--depth-ground-max-height", type=float, default=0.08)
-    parser.add_argument("--depth-obstacle-min-height", type=float, default=0.15)
+    parser.add_argument("--depth-ground-min-height", type=float, default=-0.10)
+    parser.add_argument("--depth-ground-max-height", type=float, default=0.14)
+    parser.add_argument(
+        "--depth-auto-ground",
+        nargs="?",
+        const=True,
+        default=True,
+        type=str_to_bool,
+        help="estimate floor height from each depth frame before classifying flat/obstacle points",
+    )
+    parser.add_argument(
+        "--depth-ground-percentile",
+        type=float,
+        default=12.0,
+        help="low z percentile used as the visible floor estimate",
+    )
+    parser.add_argument(
+        "--depth-ground-image-min-v-ratio",
+        type=float,
+        default=0.45,
+        help="only use pixels below this image-height ratio when estimating floor height",
+    )
+    parser.add_argument(
+        "--depth-ground-fit-min-v-ratio",
+        type=float,
+        default=0.18,
+        help="minimum image-height ratio used when fitting the tilted floor plane",
+    )
+    parser.add_argument("--depth-ground-fit-rows", type=int, default=10)
+    parser.add_argument("--depth-ground-fit-min-points-per-row", type=int, default=5)
+    parser.add_argument(
+        "--depth-ground-fit-percentile",
+        type=float,
+        default=38.0,
+        help="low-height percentile selected from each image band for floor-plane fitting",
+    )
+    parser.add_argument(
+        "--depth-ground-fit-slack",
+        type=float,
+        default=0.04,
+        help="extra height margin, in meters, above the selected floor percentile",
+    )
+    parser.add_argument(
+        "--depth-ground-plane-inlier-height",
+        type=float,
+        default=0.12,
+        help="height residual, in meters, used when refining the fitted floor plane",
+    )
+    parser.add_argument("--depth-ground-plane-refine-iterations", type=int, default=2)
+    parser.add_argument("--depth-ground-mesh-rows", type=int, default=8)
+    parser.add_argument("--depth-ground-mesh-min-points-per-row", type=int, default=6)
+    parser.add_argument("--depth-ground-mesh-edge-percentile", type=float, default=8.0)
+    parser.add_argument("--depth-ground-mesh-min-width-px", type=int, default=30)
+    parser.add_argument(
+        "--depth-ground-mesh-vertical-fractions",
+        type=float,
+        nargs="*",
+        default=[0.25, 0.5, 0.75],
+        help="fractions across the floor zone where vertical mesh lines are drawn",
+    )
+    parser.add_argument("--depth-obstacle-min-height", type=float, default=0.22)
     parser.add_argument("--depth-obstacle-max-height", type=float, default=2.0)
     parser.add_argument("--depth-front-min-x", type=float, default=0.20)
     parser.add_argument("--depth-front-max-x", type=float, default=1.20)
@@ -1159,6 +1616,42 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--depth-min-region-points", type=int, default=6)
     parser.add_argument("--depth-max-polygons-per-class", type=int, default=20)
     parser.add_argument("--depth-polygon-padding-px", type=int, default=6)
+    parser.add_argument(
+        "--depth-obstacle-component-cell-px",
+        type=int,
+        default=18,
+        help="small image cell size used to group obstacle points into connected components",
+    )
+    parser.add_argument(
+        "--depth-obstacle-component-gap-cells",
+        type=int,
+        default=0,
+        help="extra empty component cells allowed when grouping obstacle points",
+    )
+    parser.add_argument(
+        "--depth-obstacle-merge-gap-px",
+        type=int,
+        default=14,
+        help="merge obstacle boxes only when their image boxes are this close",
+    )
+    parser.add_argument(
+        "--depth-obstacle-merge-max-x-delta",
+        type=float,
+        default=0.45,
+        help="maximum forward-distance difference, in meters, for merging obstacle boxes",
+    )
+    parser.add_argument(
+        "--depth-obstacle-merge-max-y-delta",
+        type=float,
+        default=0.45,
+        help="maximum lateral-distance difference, in meters, for merging obstacle boxes",
+    )
+    parser.add_argument(
+        "--depth-obstacle-merge-max-area-growth",
+        type=float,
+        default=1.8,
+        help="reject merges that would create a mostly-empty oversized box",
+    )
     parser.add_argument(
         "--no-depth-config-extrin",
         action="store_false",
@@ -1170,6 +1663,25 @@ def parse_args() -> argparse.Namespace:
     apply_legacy_key_value_args(args, extras)
     if args.depth_sample_step < 1:
         raise SystemExit("--depth-sample-step must be >= 1")
+    if args.depth_ground_mesh_rows < 2:
+        raise SystemExit("--depth-ground-mesh-rows must be >= 2")
+    if args.depth_ground_mesh_min_points_per_row < 1:
+        raise SystemExit("--depth-ground-mesh-min-points-per-row must be >= 1")
+    if args.depth_ground_fit_rows < 2:
+        raise SystemExit("--depth-ground-fit-rows must be >= 2")
+    if args.depth_ground_fit_min_points_per_row < 1:
+        raise SystemExit("--depth-ground-fit-min-points-per-row must be >= 1")
+    if args.depth_obstacle_component_cell_px < 1:
+        raise SystemExit("--depth-obstacle-component-cell-px must be >= 1")
+    if args.depth_obstacle_component_gap_cells < 0:
+        raise SystemExit("--depth-obstacle-component-gap-cells must be >= 0")
+    args.depth_ground_image_min_v_ratio = min(1.0, max(0.0, args.depth_ground_image_min_v_ratio))
+    args.depth_ground_fit_min_v_ratio = min(1.0, max(0.0, args.depth_ground_fit_min_v_ratio))
+    args.depth_ground_fit_percentile = min(100.0, max(0.0, args.depth_ground_fit_percentile))
+    args.depth_ground_mesh_vertical_fractions = [
+        min(1.0, max(0.0, fraction))
+        for fraction in args.depth_ground_mesh_vertical_fractions
+    ]
     return args
 
 
