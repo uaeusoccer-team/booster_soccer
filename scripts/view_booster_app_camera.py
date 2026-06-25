@@ -153,10 +153,16 @@ class FrameStore:
     depth_connected: bool = False
     depth_last_error: str = ""
     depth_last_update: float = 0.0
+    frame_width: int = 0
+    frame_height: int = 0
 
     def set_frame(self, jpeg: bytes) -> None:
         with self.condition:
             self.jpeg = jpeg
+            width, height = jpeg_dimensions(jpeg)
+            if width and height:
+                self.frame_width = width
+                self.frame_height = height
             self.frame_id += 1
             self.last_update = time.time()
             self.last_error = ""
@@ -193,11 +199,80 @@ class FrameStore:
 
     def set_depth_regions(self, regions: list[DepthRegion]) -> None:
         with self.condition:
-            self.depth_regions = regions
+            self.depth_regions = self.filter_ball_obstacle_regions(regions)
             self.depth_last_update = time.time()
             self.depth_last_error = ""
             self.depth_connected = True
             self.condition.notify_all()
+
+    def filter_ball_obstacle_regions(self, regions: list[DepthRegion]) -> list[DepthRegion]:
+        ball_detections = [detection for detection in self.detections if detection.is_ball()]
+        if not ball_detections or not self.frame_width or not self.frame_height:
+            return regions
+
+        filtered = []
+        for region in regions:
+            if region.kind == "obstacle" and any(
+                self.region_matches_ball(region, ball) for ball in ball_detections
+            ):
+                continue
+            filtered.append(region)
+        return filtered
+
+    def region_matches_ball(self, region: DepthRegion, ball: Detection) -> bool:
+        region_box = self.scaled_region_box(region)
+        ball_box = (ball.xmin, ball.ymin, ball.xmax, ball.ymax)
+        overlap = self.box_intersection_area(region_box, ball_box)
+        if overlap <= 0:
+            return False
+
+        region_area = self.box_area(region_box)
+        ball_area = self.box_area(ball_box)
+        center_x = (region_box[0] + region_box[2]) / 2.0
+        center_y = (region_box[1] + region_box[3]) / 2.0
+        padded_ball = self.expand_box(ball_box, 0.20)
+        center_inside_ball = (
+            padded_ball[0] <= center_x <= padded_ball[2]
+            and padded_ball[1] <= center_y <= padded_ball[3]
+        )
+
+        overlap_ratio = overlap / min(region_area, ball_area)
+        ball_sized_depth_region = region_area <= ball_area * 8.0
+        return ball_sized_depth_region and (overlap_ratio >= 0.12 or center_inside_ball)
+
+    def scaled_region_box(self, region: DepthRegion) -> tuple[float, float, float, float]:
+        source_width = region.source_width or self.frame_width
+        source_height = region.source_height or self.frame_height
+        scale_x = self.frame_width / source_width if source_width else 1.0
+        scale_y = self.frame_height / source_height if source_height else 1.0
+        xs = [point[0] * scale_x for point in region.polygon]
+        ys = [point[1] * scale_y for point in region.polygon]
+        return min(xs), min(ys), max(xs), max(ys)
+
+    def expand_box(
+        self, box: tuple[float, float, float, float], fraction: float
+    ) -> tuple[float, float, float, float]:
+        width = box[2] - box[0]
+        height = box[3] - box[1]
+        pad_x = width * fraction
+        pad_y = height * fraction
+        return box[0] - pad_x, box[1] - pad_y, box[2] + pad_x, box[3] + pad_y
+
+    def box_intersection_area(
+        self,
+        first: tuple[float, float, float, float],
+        second: tuple[float, float, float, float],
+    ) -> float:
+        x0 = max(first[0], second[0])
+        y0 = max(first[1], second[1])
+        x1 = min(first[2], second[2])
+        y1 = min(first[3], second[3])
+        if x1 <= x0 or y1 <= y0:
+            return 0.0
+        return (x1 - x0) * (y1 - y0)
+
+    def box_area(self, box: tuple[float, float, float, float]) -> float:
+        return max(1.0, box[2] - box[0]) * max(1.0, box[3] - box[1])
 
     def set_depth_status(self, *, connected: Optional[bool] = None, error: str = "") -> None:
         with self.condition:
@@ -339,6 +414,58 @@ def extract_jpeg(payload: bytes) -> Optional[bytes]:
     if end < start:
         return None
     return payload[start : end + len(JPEG_EOI)]
+
+
+def jpeg_dimensions(jpeg: bytes) -> tuple[int, int]:
+    """Read width/height from a JPEG SOF marker without decoding the image."""
+
+    if not jpeg.startswith(JPEG_SOI):
+        return 0, 0
+
+    index = 2
+    sof_markers = {
+        0xC0,
+        0xC1,
+        0xC2,
+        0xC3,
+        0xC5,
+        0xC6,
+        0xC7,
+        0xC9,
+        0xCA,
+        0xCB,
+        0xCD,
+        0xCE,
+        0xCF,
+    }
+    standalone_markers = {0x01, *range(0xD0, 0xD8), 0xD8, 0xD9}
+
+    while index + 3 < len(jpeg):
+        if jpeg[index] != 0xFF:
+            index += 1
+            continue
+        while index < len(jpeg) and jpeg[index] == 0xFF:
+            index += 1
+        if index >= len(jpeg):
+            break
+
+        marker = jpeg[index]
+        index += 1
+        if marker in standalone_markers:
+            continue
+        if index + 2 > len(jpeg):
+            break
+
+        segment_length = int.from_bytes(jpeg[index : index + 2], "big")
+        if segment_length < 2 or index + segment_length > len(jpeg):
+            break
+        if marker in sof_markers and segment_length >= 7:
+            height = int.from_bytes(jpeg[index + 3 : index + 5], "big")
+            width = int.from_bytes(jpeg[index + 5 : index + 7], "big")
+            return width, height
+        index += segment_length
+
+    return 0, 0
 
 
 def camera_reader(store: FrameStore, host: str, port: int, path: str, timeout: float) -> None:
@@ -824,6 +951,7 @@ class DepthOverlayBuilder:
         cell_px = max(1, self.args.depth_obstacle_component_cell_px)
         gap_cells = max(0, self.args.depth_obstacle_component_gap_cells)
         min_points = max(1, self.args.depth_min_region_points)
+        min_points_per_cell = max(1, self.args.depth_obstacle_component_min_points_per_cell)
         pad = max(0, self.args.depth_polygon_padding_px)
         cols = max(1, int(math.ceil(samples.image_width / cell_px)))
         rows = max(1, int(math.ceil(samples.image_height / cell_px)))
@@ -834,8 +962,17 @@ class DepthOverlayBuilder:
         cell_indices: dict[tuple[int, int], list[int]] = {}
         for index, (cx, cy) in enumerate(zip(cell_x, cell_y)):
             key = (int(cy), int(cx))
-            occupied[key] = True
             cell_indices.setdefault(key, []).append(index)
+
+        cell_mean_x: dict[tuple[int, int], float] = {}
+        cell_mean_y: dict[tuple[int, int], float] = {}
+        for key, indices_for_cell in cell_indices.items():
+            if len(indices_for_cell) < min_points_per_cell:
+                continue
+            cell_points = points[np.array(indices_for_cell, dtype=np.int32)]
+            occupied[key] = True
+            cell_mean_x[key] = float(np.mean(cell_points[:, 0]))
+            cell_mean_y[key] = float(np.mean(cell_points[:, 1]))
 
         visited = np.zeros((rows, cols), dtype=bool)
         regions = []
@@ -853,6 +990,10 @@ class DepthOverlayBuilder:
                 for ny in range(max(0, cy - gap_cells - 1), min(rows, cy + gap_cells + 2)):
                     for nx in range(max(0, cx - gap_cells - 1), min(cols, cx + gap_cells + 2)):
                         if visited[ny, nx] or not occupied[ny, nx]:
+                            continue
+                        if not self.obstacle_cells_are_close(
+                            (cy, cx), (int(ny), int(nx)), cell_mean_x, cell_mean_y
+                        ):
                             continue
                         visited[ny, nx] = True
                         stack.append((ny, nx))
@@ -873,6 +1014,19 @@ class DepthOverlayBuilder:
         regions.sort(key=lambda region: region.count, reverse=True)
         max_polygons = max(0, self.args.depth_max_polygons_per_class)
         return regions[:max_polygons] if max_polygons else regions
+
+    def obstacle_cells_are_close(
+        self,
+        first: tuple[int, int],
+        second: tuple[int, int],
+        cell_mean_x: dict[tuple[int, int], float],
+        cell_mean_y: dict[tuple[int, int], float],
+    ) -> bool:
+        if abs(cell_mean_x[first] - cell_mean_x[second]) > self.args.depth_obstacle_component_max_x_delta:
+            return False
+        if abs(cell_mean_y[first] - cell_mean_y[second]) > self.args.depth_obstacle_component_max_y_delta:
+            return False
+        return True
 
     def depth_region_from_indices(
         self,
@@ -1029,6 +1183,8 @@ class DepthOverlayBuilder:
 
     def regions_are_close(self, first: DepthRegion, second: DepthRegion, gap: int) -> bool:
         if abs(first.mean_x - second.mean_x) > self.args.depth_obstacle_merge_max_x_delta:
+            return False
+        if abs(first.nearest_x - second.nearest_x) > self.args.depth_obstacle_merge_max_nearest_x_delta:
             return False
         if abs(first.mean_y - second.mean_y) > self.args.depth_obstacle_merge_max_y_delta:
             return False
@@ -1345,7 +1501,76 @@ INDEX_HTML = """<!doctype html>
         .join(' ');
     }
 
-    function renderDepthRegions(regions) {
+    function detectionIsBall(det) {
+      return String(det.label ?? '').trim().toLowerCase() === 'ball';
+    }
+
+    function detectionBox(det) {
+      return [Number(det.xmin), Number(det.ymin), Number(det.xmax), Number(det.ymax)];
+    }
+
+    function depthRegionBox(region) {
+      const points = (region.polygon ?? []).map((point) => scaledDepthPoint(point, region));
+      const xs = points.map((point) => point[0]);
+      const ys = points.map((point) => point[1]);
+      return [Math.min(...xs), Math.min(...ys), Math.max(...xs), Math.max(...ys)];
+    }
+
+    function expandBox(box, fraction) {
+      const width = box[2] - box[0];
+      const height = box[3] - box[1];
+      return [
+        box[0] - width * fraction,
+        box[1] - height * fraction,
+        box[2] + width * fraction,
+        box[3] + height * fraction,
+      ];
+    }
+
+    function boxArea(box) {
+      return Math.max(1, box[2] - box[0]) * Math.max(1, box[3] - box[1]);
+    }
+
+    function intersectionArea(a, b) {
+      const x0 = Math.max(a[0], b[0]);
+      const y0 = Math.max(a[1], b[1]);
+      const x1 = Math.min(a[2], b[2]);
+      const y1 = Math.min(a[3], b[3]);
+      if (x1 <= x0 || y1 <= y0) {
+        return 0;
+      }
+      return (x1 - x0) * (y1 - y0);
+    }
+
+    function depthRegionMatchesBall(region) {
+      if (region.kind !== 'obstacle' || !(region.polygon ?? []).length) {
+        return false;
+      }
+
+      const regionBox = depthRegionBox(region);
+      const regionArea = boxArea(regionBox);
+      const regionCenterX = (regionBox[0] + regionBox[2]) / 2;
+      const regionCenterY = (regionBox[1] + regionBox[3]) / 2;
+
+      return latestDetections.some((det) => {
+        if (!detectionIsBall(det)) {
+          return false;
+        }
+        const ballBox = detectionBox(det);
+        const overlap = intersectionArea(regionBox, ballBox);
+        if (overlap <= 0) {
+          return false;
+        }
+        const ballArea = boxArea(ballBox);
+        const paddedBall = expandBox(ballBox, 0.2);
+        const centerInsideBall =
+          paddedBall[0] <= regionCenterX && regionCenterX <= paddedBall[2] &&
+          paddedBall[1] <= regionCenterY && regionCenterY <= paddedBall[3];
+        return overlap / regionArea >= 0.25 || (centerInsideBall && regionArea <= ballArea * 4);
+      });
+    }
+
+    function renderDepthRegions(regions, layer) {
       // The depth layer is drawn first so YOLO boxes remain readable on top.
       for (const region of regions) {
         const points = polygonPoints(region);
@@ -1354,16 +1579,19 @@ INDEX_HTML = """<!doctype html>
         }
 
         const isObstacle = region.kind === 'obstacle';
+        if (isObstacle && depthRegionMatchesBall(region)) {
+          continue;
+        }
         const className = isObstacle
           ? (region.front ? 'front-obstacle-poly' : 'obstacle-poly')
           : 'flat-poly';
-        overlay.appendChild(makeSvg('polygon', {class: className, points}));
+        layer.appendChild(makeSvg('polygon', {class: className, points}));
 
         if (!isObstacle) {
           for (const line of region.mesh_lines ?? []) {
             const linePoints = polylinePoints(line, region);
             if (linePoints) {
-              overlay.appendChild(makeSvg('polyline', {class: 'flat-mesh-line', points: linePoints}));
+              layer.appendChild(makeSvg('polyline', {class: 'flat-mesh-line', points: linePoints}));
             }
           }
         }
@@ -1387,12 +1615,12 @@ INDEX_HTML = """<!doctype html>
           Number.isFinite(maxHeight) ? `h=${maxHeight.toFixed(2)}m` : '',
           `n=${region.count ?? 0}`,
         ].filter(Boolean).join(' ');
-        overlay.appendChild(makeSvg('text', {class: 'depth-text', x: labelX, y: labelY}, label));
-        overlay.lastChild.textContent = label;
+        layer.appendChild(makeSvg('text', {class: 'depth-text', x: labelX, y: labelY}, label));
+        layer.lastChild.textContent = label;
       }
     }
 
-    function renderDetections(detections) {
+    function renderDetections(detections, layer) {
       // YOLO boxes are still drawn in the original image coordinate space.
       setOverlayViewBox();
       for (const det of detections) {
@@ -1409,20 +1637,22 @@ INDEX_HTML = """<!doctype html>
         const centerX = Math.round(x + width / 2);
         const centerY = Math.round(y + height / 2);
         const centerTextY = img.naturalHeight && y + height + 34 > img.naturalHeight ? y - 34 : y + height + 34;
-        overlay.appendChild(makeSvg('rect', {class: 'box', x, y, width, height, rx: 2}));
-        overlay.appendChild(makeSvg('text', {class: 'box-text', x: x + 4, y: textY}, label));
-        overlay.lastChild.textContent = label;
-        overlay.appendChild(makeSvg('circle', {class: 'center-dot', cx: centerX, cy: centerY, r: 8}));
-        overlay.appendChild(makeSvg('text', {class: 'center-text', x: x + 4, y: centerTextY}, `center=(${centerX},${centerY})`));
-        overlay.lastChild.textContent = `center=(${centerX},${centerY})`;
+        layer.appendChild(makeSvg('rect', {class: 'box', x, y, width, height, rx: 2}));
+        layer.appendChild(makeSvg('text', {class: 'box-text', x: x + 4, y: textY}, label));
+        layer.lastChild.textContent = label;
+        layer.appendChild(makeSvg('circle', {class: 'center-dot', cx: centerX, cy: centerY, r: 8}));
+        layer.appendChild(makeSvg('text', {class: 'center-text', x: x + 4, y: centerTextY}, `center=(${centerX},${centerY})`));
+        layer.lastChild.textContent = `center=(${centerX},${centerY})`;
       }
     }
 
     function renderOverlay() {
       setOverlayViewBox();
-      overlay.replaceChildren();
-      renderDepthRegions(latestDepthRegions);
-      renderDetections(latestDetections);
+      const depthLayer = makeSvg('g', {id: 'depth-overlay-layer'});
+      const yoloLayer = makeSvg('g', {id: 'yolo-detection-layer'});
+      renderDepthRegions(latestDepthRegions, depthLayer);
+      renderDetections(latestDetections, yoloLayer);
+      overlay.replaceChildren(depthLayer, yoloLayer);
     }
 
     async function updateStats() {
@@ -1619,8 +1849,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--depth-obstacle-component-cell-px",
         type=int,
-        default=18,
+        default=14,
         help="small image cell size used to group obstacle points into connected components",
+    )
+    parser.add_argument(
+        "--depth-obstacle-component-min-points-per-cell",
+        type=int,
+        default=2,
+        help="minimum obstacle samples needed in a component cell",
     )
     parser.add_argument(
         "--depth-obstacle-component-gap-cells",
@@ -1629,27 +1865,45 @@ def parse_args() -> argparse.Namespace:
         help="extra empty component cells allowed when grouping obstacle points",
     )
     parser.add_argument(
+        "--depth-obstacle-component-max-x-delta",
+        type=float,
+        default=0.18,
+        help="maximum forward-distance difference, in meters, between connected obstacle cells",
+    )
+    parser.add_argument(
+        "--depth-obstacle-component-max-y-delta",
+        type=float,
+        default=0.35,
+        help="maximum lateral-distance difference, in meters, between connected obstacle cells",
+    )
+    parser.add_argument(
         "--depth-obstacle-merge-gap-px",
         type=int,
-        default=14,
+        default=6,
         help="merge obstacle boxes only when their image boxes are this close",
     )
     parser.add_argument(
         "--depth-obstacle-merge-max-x-delta",
         type=float,
-        default=0.45,
+        default=0.22,
         help="maximum forward-distance difference, in meters, for merging obstacle boxes",
+    )
+    parser.add_argument(
+        "--depth-obstacle-merge-max-nearest-x-delta",
+        type=float,
+        default=0.18,
+        help="maximum nearest-depth difference, in meters, for merging obstacle boxes",
     )
     parser.add_argument(
         "--depth-obstacle-merge-max-y-delta",
         type=float,
-        default=0.45,
+        default=0.35,
         help="maximum lateral-distance difference, in meters, for merging obstacle boxes",
     )
     parser.add_argument(
         "--depth-obstacle-merge-max-area-growth",
         type=float,
-        default=1.8,
+        default=1.25,
         help="reject merges that would create a mostly-empty oversized box",
     )
     parser.add_argument(
@@ -1673,6 +1927,8 @@ def parse_args() -> argparse.Namespace:
         raise SystemExit("--depth-ground-fit-min-points-per-row must be >= 1")
     if args.depth_obstacle_component_cell_px < 1:
         raise SystemExit("--depth-obstacle-component-cell-px must be >= 1")
+    if args.depth_obstacle_component_min_points_per_cell < 1:
+        raise SystemExit("--depth-obstacle-component-min-points-per-cell must be >= 1")
     if args.depth_obstacle_component_gap_cells < 0:
         raise SystemExit("--depth-obstacle-component-gap-cells must be >= 0")
     args.depth_ground_image_min_v_ratio = min(1.0, max(0.0, args.depth_ground_image_min_v_ratio))
