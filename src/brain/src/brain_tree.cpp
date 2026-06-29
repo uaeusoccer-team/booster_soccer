@@ -195,7 +195,7 @@ NodeStatus CamTrackBall::tick()
     const double deadbandY = 35.0;
 
     // Small virtual angle offset. It only needs to exceed RobotClient::moveHead deadband.
-    const double step = 0.04;
+    const double step = 0.08;
 
     if (std::fabs(dx) > deadbandX)
     {
