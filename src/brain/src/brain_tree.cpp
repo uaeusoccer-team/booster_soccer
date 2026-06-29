@@ -256,6 +256,8 @@ NodeStatus CamTrackBall::tick()
 
     if (!iSeeBall || !bboxValid)
     {
+        _hasLastProcessedBallFrame = false;
+        _hasLastCommandedBallCenter = false;
         // Explicit stop for directional head API.
         brain->client->moveHead(pitch, yaw);
         turnTowardRecentlyLostBall(brain, true, 1200.0, 0.25, 0.08);
@@ -264,6 +266,23 @@ NodeStatus CamTrackBall::tick()
 
     const double ballX = mean(brain->data->ball.boundingBox.xmax, brain->data->ball.boundingBox.xmin);
     const double ballY = mean(brain->data->ball.boundingBox.ymax, brain->data->ball.boundingBox.ymin);
+    const auto ballTime = brain->data->ball.timePoint;
+
+    const double minBallCenterChangePx = 5.0;
+    const bool sameVisionFrame =
+        _hasLastProcessedBallFrame &&
+        ballTime.nanoseconds() == _lastProcessedBallTime.nanoseconds();
+    const bool ballCenterChanged =
+        !_hasLastCommandedBallCenter ||
+        std::fabs(ballX - _lastCommandedBallX) >= minBallCenterChangePx ||
+        std::fabs(ballY - _lastCommandedBallY) >= minBallCenterChangePx;
+
+    if (sameVisionFrame || !ballCenterChanged)
+    {
+        _lastProcessedBallTime = ballTime;
+        _hasLastProcessedBallFrame = true;
+        return NodeStatus::SUCCESS;
+    }
 
     const double dx = ballX - xCenter;  // + means ball is right of image center
     const double dy = ballY - yCenter;  // + means ball is below image center
@@ -291,6 +310,11 @@ NodeStatus CamTrackBall::tick()
     // If both errors are inside deadband, pitch/yaw remain current values,
     // causing RobotClient::moveHead() to publish direction 0,0.
     brain->client->moveHead(pitch, yaw);
+    _lastProcessedBallTime = ballTime;
+    _hasLastProcessedBallFrame = true;
+    _lastCommandedBallX = ballX;
+    _lastCommandedBallY = ballY;
+    _hasLastCommandedBallCenter = true;
 
     brain->log->log(
         "CamTrackBall/direct_pixel",
