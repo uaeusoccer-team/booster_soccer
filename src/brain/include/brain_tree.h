@@ -131,6 +131,11 @@ public:
 
 private:
     Brain *brain;
+    rclcpp::Time _lastProcessedBallTime = rclcpp::Time(0, 0, RCL_ROS_TIME);
+    bool _hasLastProcessedBallFrame = false;
+    bool _hasLastCommandedBallCenter = false;
+    double _lastCommandedBallX = 0.0;
+    double _lastCommandedBallY = 0.0;
 };
 
 
