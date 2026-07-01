@@ -59,6 +59,7 @@ except ImportError:
 JPEG_SOI = b"\xff\xd8"
 JPEG_EOI = b"\xff\xd9"
 DETECTION_FIELDS = {"label", "confidence", "xmin", "ymin", "xmax", "ymax"}
+DETECTION_VECTOR_FIELDS = {"position", "position_projection"}
 DEFAULT_DEPTH_TOPIC = "/boostercamera/head/depth"
 DEFAULT_DEPTH_CAMERA_INFO_TOPIC = "/boostercamera/head/depth/camera_info"
 
@@ -71,6 +72,8 @@ class Detection:
     ymin: int
     xmax: int
     ymax: int
+    position: list[float] = field(default_factory=list)
+    position_projection: list[float] = field(default_factory=list)
 
     def as_dict(self) -> dict[str, object]:
         return {
@@ -80,6 +83,8 @@ class Detection:
             "ymin": self.ymin,
             "xmax": self.xmax,
             "ymax": self.ymax,
+            "position": self.position,
+            "position_projection": self.position_projection,
         }
 
     def is_ball(self) -> bool:
@@ -523,6 +528,7 @@ class RosDetectionParser:
         self.on_message = on_message
         self.objects: list[dict[str, object]] = []
         self.current: Optional[dict[str, object]] = None
+        self.active_vector_field: Optional[str] = None
 
     def feed_line(self, line: str) -> None:
         stripped = line.strip()
@@ -535,7 +541,10 @@ class RosDetectionParser:
             if rest.startswith("label:"):
                 self.finish_current()
                 self.current = {}
+                self.active_vector_field = None
                 self.parse_field(rest)
+            elif self.current is not None and self.active_vector_field in DETECTION_VECTOR_FIELDS:
+                self.parse_vector_item(rest)
             return
 
         if self.current is not None:
@@ -546,9 +555,20 @@ class RosDetectionParser:
             return
         key, raw_value = text.split(":", 1)
         key = key.strip()
-        if key not in DETECTION_FIELDS:
+        if key not in DETECTION_FIELDS and key not in DETECTION_VECTOR_FIELDS:
+            self.active_vector_field = None
             return
         raw_value = raw_value.strip().strip("'\"")
+        if key in DETECTION_VECTOR_FIELDS:
+            self.active_vector_field = key
+            self.current.setdefault(key, [])
+            values = self.parse_vector_value(raw_value)
+            if values:
+                self.current[key] = values
+                self.active_vector_field = None
+            return
+
+        self.active_vector_field = None
         try:
             if key in {"xmin", "ymin", "xmax", "ymax"}:
                 value: object = int(float(raw_value))
@@ -560,10 +580,35 @@ class RosDetectionParser:
             return
         self.current[key] = value
 
+    def parse_vector_value(self, raw_value: str) -> list[float]:
+        text = raw_value.strip()
+        if not text or text == "[]":
+            return []
+        text = text.strip("[]")
+        values = []
+        for item in text.replace(",", " ").split():
+            try:
+                values.append(float(item))
+            except ValueError:
+                return []
+        return values
+
+    def parse_vector_item(self, text: str) -> None:
+        if self.current is None or self.active_vector_field is None:
+            return
+        try:
+            value = float(text.rstrip(","))
+        except ValueError:
+            return
+        values = self.current.setdefault(self.active_vector_field, [])
+        if isinstance(values, list):
+            values.append(value)
+
     def finish_current(self) -> None:
         if self.current is not None:
             self.objects.append(self.current)
             self.current = None
+            self.active_vector_field = None
 
     def commit_message(self) -> None:
         self.finish_current()
@@ -585,6 +630,8 @@ class RosDetectionParser:
                     ymin=ymin,
                     xmax=xmax,
                     ymax=ymax,
+                    position=list(obj.get("position", [])),
+                    position_projection=list(obj.get("position_projection", [])),
                 )
             )
         self.objects = []
@@ -1356,6 +1403,8 @@ class DepthOverlayNode(Node):
                         ymin=ymin,
                         xmax=xmax,
                         ymax=ymax,
+                        position=[float(value) for value in obj.position],
+                        position_projection=[float(value) for value in obj.position_projection],
                     )
                 )
 
@@ -1568,6 +1617,7 @@ INDEX_HTML = """<!doctype html>
     .box-text { fill: #fff; font-size: 22px; font-weight: 700; paint-order: stroke; stroke: #000; stroke-width: 4px; stroke-linejoin: round; }
     .center-dot { fill: #ff2d16; stroke: #7a0e06; stroke-width: 2; vector-effect: non-scaling-stroke; }
     .center-text { fill: #ffe94a; font-size: 22px; font-weight: 800; paint-order: stroke; stroke: #000; stroke-width: 4px; stroke-linejoin: round; }
+    .ball-depth-text { fill: #7df9ff; font-size: 21px; font-weight: 800; paint-order: stroke; stroke: #000; stroke-width: 4px; stroke-linejoin: round; }
     .flat-poly { fill: rgba(0, 230, 118, .16); stroke: #00e676; stroke-width: 3; vector-effect: non-scaling-stroke; }
     .flat-mesh-line { fill: none; stroke: rgba(210, 255, 225, .85); stroke-width: 2; vector-effect: non-scaling-stroke; }
     .obstacle-poly { fill: rgba(255, 45, 22, .30); stroke: #ff2d16; stroke-width: 4; vector-effect: non-scaling-stroke; }
@@ -1680,6 +1730,50 @@ INDEX_HTML = """<!doctype html>
       return (x1 - x0) * (y1 - y0);
     }
 
+    function numericVector(value) {
+      if (!Array.isArray(value)) {
+        return [];
+      }
+      const values = value.map(Number);
+      return values.every(Number.isFinite) ? values : [];
+    }
+
+    function vectorHasSignal(values) {
+      return values.length >= 2 && values.some((value) => Math.abs(value) > 0.0001);
+    }
+
+    function formatMeters(value) {
+      return `${value.toFixed(2)}m`;
+    }
+
+    function ballPositionLines(det) {
+      if (!detectionIsBall(det)) {
+        return [];
+      }
+
+      const depthPosition = numericVector(det.position);
+      const projection = numericVector(det.position_projection);
+      const lines = [];
+
+      if (vectorHasSignal(depthPosition)) {
+        const x = depthPosition[0] ?? 0;
+        const y = depthPosition[1] ?? 0;
+        const z = depthPosition[2] ?? 0;
+        const range = Math.hypot(x, y, z);
+        lines.push(`depth x=${formatMeters(x)} y=${formatMeters(y)} z=${formatMeters(z)} r=${formatMeters(range)}`);
+      } else {
+        lines.push('depth none');
+      }
+
+      if (vectorHasSignal(projection)) {
+        const x = projection[0] ?? 0;
+        const y = projection[1] ?? 0;
+        lines.push(`proj x=${formatMeters(x)} y=${formatMeters(y)}`);
+      }
+
+      return lines;
+    }
+
     function depthRegionMatchesBall(region) {
       if (region.kind !== 'obstacle' || !(region.polygon ?? []).length) {
         return false;
@@ -1774,13 +1868,25 @@ INDEX_HTML = """<!doctype html>
         const textY = y > 26 ? y - 7 : y + 25;
         const centerX = Math.round(x + width / 2);
         const centerY = Math.round(y + height / 2);
-        const centerTextY = img.naturalHeight && y + height + 34 > img.naturalHeight ? y - 34 : y + height + 34;
+        const positionLines = ballPositionLines(det);
+        const lineGap = 24;
+        const infoLines = [`center=(${centerX},${centerY})`, ...positionLines];
+        const belowStartY = y + height + 34;
+        const aboveStartY = y - 34 - (infoLines.length - 1) * lineGap;
+        const infoBlockBottom = belowStartY + (infoLines.length - 1) * lineGap;
+        const infoStartY =
+          img.naturalHeight && infoBlockBottom > img.naturalHeight
+            ? Math.max(24, aboveStartY)
+            : belowStartY;
         layer.appendChild(makeSvg('rect', {class: 'box', x, y, width, height, rx: 2}));
         layer.appendChild(makeSvg('text', {class: 'box-text', x: x + 4, y: textY}, label));
         layer.lastChild.textContent = label;
         layer.appendChild(makeSvg('circle', {class: 'center-dot', cx: centerX, cy: centerY, r: 8}));
-        layer.appendChild(makeSvg('text', {class: 'center-text', x: x + 4, y: centerTextY}, `center=(${centerX},${centerY})`));
-        layer.lastChild.textContent = `center=(${centerX},${centerY})`;
+        infoLines.forEach((line, index) => {
+          const className = index === 0 ? 'center-text' : 'ball-depth-text';
+          layer.appendChild(makeSvg('text', {class: className, x: x + 4, y: infoStartY + index * lineGap}, line));
+          layer.lastChild.textContent = line;
+        });
       }
     }
 
