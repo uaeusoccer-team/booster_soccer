@@ -1,5 +1,6 @@
 #pragma once
 
+#include <chrono>
 #include <string>
 #include <rclcpp/rclcpp.hpp>
 #include <opencv2/opencv.hpp>
@@ -186,6 +187,10 @@ public:
 
     void compressedDepthImageCallback(const sensor_msgs::msg::CompressedImage::SharedPtr msg);
 
+    bool shouldProcessDepthFrame();
+
+    bool shouldPublishDepthDebug();
+
     void processDepthImage(const cv::Mat &depthFloat, int width, int height, const std_msgs::msg::Header &header);
 
     void odometerCallback(const booster_interface::msg::Odometer &msg);
@@ -280,6 +285,8 @@ private:
     rclcpp::Subscription<sensor_msgs::msg::CompressedImage>::SharedPtr compressedDepthImageSubscription;
     rclcpp::Subscription<geometry_msgs::msg::Pose>::SharedPtr headPoseSubscription;
     rclcpp::Subscription<booster_interface::msg::RawBytesMsg>::SharedPtr recoveryStateSubscription;
+    std::chrono::steady_clock::time_point lastDepthProcessTime;
+    std::chrono::steady_clock::time_point lastDepthDebugPublishTime;
     rclcpp::TimerBase::SharedPtr timer_;
     rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr pubVisualizationMarkers;
     rclcpp::Publisher<std_msgs::msg::Float64MultiArray>::SharedPtr pubFieldDimensions;

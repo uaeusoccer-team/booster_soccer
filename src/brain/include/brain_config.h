@@ -75,6 +75,8 @@ public:
 
     string get_tree_file_path();
 
+    double get_depth_process_hz();
+    double get_depth_debug_publish_hz();
     int get_depth_sample_step();
     double get_obstacle_min_height();
     double get_grid_size();

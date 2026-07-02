@@ -34,7 +34,9 @@ brain_node:
         ball_control_cost_threshold: 20.0
 
     obstacle_avoidance:
-      depth_sample_step: 16
+      depth_process_hz: 8.0
+      depth_debug_publish_hz: 2.0
+      depth_sample_step: 48
       obstacle_min_height: 0.45
       grid_size: 0.2
       max_x: 3.0

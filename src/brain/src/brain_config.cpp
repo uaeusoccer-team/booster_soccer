@@ -185,9 +185,16 @@ bool BrainConfig::get_enable_com() {
     return static_cast<rclcpp::Node*>(brain)->get_parameter_or("enable_com", false);
 }
 
+double BrainConfig::get_depth_process_hz() {
+    return static_cast<rclcpp::Node*>(brain)->get_parameter_or("obstacle_avoidance.depth_process_hz", 8.0);
+}
+
+double BrainConfig::get_depth_debug_publish_hz() {
+    return static_cast<rclcpp::Node*>(brain)->get_parameter_or("obstacle_avoidance.depth_debug_publish_hz", 2.0);
+}
 
 int BrainConfig::get_depth_sample_step() {
-    return static_cast<rclcpp::Node*>(brain)->get_parameter_or("obstacle_avoidance.depth_sample_step", 16);
+    return static_cast<rclcpp::Node*>(brain)->get_parameter_or("obstacle_avoidance.depth_sample_step", 48);
 }
 
 double BrainConfig::get_obstacle_min_height() {

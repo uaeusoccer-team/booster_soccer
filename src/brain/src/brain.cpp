@@ -90,7 +90,9 @@ Brain::Brain() : rclcpp::Node("brain_node")
     declare_parameter<bool>("strategy.cooperation.enable_role_switch", true);
     declare_parameter<double>("strategy.cooperation.ball_control_cost_threshold", 10.0);
 
-    declare_parameter<int>("obstacle_avoidance.depth_sample_step", 16);
+    declare_parameter<double>("obstacle_avoidance.depth_process_hz", 8.0);
+    declare_parameter<double>("obstacle_avoidance.depth_debug_publish_hz", 2.0);
+    declare_parameter<int>("obstacle_avoidance.depth_sample_step", 48);
     declare_parameter<double>("obstacle_avoidance.obstacle_min_height", 0.15);
     declare_parameter<double>("obstacle_avoidance.grid_size", 0.2);
     declare_parameter<double>("obstacle_avoidance.max_x", 0.2);
@@ -1960,6 +1962,10 @@ void Brain::updateFieldPos(GameObject &obj) {
 void Brain::compressedDepthImageCallback(const sensor_msgs::msg::CompressedImage::SharedPtr msg)
 {
     try {
+        if (!shouldProcessDepthFrame()) {
+            return;
+        }
+
         // Decode compressed image
         cv::Mat compressed_data = cv::Mat(msg->data);
         cv::Mat depth_decoded = cv::imdecode(compressed_data, cv::IMREAD_ANYDEPTH);
@@ -1990,6 +1996,10 @@ void Brain::compressedDepthImageCallback(const sensor_msgs::msg::CompressedImage
 void Brain::depthImageCallback(const sensor_msgs::msg::Image::ConstSharedPtr &msg)
 {
     try {
+        if (!shouldProcessDepthFrame()) {
+            return;
+        }
+
         // Check if the image data is valid
         if (msg->data.empty() || msg->height == 0 || msg->width == 0) {
             RCLCPP_WARN(get_logger(), "Received empty depth image");
@@ -2033,9 +2043,54 @@ void Brain::depthImageCallback(const sensor_msgs::msg::Image::ConstSharedPtr &ms
     }
 }
 
+bool Brain::shouldProcessDepthFrame()
+{
+    if (!config) {
+        return true;
+    }
+
+    const double processHz = config->get_depth_process_hz();
+    if (processHz <= 0.0) {
+        return true;
+    }
+
+    const auto now = std::chrono::steady_clock::now();
+    const auto minPeriod = std::chrono::duration<double>(1.0 / processHz);
+    if (lastDepthProcessTime.time_since_epoch().count() != 0 &&
+        now - lastDepthProcessTime < minPeriod) {
+        return false;
+    }
+
+    lastDepthProcessTime = now;
+    return true;
+}
+
+bool Brain::shouldPublishDepthDebug()
+{
+    if (!config) {
+        return true;
+    }
+
+    const double publishHz = config->get_depth_debug_publish_hz();
+    if (publishHz <= 0.0) {
+        return false;
+    }
+
+    const auto now = std::chrono::steady_clock::now();
+    const auto minPeriod = std::chrono::duration<double>(1.0 / publishHz);
+    if (lastDepthDebugPublishTime.time_since_epoch().count() != 0 &&
+        now - lastDepthDebugPublishTime < minPeriod) {
+        return false;
+    }
+
+    lastDepthDebugPublishTime = now;
+    return true;
+}
+
 void Brain::processDepthImage(const cv::Mat &depthFloat, int width, int height, const std_msgs::msg::Header &header)
 {
     try {
+        const bool publishDepthDebug = shouldPublishDepthDebug();
         vector<std::array<float, 3>> points_robot;  // for log
 
         const double fx = config->depthCameraFx;
@@ -2073,7 +2128,9 @@ void Brain::processDepthImage(const cv::Mat &depthFloat, int width, int height, 
                     Eigen::Vector4d point_robot = data->camToRobot * point_cam;
                     
                     // Record points for visualization
-                    points_robot.push_back({static_cast<float>(point_robot(0)), static_cast<float>(point_robot(1)), static_cast<float>(point_robot(2))});
+                    if (publishDepthDebug) {
+                        points_robot.push_back({static_cast<float>(point_robot(0)), static_cast<float>(point_robot(1)), static_cast<float>(point_robot(2))});
+                    }
                     
                     // Update grid occupancy
                     const double Z_THRESHOLD = config->get_obstacle_min_height();
@@ -2165,7 +2222,9 @@ void Brain::processDepthImage(const cv::Mat &depthFloat, int width, int height, 
 
         
         data->setObstacles(obs_new); // note: Old obstacles that have timed out are not cleared here, but in the tick function
-        logDepth(grid_x_count, grid_y_count, grid_occupied, points_robot);
+        if (publishDepthDebug) {
+            logDepth(grid_x_count, grid_y_count, grid_occupied, points_robot);
+        }
 
     } catch (const std::exception& e) {
         RCLCPP_ERROR(get_logger(), "Exception in depth image processing: %s", e.what());
