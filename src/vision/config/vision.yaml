@@ -78,13 +78,13 @@ segmentation_model:
 use_depth: true
 ball_pose_estimator:
   use_depth: true
-  radius: 0.109
-  down_sample_leaf_size: 0.01
-  cluster_distance_threshold: 0.01
-  fitting_distance_threshold: 0.01
-  minimum_cluster_size: 150
   filter_distance: 3.0
   check_ball_height: true
+  depth_sample_step: 4
+  min_depth_points: 12
+  min_points_above_ground: 3
+  min_height_above_ground: 0.04
+  min_above_ground_ratio: 0.05
 human_like_pose_estimator:
   use_depth: false
   down_sample_leaf_size: 0.01

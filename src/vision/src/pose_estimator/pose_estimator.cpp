@@ -1,5 +1,8 @@
 #include "booster_vision/pose_estimator/pose_estimator.h"
 
+#include <algorithm>
+#include <cmath>
+
 #include "booster_vision/base/misc_utils.hpp"
 #include "booster_vision/base/pointcloud_process.h"
 
@@ -34,13 +37,13 @@ Pose PoseEstimator::EstimateByDepth(const Pose &p_eye2base, const DetectionRes &
 
 void BallPoseEstimator::Init(const YAML::Node &node) {
     use_depth_ = as_or<bool>(node["use_depth"], false);
-    radius_ = as_or<float>(node["radius"], 0.109);
-    downsample_leaf_size_ = as_or<float>(node["down_sample_leaf_size"], 0.01);
-    cluster_distance_threshold_ = as_or<float>(node["cluster_distance_threshold"], 0.01);
-    fitting_distance_threshold_ = as_or<float>(node["fitting_distance_threshold"], 0.01);
-    minimum_cluster_size_ = as_or<int>(node["minimum_cluster_size"], 150);
     filter_distance_ = as_or<float>(node["filter_distance"], 1.0);
     check_ball_height_ = as_or<bool>(node["check_ball_height"], false);
+    depth_sample_step_ = as_or<int>(node["depth_sample_step"], 4);
+    min_depth_points_ = as_or<int>(node["min_depth_points"], 12);
+    min_points_above_ground_ = as_or<int>(node["min_points_above_ground"], 3);
+    min_height_above_ground_ = as_or<float>(node["min_height_above_ground"], 0.04);
+    min_above_ground_ratio_ = as_or<float>(node["min_above_ground_ratio"], 0.05);
     std::cout << "filter_distance: " << filter_distance_ << std::endl;
 }
 
@@ -53,43 +56,58 @@ Pose BallPoseEstimator::EstimateByColor(const Pose &p_eye2base, const DetectionR
 }
 
 Pose BallPoseEstimator::EstimateByDepth(const Pose &p_eye2base, const DetectionRes &detection, const cv::Mat &rgb, const cv::Mat &depth) {
+    (void)rgb;
     if (!use_depth_ || depth.empty()) return Pose();
 
     auto pose = EstimateByColor(p_eye2base, detection, cv::Mat());
     if (cv::norm(pose.getTranslationVec()) > filter_distance_) return pose;
     std::cout << "ball distance by color: " << cv::norm(pose.getTranslationVec()) << std::endl;
 
-    pcl::PointCloud<pcl::PointXYZRGB>::Ptr cloud(new pcl::PointCloud<pcl::PointXYZRGB>);
-    CreatePointCloud(cloud, depth, rgb, detection.bbox, intr_);
-    if (cloud->points.size() < 100) return Pose();
+    if (!check_ball_height_) return pose;
+    if (depth.depth() != CV_32F) return Pose();
 
-    pcl::PointCloud<pcl::PointXYZRGB>::Ptr downsampled_cloud(new pcl::PointCloud<pcl::PointXYZRGB>);
-    DownSamplePointCloud(downsampled_cloud, downsample_leaf_size_, cloud);
-    if (downsampled_cloud->points.size() < 100) return Pose();
+    const auto bbox = detection.bbox;
+    const int x0 = std::max(0, bbox.x);
+    const int y0 = std::max(0, bbox.y);
+    const int x1 = std::min(depth.cols, bbox.x + bbox.width);
+    const int y1 = std::min(depth.rows, bbox.y + bbox.height);
+    if (x1 <= x0 || y1 <= y0) return Pose();
 
-    std::vector<pcl::PointCloud<pcl::PointXYZRGB>::Ptr> clustered_clouds;
-    ClusterPointCloud(clustered_clouds, downsampled_cloud, cluster_distance_threshold_);
+    const int step = std::max(1, depth_sample_step_);
+    int valid_points = 0;
+    int points_above_ground = 0;
+    float max_height = 0.0f;
 
-    if (clustered_clouds.empty()) return Pose();
+    for (int v = y0; v < y1; v += step) {
+        for (int u = x0; u < x1; u += step) {
+            float depth_value = depth.at<float>(v, u);
+            if (!std::isfinite(depth_value) || depth_value <= 0) continue;
 
-    for (const auto &cluster : clustered_clouds) {
-        if (cluster->size() < minimum_cluster_size_) continue;
+            cv::Point3f point_cam = intr_.BackProject(cv::Point2f(u, v), depth_value);
+            cv::Point3f point_robot = p_eye2base * point_cam;
+            valid_points++;
+            max_height = std::max(max_height, point_robot.z);
 
-        std::vector<float> sphere;
-        float confidence;
-        SphereFitting(sphere, confidence, cluster, fitting_distance_threshold_, radius_);
-
-        if (confidence > 0.5) {
-            std::cout << "ball z in robot frame by color: " << pose.getTranslationVec()[2] << std::endl;
-            pose = p_eye2base * Pose(sphere[0], sphere[1], sphere[2], 0, 0, 0);
-            std::cout << "ball z in robot frame: " << pose.getTranslationVec()[2] << std::endl;
-            if (check_ball_height_ && pose.getTranslationVec()[2] < -0.03) {
-                continue;
+            if (point_robot.z >= min_height_above_ground_) {
+                points_above_ground++;
             }
-            return pose;
         }
     }
-    return Pose();
+
+    const float above_ground_ratio = valid_points > 0 ? static_cast<float>(points_above_ground) / valid_points : 0.0f;
+    const bool has_enough_depth = valid_points >= min_depth_points_;
+    const bool rises_above_ground = points_above_ground >= min_points_above_ground_ && above_ground_ratio >= min_above_ground_ratio_;
+
+    if (!has_enough_depth || !rises_above_ground) {
+        std::cout << "filtered flat ball detection by depth height: valid=" << valid_points
+                  << " above=" << points_above_ground
+                  << " ratio=" << above_ground_ratio
+                  << " max_z=" << max_height
+                  << std::endl;
+        return Pose();
+    }
+
+    return pose;
 }
 
 void HumanLikePoseEstimator::Init(const YAML::Node &node) {
