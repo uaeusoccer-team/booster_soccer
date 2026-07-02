@@ -75,15 +75,15 @@ segmentation_model:
   model_path: ./src/vision/model/best_seg_orin_10.3.engine
   confidence_threshold: 0.3
   nms_threshold: 0.9
-use_depth: false
+use_depth: true
 ball_pose_estimator:
-  use_depth: false
+  use_depth: true
   radius: 0.109
   down_sample_leaf_size: 0.01
   cluster_distance_threshold: 0.01
   fitting_distance_threshold: 0.01
   minimum_cluster_size: 150
-  filter_distance: 1.2
+  filter_distance: 3.0
   check_ball_height: true
 human_like_pose_estimator:
   use_depth: false
