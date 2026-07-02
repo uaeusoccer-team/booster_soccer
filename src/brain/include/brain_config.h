@@ -47,6 +47,7 @@ public:
     double get_head_yaw_limit_left();
     double get_head_yaw_limit_right();
     double get_head_pitch_limit_up();
+    double get_head_pitch_limit_down();
     double get_min_vx();
     double get_min_vy();
     double get_min_vtheta();

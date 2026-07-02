@@ -16,6 +16,10 @@ brain_node:
       vx_limit: 1.0
       vy_limit: 0.4
       vtheta_limit: 1.2
+      head_yaw_limit_left: 1.1
+      head_yaw_limit_right: -1.1
+      head_pitch_limit_up: 0.75
+      head_pitch_limit_down: -0.314
       min_vx: 0.3 # Minimum x velocity when command is too small, to prevent no response
       min_vy: 0.3 # Minimum y velocity when command is too small, to prevent no response
       min_vtheta: 0.25 # Minimum theta velocity when command is too small, to prevent no response
