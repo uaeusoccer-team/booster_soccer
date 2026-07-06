@@ -52,7 +52,6 @@ void BrainTree::init()
     REGISTER_BUILDER(RobotFindBall)
     REGISTER_BUILDER(Chase)
     REGISTER_BUILDER(SimpleChase)
-    REGISTER_BUILDER(WalkInClearDirection)
     REGISTER_BUILDER(Adjust)
     REGISTER_BUILDER(Kick)
     REGISTER_BUILDER(StandStill)
@@ -562,65 +561,6 @@ NodeStatus SimpleChase::tick()
     brain->client->setVelocity(vx, vy, vtheta);
     return NodeStatus::SUCCESS;
 }
-
-NodeStatus WalkInClearDirection::tick()
-{
-    double vx, vyLimit, vthetaLimit, safeDist, avoidSpeedScale, blockedTurnSpeed, searchTurnSpeed;
-    getInput("vx", vx);
-    getInput("vy_limit", vyLimit);
-    getInput("vtheta_limit", vthetaLimit);
-    getInput("safe_dist", safeDist);
-    getInput("avoid_speed_scale", avoidSpeedScale);
-    getInput("blocked_turn_speed", blockedTurnSpeed);
-    getInput("search_turn_speed", searchTurnSpeed);
-
-    if (brain->tree->getEntry<bool>("ball_location_known"))
-    {
-        return NodeStatus::SUCCESS;
-    }
-
-    const double frontDist = brain->distToObstacle(0.0);
-    const bool frontClear = frontDist > safeDist;
-
-    double moveAngle = 0.0;
-    double speedScale = 1.0;
-    double vtheta = searchTurnSpeed;
-
-    if (!frontClear)
-    {
-        auto safeDirections = brain->findSafeDirections(0.0, safeDist);
-        const bool leftFound = safeDirections[0] > 0.5;
-        const bool rightFound = safeDirections[2] > 0.5;
-
-        if (!leftFound && !rightFound)
-        {
-            brain->client->setVelocity(0.0, 0.0, blockedTurnSpeed);
-            return NodeStatus::SUCCESS;
-        }
-
-        const double leftAngle = safeDirections[1];
-        const double rightAngle = safeDirections[3];
-        if (leftFound && rightFound)
-        {
-            moveAngle = std::fabs(leftAngle) <= std::fabs(rightAngle) ? leftAngle : rightAngle;
-        }
-        else
-        {
-            moveAngle = leftFound ? leftAngle : rightAngle;
-        }
-
-        speedScale = avoidSpeedScale;
-        vtheta = moveAngle;
-    }
-
-    const double forward = std::max(0.0, vx * speedScale * std::cos(moveAngle));
-    const double lateral = cap(vx * speedScale * std::sin(moveAngle), vyLimit, -vyLimit);
-    vtheta = cap(vtheta, vthetaLimit, -vthetaLimit);
-
-    brain->client->setVelocity(forward, lateral, vtheta);
-    return NodeStatus::SUCCESS;
-}
-
 
 NodeStatus GoToFreekickPosition::onStart() {
     _isInFinalAdjust = false;

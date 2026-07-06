@@ -6,14 +6,10 @@
       <CheckAndStandUp />
       <SubTree ID="CamFindAndTrackBall" _autoremap="true" />
 
-      <WalkInClearDirection _while="!ball_location_known"
-                            vx="0.12"
-                            vy_limit="0.05"
-                            vtheta_limit="0.35"
-                            safe_dist="1.0"
-                            avoid_speed_scale="0.7"
-                            blocked_turn_speed="0.18"
-                            search_turn_speed="0.0" />
+      <SetVelocity _while="!ball_location_known"
+                   x="0.0"
+                   y="0.0"
+                   theta="0.25" />
 
       <Chase _while="ball_location_known"
              vx_limit="0.20"
