@@ -707,6 +707,31 @@ private:
 };
 
 
+class WalkInClearDirection : public SyncActionNode
+{
+public:
+    WalkInClearDirection(const string &name, const NodeConfig &config, Brain *_brain) : SyncActionNode(name, config), brain(_brain) {}
+
+    static PortsList providedPorts()
+    {
+        return {
+            InputPort<double>("vx", 0.12, "Forward walking speed while searching for the ball"),
+            InputPort<double>("vy_limit", 0.05, "Maximum side walking speed while avoiding obstacles"),
+            InputPort<double>("vtheta_limit", 0.4, "Maximum turn speed while avoiding obstacles"),
+            InputPort<double>("safe_dist", 1.0, "Minimum clear distance required in the walking direction"),
+            InputPort<double>("avoid_speed_scale", 0.7, "Speed scale used when walking around an obstacle"),
+            InputPort<double>("blocked_turn_speed", 0.2, "Turn speed used when no clear walking direction is available"),
+            InputPort<double>("search_turn_speed", 0.0, "Optional slow turn speed while the path ahead is clear"),
+        };
+    }
+
+    NodeStatus tick() override;
+
+private:
+    Brain *brain;
+};
+
+
 class CalibrateOdom : public SyncActionNode
 {
 public:
