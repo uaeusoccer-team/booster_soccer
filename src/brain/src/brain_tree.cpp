@@ -444,6 +444,7 @@ NodeStatus SimpleChase::tick()
 
     const double ballRange = brain->data->ball.range;
     const double ballYaw = brain->data->ball.yawToRobot;
+    const double headYaw = brain->data->headYaw;
 
     double vx = 0.0;
     double vy = 0.0;
@@ -471,6 +472,18 @@ NodeStatus SimpleChase::tick()
     const double stopRatio = cap(fabs(headTurnStopRatio), startRatio, 0.0);
     const bool headYawTurnEnabled = bodyTurnSpeed > 0.0 && startRatio > 0.0;
     const bool ballTracked = brain->data->ballDetected;
+    double finalHeadYawMin = -fabs(stopAngle);
+    double finalHeadYawMax = fabs(stopAngle);
+    const bool finalHeadYawMinSet = static_cast<bool>(getInput("final_head_yaw_min", finalHeadYawMin));
+    const bool finalHeadYawMaxSet = static_cast<bool>(getInput("final_head_yaw_max", finalHeadYawMax));
+    const bool finalHeadYawRangeSet = finalHeadYawMinSet || finalHeadYawMaxSet;
+    if (finalHeadYawMin > finalHeadYawMax)
+    {
+        const double tmp = finalHeadYawMin;
+        finalHeadYawMin = finalHeadYawMax;
+        finalHeadYawMax = tmp;
+    }
+
     double finalBallYawMin = -fabs(stopAngle);
     double finalBallYawMax = fabs(stopAngle);
     const bool finalBallYawMinSet = static_cast<bool>(getInput("final_ball_yaw_min", finalBallYawMin));
@@ -483,18 +496,41 @@ NodeStatus SimpleChase::tick()
         finalBallYawMax = tmp;
     }
 
-    auto ballYawFinalTurn = [&]() {
-        if (ballYaw >= finalBallYawMin && ballYaw <= finalBallYawMax)
+    auto finalRangeTurn = [&](double value, double acceptedMin, double acceptedMax) {
+        if (value >= acceptedMin && value <= acceptedMax)
         {
             return 0.0;
         }
 
-        const double nearestAcceptedYaw = ballYaw < finalBallYawMin ? finalBallYawMin : finalBallYawMax;
-        return (ballYaw - nearestAcceptedYaw) * 4.0;
+        const double nearestAcceptedValue = value < acceptedMin ? acceptedMin : acceptedMax;
+        return (value - nearestAcceptedValue) * 4.0;
     };
 
-    auto ballYawFallback = [&]() {
-        if (finalBallYawRangeSet && ballRange <= stopDist)
+    auto headYawFinalTurn = [&]() {
+        const double cmd = finalRangeTurn(headYaw, finalHeadYawMin, finalHeadYawMax);
+        if (fabs(cmd) < 1e-5)
+        {
+            return 0.0;
+        }
+
+        return cmd > 0.0 ? bodyTurnSpeed : -bodyTurnSpeed;
+    };
+
+    auto ballYawFinalTurn = [&]() {
+        return finalRangeTurn(ballYaw, finalBallYawMin, finalBallYawMax);
+    };
+
+    auto finalStopTurn = [&]() {
+        if (finalHeadYawRangeSet)
+        {
+            const double headCmd = headYawFinalTurn();
+            if (fabs(headCmd) > 1e-5)
+            {
+                return headCmd;
+            }
+        }
+
+        if (finalBallYawRangeSet)
         {
             return ballYawFinalTurn();
         }
@@ -502,9 +538,17 @@ NodeStatus SimpleChase::tick()
         return fabs(ballYaw) <= fabs(stopAngle) ? 0.0 : ballYaw * 4.0;
     };
 
+    auto ballYawFallback = [&]() {
+        if ((finalHeadYawRangeSet || finalBallYawRangeSet) && ballRange <= stopDist)
+        {
+            return finalStopTurn();
+        }
+
+        return fabs(ballYaw) <= fabs(stopAngle) ? 0.0 : ballYaw * 4.0;
+    };
+
     if (headYawTurnEnabled && ballTracked)
     {
-        const double headYaw = brain->data->headYaw;
         const double headYawSign = headYaw > 0.0 ? 1.0 : (headYaw < 0.0 ? -1.0 : 0.0);
         const double headYawLimit = headYawSign >= 0.0
             ? fabs(brain->config->get_head_yaw_limit_left())
