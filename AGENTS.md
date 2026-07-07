@@ -12,11 +12,9 @@ Do not replace this with ad hoc SDK-only demos unless the user explicitly asks f
 
 The code can only be built, launched, and verified on the physical robot over SSH. Laptop-to-robot DDS over Wi-Fi is not the normal workflow because the robot Fast DDS profile is scoped for local robot communication.
 
-Robot SSH target:
+Robot SSH target: `booster@192.168.68.105`
 
-```bash
-ssh booster@192.168.68.103
-```
+When giving the user commands to run on the robot, assume they are already inside an SSH session unless they explicitly ask how to connect. Do not put `ssh booster@...` inside the same copyable command block as robot commands. If a connection reminder is useful, mention the SSH target separately in prose, then provide a copyable robot command block that starts with `cd ~/booster_soccer`.
 
 Do not commit passwords or other credentials into this repo. Ask the user if SSH authentication is needed.
 
@@ -46,7 +44,7 @@ When an agent changes code, remind the user that robot testing requires moving t
 
 1. Push the current working branch.
 2. Merge that branch into `main`.
-3. SSH into the robot and pull `main` in `~/booster_soccer`.
+3. Connect to the robot and pull `main` in `~/booster_soccer`.
 4. Rebuild on the robot before running.
 
 Use commands like these, staying on the current dedicated branch:
@@ -61,8 +59,7 @@ git push origin HEAD
 # Merge the current branch into main via PR or the team's existing merge workflow.
 # Do not create, delete, or rename branches.
 
-# On the robot
-ssh booster@192.168.68.103
+# On the robot after connecting over SSH
 cd ~/booster_soccer
 deactivate 2>/dev/null || true
 git switch main
@@ -124,20 +121,18 @@ python -c "import booster_robotics_sdk_python; print('SDK OK')"
 
 ## Build On Robot
 
-Normal build:
+Normal build, run on the robot after connecting over SSH:
 
 ```bash
-ssh booster@192.168.68.103
 cd ~/booster_soccer
 deactivate 2>/dev/null || true
 source /opt/ros/humble/setup.bash
 ./scripts/build.sh
 ```
 
-Clean build when generated state may be stale:
+Clean build when generated state may be stale, run on the robot after connecting over SSH:
 
 ```bash
-ssh booster@192.168.68.103
 cd ~/booster_soccer
 deactivate 2>/dev/null || true
 source /opt/ros/humble/setup.bash
@@ -172,7 +167,6 @@ source install/setup.bash
 Use this for early autonomous testing without the referee GameController:
 
 ```bash
-ssh booster@192.168.68.103
 cd ~/booster_soccer
 deactivate 2>/dev/null || true
 source /opt/ros/humble/setup.bash
@@ -194,7 +188,6 @@ tail -f game_controller.log
 Use this after simplified behavior is proven and GameController packets are verified:
 
 ```bash
-ssh booster@192.168.68.103
 cd ~/booster_soccer
 deactivate 2>/dev/null || true
 source /opt/ros/humble/setup.bash
@@ -208,7 +201,6 @@ source install/setup.bash
 This is the safest first behavior because it keeps body velocity at zero through `SetVelocity`.
 
 ```bash
-ssh booster@192.168.68.103
 cd ~/booster_soccer
 deactivate 2>/dev/null || true
 source /opt/ros/humble/setup.bash
@@ -281,7 +273,7 @@ Then start the brain in another SSH session.
 Only run chase behavior with the robot on the ground in open space. If the robot has the helper script installed:
 
 ```bash
-ssh booster@192.168.68.103
+cd ~/booster_soccer
 ~/safe_chase_vector.sh
 ```
 
@@ -392,4 +384,4 @@ sudo tcpdump -ni any udp
 - Do not edit `/opt/booster/BoosterRos2/fastdds_profile.xml` unless the user explicitly approves it.
 - Use `rg` for searching.
 - Use `./scripts/build.sh` or `colcon build --symlink-install --base-paths src ...` on the robot for verification.
-- If you cannot run or verify because the robot is not reachable, say that clearly and give the exact SSH commands for the user.
+- If you cannot run or verify because the robot is not reachable, say that clearly and give the SSH target separately from any copyable robot command block.
