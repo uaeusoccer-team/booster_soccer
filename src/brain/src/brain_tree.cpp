@@ -423,15 +423,21 @@ NodeStatus Chase::tick()
 
 NodeStatus SimpleChase::tick()
 {
-    double stopDist, stopAngle, yTolerance, vyLimit, vxLimit;
+    double stopDist, stopAngle, yTolerance, bodyTurnSpeed, headTurnStartRatio, headTurnStopRatio, vyLimit, vxLimit;
     getInput("stop_dist", stopDist);
     getInput("stop_angle", stopAngle);
     getInput("y_tolerance", yTolerance);
+    getInput("body_turn_speed", bodyTurnSpeed);
+    getInput("head_turn_start_ratio", headTurnStartRatio);
+    getInput("head_turn_stop_ratio", headTurnStopRatio);
     getInput("vx_limit", vxLimit);
     getInput("vy_limit", vyLimit);
 
+    static double headYawBodyTurnDir = 0.0;
+
     if (!brain->tree->getEntry<bool>("ball_location_known"))
     {
+        headYawBodyTurnDir = 0.0;
         brain->client->setVelocity(0, 0, 0);
         return NodeStatus::SUCCESS;
     }
@@ -439,26 +445,73 @@ NodeStatus SimpleChase::tick()
     const double ballRange = brain->data->ball.range;
     const double ballYaw = brain->data->ball.yawToRobot;
 
-    if (ballRange <= stopDist)
+    double vx = 0.0;
+    double vy = 0.0;
+    double vtheta = 0.0;
+
+    if (ballRange > stopDist)
     {
-        brain->client->setVelocity(0, 0, 0);
-        return NodeStatus::SUCCESS;
+        vx = brain->data->ball.posToRobot.x;
+        vy = brain->data->ball.posToRobot.y;
+
+        double linearFactor = 1 / (1 + exp(3 * (ballRange * fabs(ballYaw)) - 3));
+        vx *= linearFactor;
+        vy *= linearFactor;
+
+        vx = cap(vx, vxLimit, -1.0);
+        vy = cap(vy, vyLimit, -vyLimit);
+
+        if (fabs(brain->data->ball.posToRobot.y) <= fabs(yTolerance))
+        {
+            vy = 0;
+        }
     }
 
-    double vx = brain->data->ball.posToRobot.x;
-    double vy = brain->data->ball.posToRobot.y;
-    double vtheta = fabs(ballYaw) <= fabs(stopAngle) ? 0.0 : ballYaw * 4.0;
+    const double startRatio = cap(fabs(headTurnStartRatio), 1.0, 0.0);
+    const double stopRatio = cap(fabs(headTurnStopRatio), startRatio, 0.0);
+    const bool headYawTurnEnabled = bodyTurnSpeed > 0.0 && startRatio > 0.0;
+    const bool ballTracked = brain->data->ballDetected;
+    auto ballYawFallback = [&]() {
+        return fabs(ballYaw) <= fabs(stopAngle) ? 0.0 : ballYaw * 4.0;
+    };
 
-    double linearFactor = 1 / (1 + exp(3 * (ballRange * fabs(ballYaw)) - 3));
-    vx *= linearFactor;
-    vy *= linearFactor;
-
-    vx = cap(vx, vxLimit, -1.0);    
-    vy = cap(vy, vyLimit, -vyLimit); 
-
-    if (fabs(brain->data->ball.posToRobot.y) <= fabs(yTolerance))
+    if (headYawTurnEnabled && ballTracked)
     {
-        vy = 0;
+        const double headYaw = brain->data->headYaw;
+        const double headYawSign = headYaw > 0.0 ? 1.0 : (headYaw < 0.0 ? -1.0 : 0.0);
+        const double headYawLimit = headYawSign >= 0.0
+            ? fabs(brain->config->get_head_yaw_limit_left())
+            : fabs(brain->config->get_head_yaw_limit_right());
+        const bool headYawUsable = headYawLimit > 1e-5;
+        const double headYawRatio = headYawUsable ? cap(fabs(headYaw) / headYawLimit, 1.0, 0.0) : 0.0;
+
+        if (headYawUsable)
+        {
+            if (headYawBodyTurnDir != 0.0 &&
+                (headYawSign == 0.0 || headYawSign != headYawBodyTurnDir || headYawRatio <= stopRatio))
+            {
+                headYawBodyTurnDir = 0.0;
+            }
+
+            if (headYawBodyTurnDir == 0.0 && headYawSign != 0.0 && headYawRatio >= startRatio)
+            {
+                headYawBodyTurnDir = headYawSign;
+            }
+
+            vtheta = headYawBodyTurnDir != 0.0
+                ? headYawBodyTurnDir * bodyTurnSpeed
+                : ballYawFallback();
+        }
+        else
+        {
+            headYawBodyTurnDir = 0.0;
+            vtheta = ballYawFallback();
+        }
+    }
+    else
+    {
+        headYawBodyTurnDir = 0.0;
+        vtheta = ballYawFallback();
     }
 
     brain->client->setVelocity(vx, vy, vtheta);

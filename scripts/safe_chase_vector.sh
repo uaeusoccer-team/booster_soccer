@@ -8,16 +8,19 @@ VY_LIMIT="0.06"
 STOP_DIST="0.8"
 STOP_ANGLE="0.2"
 Y_TOLERANCE="0.03"
+BODY_TURN_SPEED="0.25"
+HEAD_TURN_START_RATIO="0.75"
+HEAD_TURN_STOP_RATIO="0.65"
 
 usage() {
   cat <<'USAGE'
 Usage:
-  ./scripts/safe_chase_vector.sh [vx_limit=0.18] [vy_limit=0.06] [stop_dist=0.8] [stop_angle=0.2] [y_tolerance=0.03]
+  ./scripts/safe_chase_vector.sh [vx_limit=0.18] [vy_limit=0.06] [stop_dist=0.8] [stop_angle=0.2] [y_tolerance=0.03] [body_turn_speed=0.25] [head_turn_start_ratio=0.75] [head_turn_stop_ratio=0.65]
 
 Examples:
-  ./scripts/safe_chase_vector.sh vx_limit=0.20 vy_limit=0.06 stop_dist=1.8 stop_angle=0.1 y_tolerance=0.05
+  ./scripts/safe_chase_vector.sh vx_limit=0.20 vy_limit=0.06 stop_dist=1.8 stop_angle=0.1 y_tolerance=0.05 body_turn_speed=0.25 head_turn_start_ratio=0.75 head_turn_stop_ratio=0.65
 
-  ./scripts/safe_chase_vector.sh --vx-limit 0.20 --vy-limit 0.06 --stop-dist 1.8 --stop-angle 0.1 --y-tolerance 0.05
+  ./scripts/safe_chase_vector.sh --vx-limit 0.20 --vy-limit 0.06 --stop-dist 1.8 --stop-angle 0.1 --y-tolerance 0.05 --body-turn-speed 0.25 --head-turn-start-ratio 0.75 --head-turn-stop-ratio 0.65
 
   ./scripts/safe_chase_vector.sh 'SimpleChase {
     vx_limit="0.20"
@@ -25,6 +28,9 @@ Examples:
     stop_dist="1.8"
     stop_angle="0.1"
     y_tolerance="0.05"
+    body_turn_speed="0.25"
+    head_turn_start_ratio="0.75"
+    head_turn_stop_ratio="0.65"
   }'
 
 Press s while the script is running to stop safely.
@@ -56,6 +62,9 @@ set_simple_chase_value() {
     stop_dist) STOP_DIST="$value" ;;
     stop_angle) STOP_ANGLE="$value" ;;
     y_tolerance) Y_TOLERANCE="$value" ;;
+    body_turn_speed) BODY_TURN_SPEED="$value" ;;
+    head_turn_start_ratio) HEAD_TURN_START_RATIO="$value" ;;
+    head_turn_stop_ratio) HEAD_TURN_STOP_RATIO="$value" ;;
     *)
       echo "Unknown SimpleChase setting: ${key}" >&2
       exit 2
@@ -68,7 +77,7 @@ parse_block_text() {
   local matched=1
   local key
 
-  for key in vx_limit vy_limit stop_dist stop_angle y_tolerance; do
+  for key in vx_limit vy_limit stop_dist stop_angle y_tolerance body_turn_speed head_turn_start_ratio head_turn_stop_ratio; do
     if [[ "$text" =~ (^|[[:space:]\{])${key}[[:space:]]*=[[:space:]]*\"?([0-9]+([.][0-9]+)?|[.][0-9]+)\"? ]]; then
       set_simple_chase_value "$key" "${BASH_REMATCH[2]}"
       matched=0
@@ -110,6 +119,21 @@ parse_args() {
         set_simple_chase_value y_tolerance "$2"
         shift 2
         ;;
+      --body-turn-speed|--body_turn_speed)
+        [[ $# -ge 2 ]] || { echo "Missing value for $1" >&2; exit 2; }
+        set_simple_chase_value body_turn_speed "$2"
+        shift 2
+        ;;
+      --head-turn-start-ratio|--head_turn_start_ratio)
+        [[ $# -ge 2 ]] || { echo "Missing value for $1" >&2; exit 2; }
+        set_simple_chase_value head_turn_start_ratio "$2"
+        shift 2
+        ;;
+      --head-turn-stop-ratio|--head_turn_stop_ratio)
+        [[ $# -ge 2 ]] || { echo "Missing value for $1" >&2; exit 2; }
+        set_simple_chase_value head_turn_stop_ratio "$2"
+        shift 2
+        ;;
       --vx-limit=*|--vx_limit=*)
         set_simple_chase_value vx_limit "${1#*=}"
         shift
@@ -130,7 +154,19 @@ parse_args() {
         set_simple_chase_value y_tolerance "${1#*=}"
         shift
         ;;
-      vx_limit=*|vy_limit=*|stop_dist=*|stop_angle=*|y_tolerance=*)
+      --body-turn-speed=*|--body_turn_speed=*)
+        set_simple_chase_value body_turn_speed "${1#*=}"
+        shift
+        ;;
+      --head-turn-start-ratio=*|--head_turn_start_ratio=*)
+        set_simple_chase_value head_turn_start_ratio "${1#*=}"
+        shift
+        ;;
+      --head-turn-stop-ratio=*|--head_turn_stop_ratio=*)
+        set_simple_chase_value head_turn_stop_ratio "${1#*=}"
+        shift
+        ;;
+      vx_limit=*|vy_limit=*|stop_dist=*|stop_angle=*|y_tolerance=*|body_turn_speed=*|head_turn_start_ratio=*|head_turn_stop_ratio=*)
         set_simple_chase_value "${1%%=*}" "${1#*=}"
         shift
         ;;
@@ -221,6 +257,9 @@ echo "  vy_limit=${VY_LIMIT}"
 echo "  stop_dist=${STOP_DIST}"
 echo "  stop_angle=${STOP_ANGLE}"
 echo "  y_tolerance=${Y_TOLERANCE}"
+echo "  body_turn_speed=${BODY_TURN_SPEED}"
+echo "  head_turn_start_ratio=${HEAD_TURN_START_RATIO}"
+echo "  head_turn_stop_ratio=${HEAD_TURN_STOP_RATIO}"
 
 ./scripts/stop.sh || true
 sleep 3
@@ -253,7 +292,10 @@ cat > "$TREE_PATH" <<XML
                      vy_limit="${VY_LIMIT}"
                      stop_dist="${STOP_DIST}"
                      stop_angle="${STOP_ANGLE}"
-                     y_tolerance="${Y_TOLERANCE}" />
+                     y_tolerance="${Y_TOLERANCE}"
+                     body_turn_speed="${BODY_TURN_SPEED}"
+                     head_turn_start_ratio="${HEAD_TURN_START_RATIO}"
+                     head_turn_stop_ratio="${HEAD_TURN_STOP_RATIO}" />
       </ReactiveSequence>
     </Sequence>
   </BehaviorTree>
