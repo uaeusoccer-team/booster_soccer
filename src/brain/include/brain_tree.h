@@ -699,6 +699,8 @@ public:
             InputPort<double>("body_turn_speed", 0.25, "Angular speed used to rotate the body when tracked head yaw is near its edge"),
             InputPort<double>("head_turn_start_ratio", 0.75, "Head yaw limit ratio where body rotation starts while tracking the ball"),
             InputPort<double>("head_turn_stop_ratio", 0.65, "Head yaw limit ratio where body rotation hands back to normal ball-yaw turning"),
+            InputPort<double>("final_ball_yaw_min", "Minimum accepted ball yaw when stopped near the ball; defaults to -stop_angle"),
+            InputPort<double>("final_ball_yaw_max", "Maximum accepted ball yaw when stopped near the ball; defaults to stop_angle"),
             InputPort<double>("vy_limit", 0.2, "Limit Y direction speed to prevent walking instability. Must be less than the robot's maximum speed 0.4 to take effect"),
             InputPort<double>("vx_limit", 0.6, "Limit X direction speed to prevent walking instability. Must be less than the robot's maximum speed 1.2 to take effect"),
         };

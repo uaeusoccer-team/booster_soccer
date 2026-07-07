@@ -11,16 +11,18 @@ Y_TOLERANCE="0.03"
 BODY_TURN_SPEED="0.25"
 HEAD_TURN_START_RATIO="0.75"
 HEAD_TURN_STOP_RATIO="0.65"
+FINAL_BALL_YAW_MIN=""
+FINAL_BALL_YAW_MAX=""
 
 usage() {
   cat <<'USAGE'
 Usage:
-  ./scripts/safe_chase_vector.sh [vx_limit=0.18] [vy_limit=0.06] [stop_dist=0.8] [stop_angle=0.2] [y_tolerance=0.03] [body_turn_speed=0.25] [head_turn_start_ratio=0.75] [head_turn_stop_ratio=0.65]
+  ./scripts/safe_chase_vector.sh [vx_limit=0.18] [vy_limit=0.06] [stop_dist=0.8] [stop_angle=0.2] [y_tolerance=0.03] [body_turn_speed=0.25] [head_turn_start_ratio=0.75] [head_turn_stop_ratio=0.65] [final_ball_yaw_min=-0.10] [final_ball_yaw_max=0.10]
 
 Examples:
-  ./scripts/safe_chase_vector.sh vx_limit=0.20 vy_limit=0.06 stop_dist=1.8 stop_angle=0.1 y_tolerance=0.05 body_turn_speed=0.25 head_turn_start_ratio=0.75 head_turn_stop_ratio=0.65
+  ./scripts/safe_chase_vector.sh vx_limit=0.20 vy_limit=0.06 stop_dist=1.8 stop_angle=0.1 y_tolerance=0.05 body_turn_speed=0.25 head_turn_start_ratio=0.75 head_turn_stop_ratio=0.65 final_ball_yaw_min=0.0 final_ball_yaw_max=0.10
 
-  ./scripts/safe_chase_vector.sh --vx-limit 0.20 --vy-limit 0.06 --stop-dist 1.8 --stop-angle 0.1 --y-tolerance 0.05 --body-turn-speed 0.25 --head-turn-start-ratio 0.75 --head-turn-stop-ratio 0.65
+  ./scripts/safe_chase_vector.sh --vx-limit 0.20 --vy-limit 0.06 --stop-dist 1.8 --stop-angle 0.1 --y-tolerance 0.05 --body-turn-speed 0.25 --head-turn-start-ratio 0.75 --head-turn-stop-ratio 0.65 --final-ball-yaw-min 0.0 --final-ball-yaw-max 0.10
 
   ./scripts/safe_chase_vector.sh 'SimpleChase {
     vx_limit="0.20"
@@ -31,6 +33,8 @@ Examples:
     body_turn_speed="0.25"
     head_turn_start_ratio="0.75"
     head_turn_stop_ratio="0.65"
+    final_ball_yaw_min="0.0"
+    final_ball_yaw_max="0.10"
   }'
 
 Press s while the script is running to stop safely.
@@ -51,7 +55,12 @@ set_simple_chase_value() {
   local value
   value="$(clean_value "$2")"
 
-  if ! [[ "$value" =~ ^([0-9]+([.][0-9]+)?|[.][0-9]+)$ ]]; then
+  local value_pattern='^([0-9]+([.][0-9]+)?|[.][0-9]+)$'
+  if [[ "$key" == "final_ball_yaw_min" || "$key" == "final_ball_yaw_max" ]]; then
+    value_pattern='^-?([0-9]+([.][0-9]+)?|[.][0-9]+)$'
+  fi
+
+  if ! [[ "$value" =~ $value_pattern ]]; then
     echo "Invalid value for ${key}: ${value}" >&2
     exit 2
   fi
@@ -65,6 +74,8 @@ set_simple_chase_value() {
     body_turn_speed) BODY_TURN_SPEED="$value" ;;
     head_turn_start_ratio) HEAD_TURN_START_RATIO="$value" ;;
     head_turn_stop_ratio) HEAD_TURN_STOP_RATIO="$value" ;;
+    final_ball_yaw_min) FINAL_BALL_YAW_MIN="$value" ;;
+    final_ball_yaw_max) FINAL_BALL_YAW_MAX="$value" ;;
     *)
       echo "Unknown SimpleChase setting: ${key}" >&2
       exit 2
@@ -77,8 +88,8 @@ parse_block_text() {
   local matched=1
   local key
 
-  for key in vx_limit vy_limit stop_dist stop_angle y_tolerance body_turn_speed head_turn_start_ratio head_turn_stop_ratio; do
-    if [[ "$text" =~ (^|[[:space:]\{])${key}[[:space:]]*=[[:space:]]*\"?([0-9]+([.][0-9]+)?|[.][0-9]+)\"? ]]; then
+  for key in vx_limit vy_limit stop_dist stop_angle y_tolerance body_turn_speed head_turn_start_ratio head_turn_stop_ratio final_ball_yaw_min final_ball_yaw_max; do
+    if [[ "$text" =~ (^|[[:space:]\{])${key}[[:space:]]*=[[:space:]]*\"?(-?[0-9]+([.][0-9]+)?|-?[.][0-9]+)\"? ]]; then
       set_simple_chase_value "$key" "${BASH_REMATCH[2]}"
       matched=0
     fi
@@ -134,6 +145,16 @@ parse_args() {
         set_simple_chase_value head_turn_stop_ratio "$2"
         shift 2
         ;;
+      --final-ball-yaw-min|--final_ball_yaw_min)
+        [[ $# -ge 2 ]] || { echo "Missing value for $1" >&2; exit 2; }
+        set_simple_chase_value final_ball_yaw_min "$2"
+        shift 2
+        ;;
+      --final-ball-yaw-max|--final_ball_yaw_max)
+        [[ $# -ge 2 ]] || { echo "Missing value for $1" >&2; exit 2; }
+        set_simple_chase_value final_ball_yaw_max "$2"
+        shift 2
+        ;;
       --vx-limit=*|--vx_limit=*)
         set_simple_chase_value vx_limit "${1#*=}"
         shift
@@ -166,7 +187,15 @@ parse_args() {
         set_simple_chase_value head_turn_stop_ratio "${1#*=}"
         shift
         ;;
-      vx_limit=*|vy_limit=*|stop_dist=*|stop_angle=*|y_tolerance=*|body_turn_speed=*|head_turn_start_ratio=*|head_turn_stop_ratio=*)
+      --final-ball-yaw-min=*|--final_ball_yaw_min=*)
+        set_simple_chase_value final_ball_yaw_min "${1#*=}"
+        shift
+        ;;
+      --final-ball-yaw-max=*|--final_ball_yaw_max=*)
+        set_simple_chase_value final_ball_yaw_max "${1#*=}"
+        shift
+        ;;
+      vx_limit=*|vy_limit=*|stop_dist=*|stop_angle=*|y_tolerance=*|body_turn_speed=*|head_turn_start_ratio=*|head_turn_stop_ratio=*|final_ball_yaw_min=*|final_ball_yaw_max=*)
         set_simple_chase_value "${1%%=*}" "${1#*=}"
         shift
         ;;
@@ -260,6 +289,8 @@ echo "  y_tolerance=${Y_TOLERANCE}"
 echo "  body_turn_speed=${BODY_TURN_SPEED}"
 echo "  head_turn_start_ratio=${HEAD_TURN_START_RATIO}"
 echo "  head_turn_stop_ratio=${HEAD_TURN_STOP_RATIO}"
+echo "  final_ball_yaw_min=${FINAL_BALL_YAW_MIN:-default(-stop_angle)}"
+echo "  final_ball_yaw_max=${FINAL_BALL_YAW_MAX:-default(stop_angle)}"
 
 ./scripts/stop.sh || true
 sleep 3
@@ -271,6 +302,15 @@ sleep 2
 
 BRAIN_SHARE="$(ros2 pkg prefix brain)/share/brain"
 TREE_PATH="${BRAIN_SHARE}/behavior_trees/chase_vector_safe.xml"
+FINAL_BALL_YAW_XML=""
+if [[ -n "$FINAL_BALL_YAW_MIN" ]]; then
+  FINAL_BALL_YAW_XML="${FINAL_BALL_YAW_XML}
+                     final_ball_yaw_min=\"${FINAL_BALL_YAW_MIN}\""
+fi
+if [[ -n "$FINAL_BALL_YAW_MAX" ]]; then
+  FINAL_BALL_YAW_XML="${FINAL_BALL_YAW_XML}
+                     final_ball_yaw_max=\"${FINAL_BALL_YAW_MAX}\""
+fi
 
 cat > "$TREE_PATH" <<XML
 <root BTCPP_format="4">
@@ -295,7 +335,7 @@ cat > "$TREE_PATH" <<XML
                      y_tolerance="${Y_TOLERANCE}"
                      body_turn_speed="${BODY_TURN_SPEED}"
                      head_turn_start_ratio="${HEAD_TURN_START_RATIO}"
-                     head_turn_stop_ratio="${HEAD_TURN_STOP_RATIO}" />
+                     head_turn_stop_ratio="${HEAD_TURN_STOP_RATIO}"${FINAL_BALL_YAW_XML} />
       </ReactiveSequence>
     </Sequence>
   </BehaviorTree>
