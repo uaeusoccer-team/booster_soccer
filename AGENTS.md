@@ -380,6 +380,7 @@ sudo tcpdump -ni any udp
 
 - Prefer existing behavior tree nodes and `RobotClient` functions over new motion pathways.
 - Keep changes focused; avoid unrelated refactors and generated artifact churn.
+- Do not edit C++ source or header files (`*.cpp`, `*.h`, `*.hpp`, `*.cc`, `*.cxx`) unless the user explicitly approves the C++ change in that turn. Reading, explaining, or reviewing C++ files is allowed without approval.
 - Do not copy `build/`, `install/`, or `log/` from laptop to robot.
 - Do not edit `/opt/booster/BoosterRos2/fastdds_profile.xml` unless the user explicitly approves it.
 - Use `rg` for searching.
