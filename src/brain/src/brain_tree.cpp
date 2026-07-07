@@ -423,9 +423,10 @@ NodeStatus Chase::tick()
 
 NodeStatus SimpleChase::tick()
 {
-    double stopDist, stopAngle, vyLimit, vxLimit;
+    double stopDist, stopAngle, yTolerance, vyLimit, vxLimit;
     getInput("stop_dist", stopDist);
     getInput("stop_angle", stopAngle);
+    getInput("y_tolerance", yTolerance);
     getInput("vx_limit", vxLimit);
     getInput("vy_limit", vyLimit);
 
@@ -435,20 +436,28 @@ NodeStatus SimpleChase::tick()
         return NodeStatus::SUCCESS;
     }
 
+    const double ballRange = brain->data->ball.range;
+    const double ballYaw = brain->data->ball.yawToRobot;
+
+    if (ballRange <= stopDist)
+    {
+        brain->client->setVelocity(0, 0, 0);
+        return NodeStatus::SUCCESS;
+    }
+
     double vx = brain->data->ball.posToRobot.x;
     double vy = brain->data->ball.posToRobot.y;
-    double vtheta = brain->data->ball.yawToRobot * 4.0; 
+    double vtheta = fabs(ballYaw) <= fabs(stopAngle) ? 0.0 : ballYaw * 4.0;
 
-    double linearFactor = 1 / (1 + exp(3 * (brain->data->ball.range * fabs(brain->data->ball.yawToRobot)) - 3)); 
+    double linearFactor = 1 / (1 + exp(3 * (ballRange * fabs(ballYaw)) - 3));
     vx *= linearFactor;
     vy *= linearFactor;
 
     vx = cap(vx, vxLimit, -1.0);    
     vy = cap(vy, vyLimit, -vyLimit); 
 
-    if (brain->data->ball.range < stopDist)
+    if (fabs(brain->data->ball.posToRobot.y) <= fabs(yTolerance))
     {
-        vx = 0;
         vy = 0;
     }
 
