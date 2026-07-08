@@ -513,7 +513,10 @@ NodeStatus SimpleChase::tick()
         finalBallYawMax = tmp;
     }
 
-    if (ballRange > stopDist || !finalHeadYawRangeSet)
+    const bool translationStopped = fabs(vx) < 1e-5 && fabs(vy) < 1e-5;
+    const bool finalAlignmentAllowed = ballTracked && (ballRange <= stopDist || translationStopped);
+
+    if (!finalAlignmentAllowed || !finalHeadYawRangeSet)
     {
         resetFinalAlign();
     }
@@ -595,7 +598,7 @@ NodeStatus SimpleChase::tick()
     };
 
     auto ballYawFallback = [&]() {
-        if ((finalHeadYawRangeSet || finalBallYawRangeSet) && ballRange <= stopDist)
+        if ((finalHeadYawRangeSet || finalBallYawRangeSet) && finalAlignmentAllowed)
         {
             return finalStopTurn();
         }
@@ -610,24 +613,33 @@ NodeStatus SimpleChase::tick()
             ? fabs(brain->config->get_head_yaw_limit_left())
             : fabs(brain->config->get_head_yaw_limit_right());
         const bool headYawUsable = headYawLimit > 1e-5;
-        const double headYawRatio = headYawUsable ? cap(fabs(headYaw) / headYawLimit, 1.0, 0.0) : 0.0;
+        const double headYawAbs = fabs(headYaw);
+        // Keep 0.80/0.70 behaving like the T1 edge/center bands the operator tunes by sight.
+        const double headYawStartThreshold = headYawUsable ? min(startRatio * headYawLimit, startRatio) : 0.0;
+        const double headYawStopThreshold = headYawUsable ? min(stopRatio * headYawLimit, stopRatio) : 0.0;
 
         if (headYawUsable)
         {
             if (headYawBodyTurnDir != 0.0 &&
-                (headYawSign == 0.0 || headYawSign != headYawBodyTurnDir || headYawRatio <= stopRatio))
+                (headYawSign == 0.0 || headYawSign != headYawBodyTurnDir || headYawAbs <= headYawStopThreshold))
             {
                 headYawBodyTurnDir = 0.0;
             }
 
-            if (headYawBodyTurnDir == 0.0 && headYawSign != 0.0 && headYawRatio >= startRatio)
+            if (headYawBodyTurnDir == 0.0 && headYawSign != 0.0 && headYawAbs >= headYawStartThreshold)
             {
                 headYawBodyTurnDir = headYawSign;
             }
 
-            vtheta = headYawBodyTurnDir != 0.0
-                ? headYawBodyTurnDir * bodyTurnSpeed
-                : ballYawFallback();
+            if (headYawBodyTurnDir != 0.0)
+            {
+                resetFinalAlign();
+                vtheta = headYawBodyTurnDir * bodyTurnSpeed;
+            }
+            else
+            {
+                vtheta = ballYawFallback();
+            }
         }
         else
         {
