@@ -178,7 +178,7 @@ int main(int argc, char const *argv[]) {
 
     std::cout << "Publishing waist target " << degrees << " deg (" << radians << " rad)\n";
     for (int step = 0; step < hold_steps; ++step) {
-      publisher->Write(msg);
+      publisher->Write(&msg);
       std::this_thread::sleep_for(sleep_time);
     }
   }
@@ -188,7 +188,7 @@ int main(int argc, char const *argv[]) {
   waist.kp(0.0F);
   waist.kd(0.0F);
   for (int step = 0; step < 10; ++step) {
-    publisher->Write(msg);
+    publisher->Write(&msg);
     std::this_thread::sleep_for(sleep_time);
   }
 
