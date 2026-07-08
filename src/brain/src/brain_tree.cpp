@@ -423,21 +423,34 @@ NodeStatus Chase::tick()
 
 NodeStatus SimpleChase::tick()
 {
-    double stopDist, stopAngle, yTolerance, bodyTurnSpeed, headTurnStartRatio, headTurnStopRatio, vyLimit, vxLimit;
+    double stopDist, stopAngle, yTolerance, bodyTurnSpeed, headTurnStartRatio, headTurnStopRatio, finalAlignTurnSpeed, finalTurnPulseMsec, finalSettleMsec, vyLimit, vxLimit;
     getInput("stop_dist", stopDist);
     getInput("stop_angle", stopAngle);
     getInput("y_tolerance", yTolerance);
     getInput("body_turn_speed", bodyTurnSpeed);
     getInput("head_turn_start_ratio", headTurnStartRatio);
     getInput("head_turn_stop_ratio", headTurnStopRatio);
+    getInput("final_align_turn_speed", finalAlignTurnSpeed);
+    getInput("final_turn_pulse_msec", finalTurnPulseMsec);
+    getInput("final_settle_msec", finalSettleMsec);
     getInput("vx_limit", vxLimit);
     getInput("vy_limit", vyLimit);
 
     static double headYawBodyTurnDir = 0.0;
+    static int finalAlignState = 0; // 0 check, 1 pulse turn, 2 settle
+    static double finalAlignTurnDir = 0.0;
+    static rclcpp::Time finalAlignStateStartTime = rclcpp::Time(0, 0, RCL_ROS_TIME);
+
+    auto resetFinalAlign = [&]() {
+        finalAlignState = 0;
+        finalAlignTurnDir = 0.0;
+        finalAlignStateStartTime = rclcpp::Time(0, 0, RCL_ROS_TIME);
+    };
 
     if (!brain->tree->getEntry<bool>("ball_location_known"))
     {
         headYawBodyTurnDir = 0.0;
+        resetFinalAlign();
         brain->client->setVelocity(0, 0, 0);
         return NodeStatus::SUCCESS;
     }
@@ -472,6 +485,10 @@ NodeStatus SimpleChase::tick()
     const double stopRatio = cap(fabs(headTurnStopRatio), startRatio, 0.0);
     const bool headYawTurnEnabled = bodyTurnSpeed > 0.0 && startRatio > 0.0;
     const bool ballTracked = brain->data->ballDetected;
+    const double finalTurnSpeed = fabs(finalAlignTurnSpeed);
+    const double turnPulseMsec = max(0.0, finalTurnPulseMsec);
+    const double settleMsec = max(0.0, finalSettleMsec);
+
     double finalHeadYawMin = -fabs(stopAngle);
     double finalHeadYawMax = fabs(stopAngle);
     const bool finalHeadYawMinSet = static_cast<bool>(getInput("final_head_yaw_min", finalHeadYawMin));
@@ -496,6 +513,11 @@ NodeStatus SimpleChase::tick()
         finalBallYawMax = tmp;
     }
 
+    if (ballRange > stopDist || !finalHeadYawRangeSet)
+    {
+        resetFinalAlign();
+    }
+
     auto finalRangeTurn = [&](double value, double acceptedMin, double acceptedMax) {
         if (value >= acceptedMin && value <= acceptedMax)
         {
@@ -506,14 +528,48 @@ NodeStatus SimpleChase::tick()
         return (value - nearestAcceptedValue) * 4.0;
     };
 
-    auto headYawFinalTurn = [&]() {
-        const double cmd = finalRangeTurn(headYaw, finalHeadYawMin, finalHeadYawMax);
-        if (fabs(cmd) < 1e-5)
+    auto headYawFinalTurn = [&]() -> double {
+        const auto now = brain->get_clock()->now();
+
+        if (finalAlignState == 1)
         {
+            if (brain->msecsSince(finalAlignStateStartTime) < turnPulseMsec)
+            {
+                return finalAlignTurnDir * finalTurnSpeed;
+            }
+
+            finalAlignState = 2;
+            finalAlignStateStartTime = now;
             return 0.0;
         }
 
-        return cmd > 0.0 ? bodyTurnSpeed : -bodyTurnSpeed;
+        if (finalAlignState == 2)
+        {
+            if (brain->msecsSince(finalAlignStateStartTime) < settleMsec)
+            {
+                return 0.0;
+            }
+
+            finalAlignState = 0;
+            finalAlignTurnDir = 0.0;
+        }
+
+        const double cmd = finalRangeTurn(headYaw, finalHeadYawMin, finalHeadYawMax);
+        if (fabs(cmd) < 1e-5)
+        {
+            resetFinalAlign();
+            return 0.0;
+        }
+
+        if (finalTurnSpeed <= 0.0 || turnPulseMsec <= 0.0)
+        {
+            return cmd > 0.0 ? finalTurnSpeed : -finalTurnSpeed;
+        }
+
+        finalAlignState = 1;
+        finalAlignTurnDir = cmd > 0.0 ? 1.0 : -1.0;
+        finalAlignStateStartTime = now;
+        return finalAlignTurnDir * finalTurnSpeed;
     };
 
     auto ballYawFinalTurn = [&]() {
@@ -524,7 +580,7 @@ NodeStatus SimpleChase::tick()
         if (finalHeadYawRangeSet)
         {
             const double headCmd = headYawFinalTurn();
-            if (fabs(headCmd) > 1e-5)
+            if (finalAlignState != 0 || fabs(headCmd) > 1e-5)
             {
                 return headCmd;
             }

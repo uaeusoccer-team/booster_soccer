@@ -11,6 +11,9 @@ Y_TOLERANCE="0.03"
 BODY_TURN_SPEED="0.25"
 HEAD_TURN_START_RATIO="0.75"
 HEAD_TURN_STOP_RATIO="0.65"
+FINAL_ALIGN_TURN_SPEED="0.12"
+FINAL_TURN_PULSE_MSEC="250"
+FINAL_SETTLE_MSEC="600"
 FINAL_HEAD_YAW_MIN=""
 FINAL_HEAD_YAW_MAX=""
 FINAL_BALL_YAW_MIN=""
@@ -19,12 +22,12 @@ FINAL_BALL_YAW_MAX=""
 usage() {
   cat <<'USAGE'
 Usage:
-  ./scripts/safe_chase_vector.sh [vx_limit=0.18] [vy_limit=0.06] [stop_dist=0.8] [stop_angle=0.2] [y_tolerance=0.03] [body_turn_speed=0.25] [head_turn_start_ratio=0.75] [head_turn_stop_ratio=0.65] [final_head_yaw_min=-0.08] [final_head_yaw_max=0.08] [final_ball_yaw_min=-0.10] [final_ball_yaw_max=0.10]
+  ./scripts/safe_chase_vector.sh [vx_limit=0.18] [vy_limit=0.06] [stop_dist=0.8] [stop_angle=0.2] [y_tolerance=0.03] [body_turn_speed=0.25] [head_turn_start_ratio=0.75] [head_turn_stop_ratio=0.65] [final_align_turn_speed=0.12] [final_turn_pulse_msec=250] [final_settle_msec=600] [final_head_yaw_min=-0.08] [final_head_yaw_max=0.08] [final_ball_yaw_min=-0.10] [final_ball_yaw_max=0.10]
 
 Examples:
-  ./scripts/safe_chase_vector.sh vx_limit=0.20 vy_limit=0.06 stop_dist=1.8 stop_angle=0.1 y_tolerance=0.05 body_turn_speed=0.25 head_turn_start_ratio=0.75 head_turn_stop_ratio=0.65 final_head_yaw_min=-0.08 final_head_yaw_max=0.08 final_ball_yaw_min=0.0 final_ball_yaw_max=0.10
+  ./scripts/safe_chase_vector.sh vx_limit=0.20 vy_limit=0.06 stop_dist=1.8 stop_angle=0.1 y_tolerance=0.05 body_turn_speed=0.25 head_turn_start_ratio=0.75 head_turn_stop_ratio=0.65 final_align_turn_speed=0.12 final_turn_pulse_msec=250 final_settle_msec=600 final_head_yaw_min=-0.08 final_head_yaw_max=0.08 final_ball_yaw_min=0.0 final_ball_yaw_max=0.10
 
-  ./scripts/safe_chase_vector.sh --vx-limit 0.20 --vy-limit 0.06 --stop-dist 1.8 --stop-angle 0.1 --y-tolerance 0.05 --body-turn-speed 0.25 --head-turn-start-ratio 0.75 --head-turn-stop-ratio 0.65 --final-head-yaw-min -0.08 --final-head-yaw-max 0.08 --final-ball-yaw-min 0.0 --final-ball-yaw-max 0.10
+  ./scripts/safe_chase_vector.sh --vx-limit 0.20 --vy-limit 0.06 --stop-dist 1.8 --stop-angle 0.1 --y-tolerance 0.05 --body-turn-speed 0.25 --head-turn-start-ratio 0.75 --head-turn-stop-ratio 0.65 --final-align-turn-speed 0.12 --final-turn-pulse-msec 250 --final-settle-msec 600 --final-head-yaw-min -0.08 --final-head-yaw-max 0.08 --final-ball-yaw-min 0.0 --final-ball-yaw-max 0.10
 
   ./scripts/safe_chase_vector.sh 'SimpleChase {
     vx_limit="0.20"
@@ -35,6 +38,9 @@ Examples:
     body_turn_speed="0.25"
     head_turn_start_ratio="0.75"
     head_turn_stop_ratio="0.65"
+    final_align_turn_speed="0.12"
+    final_turn_pulse_msec="250"
+    final_settle_msec="600"
     final_head_yaw_min="-0.08"
     final_head_yaw_max="0.08"
     final_ball_yaw_min="0.0"
@@ -78,6 +84,9 @@ set_simple_chase_value() {
     body_turn_speed) BODY_TURN_SPEED="$value" ;;
     head_turn_start_ratio) HEAD_TURN_START_RATIO="$value" ;;
     head_turn_stop_ratio) HEAD_TURN_STOP_RATIO="$value" ;;
+    final_align_turn_speed) FINAL_ALIGN_TURN_SPEED="$value" ;;
+    final_turn_pulse_msec) FINAL_TURN_PULSE_MSEC="$value" ;;
+    final_settle_msec) FINAL_SETTLE_MSEC="$value" ;;
     final_head_yaw_min) FINAL_HEAD_YAW_MIN="$value" ;;
     final_head_yaw_max) FINAL_HEAD_YAW_MAX="$value" ;;
     final_ball_yaw_min) FINAL_BALL_YAW_MIN="$value" ;;
@@ -94,7 +103,7 @@ parse_block_text() {
   local matched=1
   local key
 
-  for key in vx_limit vy_limit stop_dist stop_angle y_tolerance body_turn_speed head_turn_start_ratio head_turn_stop_ratio final_head_yaw_min final_head_yaw_max final_ball_yaw_min final_ball_yaw_max; do
+  for key in vx_limit vy_limit stop_dist stop_angle y_tolerance body_turn_speed head_turn_start_ratio head_turn_stop_ratio final_align_turn_speed final_turn_pulse_msec final_settle_msec final_head_yaw_min final_head_yaw_max final_ball_yaw_min final_ball_yaw_max; do
     if [[ "$text" =~ (^|[[:space:]\{])${key}[[:space:]]*=[[:space:]]*\"?(-?[0-9]+([.][0-9]+)?|-?[.][0-9]+)\"? ]]; then
       set_simple_chase_value "$key" "${BASH_REMATCH[2]}"
       matched=0
@@ -151,6 +160,21 @@ parse_args() {
         set_simple_chase_value head_turn_stop_ratio "$2"
         shift 2
         ;;
+      --final-align-turn-speed|--final_align_turn_speed)
+        [[ $# -ge 2 ]] || { echo "Missing value for $1" >&2; exit 2; }
+        set_simple_chase_value final_align_turn_speed "$2"
+        shift 2
+        ;;
+      --final-turn-pulse-msec|--final_turn_pulse_msec)
+        [[ $# -ge 2 ]] || { echo "Missing value for $1" >&2; exit 2; }
+        set_simple_chase_value final_turn_pulse_msec "$2"
+        shift 2
+        ;;
+      --final-settle-msec|--final_settle_msec)
+        [[ $# -ge 2 ]] || { echo "Missing value for $1" >&2; exit 2; }
+        set_simple_chase_value final_settle_msec "$2"
+        shift 2
+        ;;
       --final-head-yaw-min|--final_head_yaw_min)
         [[ $# -ge 2 ]] || { echo "Missing value for $1" >&2; exit 2; }
         set_simple_chase_value final_head_yaw_min "$2"
@@ -203,6 +227,18 @@ parse_args() {
         set_simple_chase_value head_turn_stop_ratio "${1#*=}"
         shift
         ;;
+      --final-align-turn-speed=*|--final_align_turn_speed=*)
+        set_simple_chase_value final_align_turn_speed "${1#*=}"
+        shift
+        ;;
+      --final-turn-pulse-msec=*|--final_turn_pulse_msec=*)
+        set_simple_chase_value final_turn_pulse_msec "${1#*=}"
+        shift
+        ;;
+      --final-settle-msec=*|--final_settle_msec=*)
+        set_simple_chase_value final_settle_msec "${1#*=}"
+        shift
+        ;;
       --final-head-yaw-min=*|--final_head_yaw_min=*)
         set_simple_chase_value final_head_yaw_min "${1#*=}"
         shift
@@ -219,7 +255,7 @@ parse_args() {
         set_simple_chase_value final_ball_yaw_max "${1#*=}"
         shift
         ;;
-      vx_limit=*|vy_limit=*|stop_dist=*|stop_angle=*|y_tolerance=*|body_turn_speed=*|head_turn_start_ratio=*|head_turn_stop_ratio=*|final_head_yaw_min=*|final_head_yaw_max=*|final_ball_yaw_min=*|final_ball_yaw_max=*)
+      vx_limit=*|vy_limit=*|stop_dist=*|stop_angle=*|y_tolerance=*|body_turn_speed=*|head_turn_start_ratio=*|head_turn_stop_ratio=*|final_align_turn_speed=*|final_turn_pulse_msec=*|final_settle_msec=*|final_head_yaw_min=*|final_head_yaw_max=*|final_ball_yaw_min=*|final_ball_yaw_max=*)
         set_simple_chase_value "${1%%=*}" "${1#*=}"
         shift
         ;;
@@ -313,6 +349,9 @@ echo "  y_tolerance=${Y_TOLERANCE}"
 echo "  body_turn_speed=${BODY_TURN_SPEED}"
 echo "  head_turn_start_ratio=${HEAD_TURN_START_RATIO}"
 echo "  head_turn_stop_ratio=${HEAD_TURN_STOP_RATIO}"
+echo "  final_align_turn_speed=${FINAL_ALIGN_TURN_SPEED}"
+echo "  final_turn_pulse_msec=${FINAL_TURN_PULSE_MSEC}"
+echo "  final_settle_msec=${FINAL_SETTLE_MSEC}"
 echo "  final_head_yaw_min=${FINAL_HEAD_YAW_MIN:-disabled}"
 echo "  final_head_yaw_max=${FINAL_HEAD_YAW_MAX:-disabled}"
 echo "  final_ball_yaw_min=${FINAL_BALL_YAW_MIN:-default(-stop_angle)}"
@@ -369,7 +408,10 @@ cat > "$TREE_PATH" <<XML
                      y_tolerance="${Y_TOLERANCE}"
                      body_turn_speed="${BODY_TURN_SPEED}"
                      head_turn_start_ratio="${HEAD_TURN_START_RATIO}"
-                     head_turn_stop_ratio="${HEAD_TURN_STOP_RATIO}"${FINAL_YAW_XML} />
+                     head_turn_stop_ratio="${HEAD_TURN_STOP_RATIO}"
+                     final_align_turn_speed="${FINAL_ALIGN_TURN_SPEED}"
+                     final_turn_pulse_msec="${FINAL_TURN_PULSE_MSEC}"
+                     final_settle_msec="${FINAL_SETTLE_MSEC}"${FINAL_YAW_XML} />
       </ReactiveSequence>
     </Sequence>
   </BehaviorTree>
