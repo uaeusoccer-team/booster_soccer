@@ -28,6 +28,21 @@ Robot repo path:
 
 Development checkouts may live anywhere on each teammate's machine. Refer to this project by the repo directory name, `booster_soccer`, unless a command is explicitly meant to run on the robot.
 
+## Robot Branch Before Commands
+
+Before running any build, launch, test, topic inspection, helper script, or stop command on the robot, first switch the robot checkout to the current team member's dedicated branch and pull it.
+
+For Abdallah's branch:
+
+```bash
+ssh booster@192.168.68.103
+cd ~/booster_soccer
+git switch abdallah
+git pull origin abdallah
+```
+
+Do this before sourcing ROS setup files or running any robot-side command. Only switch the robot checkout to `main` when the user explicitly says to test merged `main`.
+
 ## Critical User Reminder After Changes
 
 Before making any code changes, the agent must stay on the current team member's dedicated branch and pull `main` into that branch:
@@ -45,8 +60,8 @@ Do not create new branches, delete branches, rename branches, or switch to a new
 When an agent changes code, remind the user that robot testing requires moving the changes to the robot:
 
 1. Push the current working branch.
-2. Merge that branch into `main`.
-3. SSH into the robot and pull `main` in `~/booster_soccer`.
+2. Merge that branch into `main` when the team is ready for shared testing, or keep testing on the dedicated branch if the user says to test that branch first.
+3. SSH into the robot and pull the branch being tested in `~/booster_soccer`.
 4. Rebuild on the robot before running.
 
 Use commands like these, staying on the current dedicated branch:
@@ -65,8 +80,8 @@ git push origin HEAD
 ssh booster@192.168.68.103
 cd ~/booster_soccer
 deactivate 2>/dev/null || true
-git switch main
-git pull origin main
+git switch abdallah
+git pull origin abdallah
 git submodule update --init --recursive
 chmod +x scripts/*.sh
 ```
