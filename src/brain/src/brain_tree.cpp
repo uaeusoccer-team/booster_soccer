@@ -915,6 +915,18 @@ NodeStatus StrikerDecide::tick() {
 
     double chaseRangeThreshold;
     getInput("chase_threshold", chaseRangeThreshold);
+    double kickRange;
+    double kickYawAbs;
+    double kickLateralAbs;
+    double kickDirAbs;
+    bool requireKickDirection;
+    bool soloLeadWhenComDisabled;
+    getInput("kick_range", kickRange);
+    getInput("kick_yaw_abs", kickYawAbs);
+    getInput("kick_lateral_abs", kickLateralAbs);
+    getInput("kick_dir_abs", kickDirAbs);
+    getInput("require_kick_direction", requireKickDirection);
+    getInput("solo_lead_when_com_disabled", soloLeadWhenComDisabled);
     string lastDecision, position;
     getInput("decision_in", lastDecision);
     getInput("position", position);
@@ -951,6 +963,27 @@ NodeStatus StrikerDecide::tick() {
     timeLastTick = now;
     lastDeltaDir = deltaDir;
 
+    const bool soloLead = soloLeadWhenComDisabled && !brain->config->get_enable_com();
+    const bool imLead = brain->data->tmImLead || soloLead;
+    const bool closeEnoughForKick = ballRange <= kickRange + (lastDecision == "kick" || lastDecision == "cross" ? 0.10 : 0.0);
+    const bool ballCenteredForKick = fabs(ballYaw) <= kickYawAbs && fabs(ballY) <= kickLateralAbs && ballX > 0.0;
+    const bool kickDirectionReady = !requireKickDirection || ((angleGoodForKick && fabs(deltaDir) <= kickDirAbs) || reachedKickDir);
+    const bool kickWindowReady = closeEnoughForKick
+        && ballCenteredForKick
+        && kickDirectionReady
+        && brain->data->ballDetected
+        && !avoidKick;
+
+    log(format(
+        "lead: %d soloLead: %d closeKick: %d centeredKick: %d dirReady: %d avoidKick: %d deltaDir: %.2f",
+        imLead,
+        soloLead,
+        closeEnoughForKick,
+        ballCenteredForKick,
+        kickDirectionReady,
+        avoidKick,
+        deltaDir));
+
     string newDecision;
     bool iKnowBallPos = brain->tree->getEntry<bool>("ball_location_known");
     bool tmBallPosReliable = brain->tree->getEntry<bool>("tm_ball_pos_reliable");
@@ -959,8 +992,8 @@ NodeStatus StrikerDecide::tick() {
         newDecision = "find";
     } else if (
                 brain->config->get_enable_auto_visual_kick() &&
-                brain->data->tmImLead && 
-                brain->data->tmMyCostRank == 0 && 
+                imLead &&
+                (soloLead || brain->data->tmMyCostRank == 0) &&
                 !brain->tree->getEntry<bool>("ball_out") && 
                 brain->data->lose_ball == false &&
                 brain->data->tmMyCost < 7.0 &&
@@ -974,21 +1007,12 @@ NodeStatus StrikerDecide::tick() {
             ) {
         newDecision = "auto_visual_kick";
         brain->data->tmImInVisualKick = true;
-    } else if (!brain->data->tmImLead) {
+    } else if (!imLead) {
         newDecision = "assist";
     } else if (ballRange > chaseRangeThreshold * (lastDecision == "chase" ? 0.9 : 1.0))
     {
         newDecision = "chase";
-    } else if (
-        (
-            (angleGoodForKick && !brain->data->isFreekickKickingOff) 
-            || reachedKickDir
-        )
-        && brain->data->ballDetected
-        && fabs(brain->data->ball.yawToRobot) < M_PI / 2.
-        && !avoidKick
-        && ball.range < 1.5
-    ) {
+    } else if (kickWindowReady && !brain->data->isFreekickKickingOff) {
         if (brain->data->kickType == "cross") newDecision = "cross";
         else newDecision = "kick";      
         brain->data->isFreekickKickingOff = false; 
@@ -1130,6 +1154,7 @@ NodeStatus Kick::onStart()
 {
     _minRange = brain->data->ball.range;
     _speed = 0.5;
+    _state = "stabilize";
     _startTime = brain->get_clock()->now();
 
 
@@ -1146,7 +1171,13 @@ NodeStatus Kick::onStart()
         return NodeStatus::SUCCESS;
     }
 
-    // Publish movement command
+    double stabilizeMsec = getInput<double>("msecs_stablize").value();
+    if (stabilizeMsec > 0.0) {
+        brain->client->setVelocity(0.0, 0.0, 0.0);
+        return NodeStatus::RUNNING;
+    }
+
+    _state = "kick";
     double angle = brain->data->ball.yawToRobot;
     brain->client->crabWalk(angle, _speed);
     return NodeStatus::RUNNING;
@@ -1158,6 +1189,18 @@ NodeStatus Kick::onRunning()
         brain->log->debug("Kick", msg);
     };
 
+    if (_state == "stabilize") {
+        double stabilizeMsec = getInput<double>("msecs_stablize").value();
+        brain->client->setVelocity(0.0, 0.0, 0.0);
+        if (brain->msecsSince(_startTime) < stabilizeMsec) {
+            return NodeStatus::RUNNING;
+        }
+
+        _state = "kick";
+        _startTime = brain->get_clock()->now();
+        _minRange = brain->data->ball.range;
+        _speed = 0.5;
+    }
 
     bool enableAbort = brain->config->get_abort_kick_when_ball_moved();
     auto ballRange = brain->data->ball.range;
@@ -1212,6 +1255,8 @@ NodeStatus Kick::onRunning()
 
 void Kick::onHalted()
 {
+    brain->client->setVelocity(0.0, 0.0, 0.0);
+    _state = "kick";
     _startTime -= rclcpp::Duration(100, 0);
 }
 

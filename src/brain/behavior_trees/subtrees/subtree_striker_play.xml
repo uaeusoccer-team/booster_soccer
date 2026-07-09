@@ -22,15 +22,23 @@
                   <CalcKickDir />
                   <Sequence>
                      <ReactiveSequence>
-                        <StrikerDecide decision_out="{decision}" decision_in="{decision}" chase_threshold="1.0" />
+                        <StrikerDecide decision_out="{decision}"
+                                       decision_in="{decision}"
+                                       chase_threshold="0.85"
+                                       kick_range="0.55"
+                                       kick_yaw_abs="0.35"
+                                       kick_lateral_abs="0.22"
+                                       kick_dir_abs="0.45"
+                                       require_kick_direction="true"
+                                       solo_lead_when_com_disabled="true" />
                         <SubTree ID="FindBall" _while="decision=='find'" _autoremap="true" />
                      </ReactiveSequence>
                         <Assist _while="decision == 'assist'" vx_limit = "0.2" vy_limit="0.2" />
-                        <Chase   _while="decision == 'chase'"  vx_limit="0.9"  vy_limit="0.2"  vtheta_limit="1.0"  dist="0.1" safe_dist="0.5" />
+                        <Chase   _while="decision == 'chase'"  vx_limit="0.50"  vy_limit="0.18"  vtheta_limit="0.8"  dist="0.35" safe_dist="0.6" />
                         <RLVisionKick _while="decision == 'auto_visual_kick'" min_msec_kick="1500" max_msec_kick="7000" range="6.0"/>
-                        <Adjust _while="decision =='adjust'" turn_threshold="0.5" range="0.4" vx_limit="0.7" vy_limit="0.6" vtheta_limit="1.5" vtheta_factor="1.5" tangential_speed_far="0.7" tangential_speed_near="0.15" />
-                        <Kick _while="decision == 'kick'" speed_limit="0.8" min_msec_kick="1000" msecs_stablize="1000"/>
-                        <Kick _while="decision == 'cross'" speed_limit="0.4" min_msec_kick="300"/>
+                        <Adjust _while="decision =='adjust'" turn_threshold="0.4" range="0.35" vx_limit="0.35" vy_limit="0.25" vtheta_limit="0.8" vtheta_factor="1.2" tangential_speed_far="0.25" tangential_speed_near="0.08" near_threshold="0.45" no_turn_threshold="0.08" turn_first_threshold="0.35" />
+                        <Kick _while="decision == 'kick'" speed_limit="0.65" min_msec_kick="700" msecs_stablize="300"/>
+                        <Kick _while="decision == 'cross'" speed_limit="0.35" min_msec_kick="300" msecs_stablize="200"/>
                   </Sequence>
                </ReactiveSequence>
             </ReactiveSequence>

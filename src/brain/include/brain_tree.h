@@ -76,6 +76,12 @@ public:
     {
         return {
             InputPort<double>("chase_threshold", 1.0, "If the distance exceeds this value, execute the chase action"),
+            InputPort<double>("kick_range", 0.55, "Maximum ball range for entering kick"),
+            InputPort<double>("kick_yaw_abs", 0.35, "Maximum absolute ball yaw for entering kick"),
+            InputPort<double>("kick_lateral_abs", 0.22, "Maximum absolute lateral ball offset for entering kick"),
+            InputPort<double>("kick_dir_abs", 0.45, "Maximum absolute kick direction error for entering kick"),
+            InputPort<bool>("require_kick_direction", true, "Require field kick direction alignment before entering kick"),
+            InputPort<bool>("solo_lead_when_com_disabled", true, "Treat this robot as lead when team communication is disabled"),
             InputPort<string>("decision_in", "", "Used to read the previous decision"),
             InputPort<string>("position", "offense", "offense | defense, determines the direction to kick the ball"),
             OutputPort<string>("decision_out")};
