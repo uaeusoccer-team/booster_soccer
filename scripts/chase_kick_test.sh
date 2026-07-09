@@ -9,6 +9,9 @@ KICK_DIST=0.55
 STOP_ANGLE=0.08
 KICK_SPEED=0.45
 MIN_MSEC_KICK=650
+KICK_MODE=visual
+VISUAL_MIN_MSEC_KICK=1200
+VISUAL_MAX_MSEC_KICK=4000
 AUTO_PLAY=false
 
 for arg in "$@"; do
@@ -22,9 +25,17 @@ for arg in "$@"; do
     stop_angle) STOP_ANGLE="$val" ;;
     kick_speed) KICK_SPEED="$val" ;;
     min_msec_kick) MIN_MSEC_KICK="$val" ;;
+    kick_mode) KICK_MODE="$val" ;;
+    visual_min_msec_kick) VISUAL_MIN_MSEC_KICK="$val" ;;
+    visual_max_msec_kick) VISUAL_MAX_MSEC_KICK="$val" ;;
     auto_play) AUTO_PLAY="$val" ;;
   esac
 done
+
+if [[ "$KICK_MODE" != "visual" && "$KICK_MODE" != "walk" ]]; then
+  echo "kick_mode must be visual or walk"
+  exit 1
+fi
 
 cd "${WORKSPACE:-$HOME/booster_soccer}"
 deactivate 2>/dev/null || true
@@ -61,16 +72,34 @@ cat > "$TREE_PATH" <<XML
       <ReactiveSequence _while="gc_game_state=='PLAY'" name="chase and kick">
         <CheckAndStandUp />
         <SubTree ID="CamFindAndTrackBall" _autoremap="true" />
+        <!-- Approach slowly. Kick action only runs after operator sends PLAY and ball is close. -->
         <SimpleChase _while="ball_location_known &amp;&amp; ball_range &gt; ${KICK_DIST}"
                      vx_limit="${VX_LIMIT}"
                      vy_limit="${VY_LIMIT}"
                      vtheta_limit="${VTHETA_LIMIT}"
                      stop_dist="${KICK_DIST}"
                      stop_angle="${STOP_ANGLE}" />
+XML
+
+if [[ "$KICK_MODE" == "visual" ]]; then
+  cat >> "$TREE_PATH" <<XML
+        <!-- Uses Booster built-in visual kick motion. This avoids raw joint commands. -->
+        <RLVisionKick _while="ball_location_known &amp;&amp; ball_range &lt;= ${KICK_DIST}"
+                      min_msec_kick="${VISUAL_MIN_MSEC_KICK}"
+                      max_msec_kick="${VISUAL_MAX_MSEC_KICK}"
+                      range="1.0" />
+XML
+else
+  cat >> "$TREE_PATH" <<XML
+        <!-- Fallback: walking push-through kick. This is weaker than visual kick. -->
         <Kick _while="ball_location_known &amp;&amp; ball_range &lt;= ${KICK_DIST}"
               speed_limit="${KICK_SPEED}"
               min_msec_kick="${MIN_MSEC_KICK}"
               msecs_stablize="0" />
+XML
+fi
+
+cat >> "$TREE_PATH" <<XML
         <SetVelocity _while="!ball_location_known" />
       </ReactiveSequence>
     </Sequence>
@@ -104,6 +133,8 @@ ros2 launch brain launch.py \
   > brain.log 2>&1 &
 sleep 5
 
+echo "Kick mode: ${KICK_MODE}"
+echo "Chase limits: vx=${VX_LIMIT} vy=${VY_LIMIT} vtheta=${VTHETA_LIMIT} kick_dist=${KICK_DIST}"
 echo "Press p to PLAY, s to STOP."
 if [[ "$AUTO_PLAY" == "true" ]]; then
   ros2 topic pub --once /booster_agent/soccer_game_control std_msgs/msg/String "{data: play}" || true
