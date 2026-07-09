@@ -328,6 +328,7 @@ public:
     {
         return {
             InputPort<double>("min_msec_kick", 500, "Minimum duration for the kick action (milliseconds)"),
+            InputPort<double>("max_msec_kick", 2200, "Maximum duration for the kick action (milliseconds)"),
             InputPort<double>("msecs_stablize", 1000, "Duration to stabilize before kicking (milliseconds)"),
             InputPort<double>("speed_limit", 0.8, "Maximum speed for the kick action"),
         };

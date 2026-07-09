@@ -9,9 +9,11 @@ KICK_DIST=0.55
 STOP_ANGLE=0.08
 KICK_SPEED=0.45
 MIN_MSEC_KICK=650
-KICK_MODE=visual
+KICK_MODE=walk
 VISUAL_MIN_MSEC_KICK=1200
 VISUAL_MAX_MSEC_KICK=4000
+MAX_MSEC_KICK=2200
+KICK_STABILIZE_MSEC=200
 AUTO_PLAY=false
 
 for arg in "$@"; do
@@ -28,6 +30,8 @@ for arg in "$@"; do
     kick_mode) KICK_MODE="$val" ;;
     visual_min_msec_kick) VISUAL_MIN_MSEC_KICK="$val" ;;
     visual_max_msec_kick) VISUAL_MAX_MSEC_KICK="$val" ;;
+    max_msec_kick) MAX_MSEC_KICK="$val" ;;
+    kick_stabilize_msec|stabilize_msec|msecs_stablize) KICK_STABILIZE_MSEC="$val" ;;
     auto_play) AUTO_PLAY="$val" ;;
   esac
 done
@@ -95,7 +99,8 @@ else
         <Kick _while="ball_location_known &amp;&amp; ball_range &lt;= ${KICK_DIST}"
               speed_limit="${KICK_SPEED}"
               min_msec_kick="${MIN_MSEC_KICK}"
-              msecs_stablize="0" />
+              max_msec_kick="${MAX_MSEC_KICK}"
+              msecs_stablize="${KICK_STABILIZE_MSEC}" />
 XML
 fi
 
@@ -135,6 +140,8 @@ sleep 5
 
 echo "Kick mode: ${KICK_MODE}"
 echo "Chase limits: vx=${VX_LIMIT} vy=${VY_LIMIT} vtheta=${VTHETA_LIMIT} kick_dist=${KICK_DIST}"
+echo "Walk kick: speed=${KICK_SPEED} min_ms=${MIN_MSEC_KICK} max_ms=${MAX_MSEC_KICK} stabilize_ms=${KICK_STABILIZE_MSEC}"
+echo "Visual kick: min_ms=${VISUAL_MIN_MSEC_KICK} max_ms=${VISUAL_MAX_MSEC_KICK}"
 echo "Press p to PLAY, s to STOP."
 if [[ "$AUTO_PLAY" == "true" ]]; then
   ros2 topic pub --once /booster_agent/soccer_game_control std_msgs/msg/String "{data: play}" || true

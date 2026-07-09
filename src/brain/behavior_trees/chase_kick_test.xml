@@ -8,7 +8,7 @@
         <SetVelocity />
       </ReactiveSequence>
 
-      <ReactiveSequence _while="gc_game_state=='PLAY'" name="visual kick test">
+      <ReactiveSequence _while="gc_game_state=='PLAY'" name="walking kick test">
         <CheckAndStandUp />
         <SubTree ID="CamFindAndTrackBall" _autoremap="true" />
 
@@ -20,11 +20,13 @@
                      stop_dist="0.55"
                      stop_angle="0.08" />
 
-        <!-- Use Booster's built-in visual kick motion instead of raw joint commands. -->
-        <RLVisionKick _while="ball_location_known &amp;&amp; ball_range &lt;= 0.55"
-                      min_msec_kick="1200"
-                      max_msec_kick="4000"
-                      range="1.0" />
+        <!-- Default test kick uses locomotion to push through the ball.
+             Use scripts/chase_kick_test.sh kick_mode=visual to test Booster's visual-kick API. -->
+        <Kick _while="ball_location_known &amp;&amp; ball_range &lt;= 0.55"
+              speed_limit="0.45"
+              min_msec_kick="650"
+              max_msec_kick="2200"
+              msecs_stablize="200" />
 
         <SetVelocity _while="!ball_location_known" />
       </ReactiveSequence>

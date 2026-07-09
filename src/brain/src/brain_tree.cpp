@@ -1153,10 +1153,17 @@ tuple<double, double, double> Kick::_calcSpeed() {
 NodeStatus Kick::onStart()
 {
     _minRange = brain->data->ball.range;
-    _speed = 0.5;
+    double speedLimit = getInput<double>("speed_limit").value();
+    _speed = min(0.25, speedLimit);
     _state = "stabilize";
     _startTime = brain->get_clock()->now();
 
+    brain->log->log("Kick", format(
+        "start range: %.2f yaw: %.2f lateral: %.2f speed_limit: %.2f",
+        brain->data->ball.range,
+        brain->data->ball.yawToRobot,
+        brain->data->ball.posToRobot.y,
+        speedLimit));
 
     bool avoidPushing = brain->config->get_avoid_during_kick();
     double kickAoSafeDist = brain->config->get_kick_ao_safe_dist();
@@ -1199,7 +1206,9 @@ NodeStatus Kick::onRunning()
         _state = "kick";
         _startTime = brain->get_clock()->now();
         _minRange = brain->data->ball.range;
-        _speed = 0.5;
+        double speedLimit = getInput<double>("speed_limit").value();
+        _speed = min(0.25, speedLimit);
+        log(format("stabilize complete, pushing through ball with initial speed %.2f", _speed));
     }
 
     bool enableAbort = brain->config->get_abort_kick_when_ball_moved();
@@ -1233,11 +1242,17 @@ NodeStatus Kick::onRunning()
     }
 
 
-    double msecs = getInput<double>("min_msec_kick").value();
+    double minMsecKick = getInput<double>("min_msec_kick").value();
+    double maxMsecKick = getInput<double>("max_msec_kick").value();
     double speed = getInput<double>("speed_limit").value();
-    msecs = msecs + brain->data->ball.range / speed * 1000;
+    double msecs = minMsecKick + brain->data->ball.range / speed * 1000;
+    if (maxMsecKick > 0.0) {
+        msecs = min(msecs, maxMsecKick);
+    }
+    msecs = max(msecs, minMsecKick);
     if (brain->msecsSince(_startTime) > msecs) { 
         brain->client->setVelocity(0, 0, 0);
+        log(format("finished after %.0f ms", brain->msecsSince(_startTime)));
         return NodeStatus::SUCCESS;
     }
 
@@ -1245,7 +1260,7 @@ NodeStatus Kick::onRunning()
     if (brain->data->ballDetected) { 
         double angle = brain->data->ball.yawToRobot;
         double speed = getInput<double>("speed_limit").value();
-        _speed += 0.1; 
+        _speed += 0.08;
         speed = min(speed, _speed);
         brain->client->crabWalk(angle, speed);
     }
@@ -1256,6 +1271,7 @@ NodeStatus Kick::onRunning()
 void Kick::onHalted()
 {
     brain->client->setVelocity(0.0, 0.0, 0.0);
+    brain->log->log("Kick", "halted, velocity zeroed");
     _state = "kick";
     _startTime -= rclcpp::Duration(100, 0);
 }
@@ -1274,6 +1290,13 @@ NodeStatus RLVisionKick::onStart()
     // Start deceleration
     startDecelerate(500.0);
     stepDecelerate();
+
+    brain->log->log("RLVisionKick", format(
+        "start range: %.2f yaw: %.2f min_ms: %.0f max_ms: %.0f",
+        brain->data->ball.range,
+        brain->data->ball.yawToRobot,
+        getInput<double>("min_msec_kick").value(),
+        getInput<double>("max_msec_kick").value()));
     
     return NodeStatus::RUNNING;
 }
@@ -1303,6 +1326,7 @@ NodeStatus RLVisionKick::onRunning()
                 brain->client->RLVisionKick();
                 _headScanStartTime = brain->get_clock()->now();
                 _visionKickStarted = true;
+                brain->log->log("RLVisionKick", "visual kick command sent");
             }
         }
         return NodeStatus::RUNNING;
@@ -1320,12 +1344,24 @@ NodeStatus RLVisionKick::onRunning()
     // Check exit conditions
     double elapsed = brain->msecsSince(_startTime);
     double minMsecKick = getInput<double>("min_msec_kick").value();
+    double maxMsecKick = getInput<double>("max_msec_kick").value();
+    if (_visionKickStarted && maxMsecKick > 0.0 && elapsed > maxMsecKick) {
+        brain->log->log("RLVisionKick", format("max duration reached after %.0f ms, exiting visual kick", elapsed));
+        brain->client->RLVisionKick(false);
+        recordExitTime();
+        startDecelerate(500.0);
+        _pendingRobocupWalk = true;
+        stepDecelerate();
+        return NodeStatus::RUNNING;
+    }
     
     // Check if ball is too far or cost is too high
     bool ballTooFar = brain->data->ballDetected && brain->data->ball.range > 5.0;
     bool shouldExit = (((ballTooFar || brain->data->tmMyCost > 8.0) && (elapsed > minMsecKick)) || brain->data->lose_ball || brain->tree->getEntry<bool>("ball_out"));
     
     if (shouldExit) {
+        brain->log->log("RLVisionKick", format("exit requested after %.0f ms", elapsed));
+        brain->client->RLVisionKick(false);
         recordExitTime();
         startDecelerate(500.0);
         _pendingRobocupWalk = true;
@@ -1340,7 +1376,9 @@ void RLVisionKick::onHalted()
 {
     brain->data->tmImInVisualKick = false;
     brain->client->setVelocity(0.0, 0.0, 0.0);
+    brain->client->RLVisionKick(false);
     brain->client->robocupWalk();
+    brain->log->log("RLVisionKick", "halted, visual kick stopped and walking restored");
     recordExitTime();
     
     _isDecelerating = false;
