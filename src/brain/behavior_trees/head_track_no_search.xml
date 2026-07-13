@@ -2,7 +2,7 @@
   <BehaviorTree ID="MainTree">
     <ReactiveSequence name="head_track_no_search">
       <!-- No CamFindBall. Only track if vision already sees/knows the ball. -->
-      <CamTrackBall />
+      <CamTrackBall theta="{tracking_theta}" />
 
       <!-- Keep body fully stationary. -->
       <SetVelocity />

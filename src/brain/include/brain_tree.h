@@ -125,7 +125,14 @@ public:
 
     static PortsList providedPorts()
     {
-        return {};
+        return {
+            InputPort<double>("body_turn_speed", 0.25, "Angular speed used when tracked head yaw reaches its edge"),
+            InputPort<double>("head_turn_start_ratio", 0.75, "Head yaw threshold where body rotation starts"),
+            InputPort<double>("head_turn_stop_ratio", 0.65, "Head yaw threshold where body rotation stops"),
+            InputPort<double>("stop_angle", 0.1, "Robot-relative ball yaw deadband for optional central fallback"),
+            InputPort<bool>("use_ball_yaw_fallback", true, "Use robot-relative ball yaw when head-edge rotation is inactive"),
+            OutputPort<double>("theta")
+        };
     }
     NodeStatus tick() override;
 
@@ -133,9 +140,7 @@ private:
     Brain *brain;
     rclcpp::Time _lastProcessedBallTime = rclcpp::Time(0, 0, RCL_ROS_TIME);
     bool _hasLastProcessedBallFrame = false;
-    bool _hasLastCommandedBallCenter = false;
-    double _lastCommandedBallX = 0.0;
-    double _lastCommandedBallY = 0.0;
+    double _headYawBodyTurnDir = 0.0;
 };
 
 
@@ -157,6 +162,7 @@ public:
             InputPort<double>("lost_turn_msec", 1200.0, "Milliseconds to keep turning toward the recent lost-ball direction"),
             InputPort<double>("lost_turn_speed", 0.25, "Body yaw speed while turning toward a recently lost ball"),
             InputPort<double>("lost_turn_min_yaw", 0.08, "Minimum remembered ball yaw required before body turn is used"),
+            OutputPort<double>("theta")
         };
     }
 
@@ -165,6 +171,7 @@ public:
 private:
     rclcpp::Time _timeSearchStart;
     rclcpp::Time _timeLastCmd;
+    rclcpp::Time _searchBallTime;
     long _cmdRestartIntervalMSec;
 
     Brain *brain;
@@ -694,20 +701,11 @@ public:
     {
         return {
             InputPort<double>("stop_dist", 1.0, "Distance from the ball to stop moving towards it"),
-            InputPort<double>("stop_angle", 0.1, "Angle of the ball to stop turning towards it"),
             InputPort<double>("y_tolerance", 0.03, "Sideways ball offset under which SimpleChase will not command lateral motion"),
-            InputPort<double>("body_turn_speed", 0.25, "Angular speed used to rotate the body when tracked head yaw is near its edge"),
-            InputPort<double>("head_turn_start_ratio", 0.75, "Head yaw threshold where body rotation starts while tracking the ball; on T1 this acts like an approximate radian threshold"),
-            InputPort<double>("head_turn_stop_ratio", 0.65, "Head yaw threshold where body rotation hands back to normal ball-yaw or final alignment"),
-            InputPort<double>("final_align_turn_speed", 0.12, "Angular speed used by stopped pulse alignment to center the head yaw"),
-            InputPort<double>("final_turn_pulse_msec", 250.0, "Milliseconds to rotate during each stopped final alignment pulse"),
-            InputPort<double>("final_settle_msec", 600.0, "Milliseconds to hold zero velocity before checking head yaw again"),
-            InputPort<double>("final_head_yaw_min", "Minimum accepted head yaw when stopped near the ball; omit to disable final head-yaw check"),
-            InputPort<double>("final_head_yaw_max", "Maximum accepted head yaw when stopped near the ball; omit to disable final head-yaw check"),
-            InputPort<double>("final_ball_yaw_min", "Minimum accepted ball yaw when stopped near the ball; defaults to -stop_angle"),
-            InputPort<double>("final_ball_yaw_max", "Maximum accepted ball yaw when stopped near the ball; defaults to stop_angle"),
             InputPort<double>("vy_limit", 0.2, "Limit Y direction speed to prevent walking instability. Must be less than the robot's maximum speed 0.4 to take effect"),
             InputPort<double>("vx_limit", 0.6, "Limit X direction speed to prevent walking instability. Must be less than the robot's maximum speed 1.2 to take effect"),
+            OutputPort<double>("vx"),
+            OutputPort<double>("vy")
         };
     }
 

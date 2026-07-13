@@ -1,5 +1,6 @@
 #include "booster_vision/vision_node.h"
 
+#include <cmath>
 #include <cstdlib>
 #include <functional>
 #include <filesystem>
@@ -309,7 +310,7 @@ void VisionNode::ProcessData(SyncedDataBlock &synced_data, vision_interface::msg
     if (use_depth_ && depth_time_diff > 40) {
         std::cerr << "color depth time diff: " << depth_time_diff << "ms" << std::endl;
     }
-    if (pose_time_diff > 40) {
+    if (std::fabs(pose_time_diff) > 40) {
         std::cerr << "color pose time diff: " << pose_time_diff << " ms" << std::endl;
     }
     cv::Mat color = synced_data.color_data.data;

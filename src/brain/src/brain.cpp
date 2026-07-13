@@ -1347,7 +1347,7 @@ void Brain::lowStateCallback(const booster_interface::msg::LowState &msg)
 {
     data->headYaw = msg.motor_state_serial[0].q;
     data->headPitch = msg.motor_state_serial[1].q;
-    log->debug("head_angles", format("pitch: %.1f, yaw: %.1f", data->headYaw, data->headPitch));
+    log->debug("head_angles", format("pitch: %.1f, yaw: %.1f", data->headPitch, data->headYaw));
 }
 
 void Brain::imageCameraInfoCallback(const sensor_msgs::msg::CameraInfo::SharedPtr msg)
@@ -1731,6 +1731,7 @@ void Brain::detectProcessBalls(const vector<GameObject> &ballObjs)
     if (indexRealBall >= 0)
     { // Ball detected
         data->ballDetected = true;
+        tree->setEntry<bool>("ball_visible", true);
 
         data->ball = ballObjs[indexRealBall];
         data->ball.confidence = bestConfidence;
@@ -1744,6 +1745,7 @@ void Brain::detectProcessBalls(const vector<GameObject> &ballObjs)
     else
     { // No ball detected
         data->ballDetected = false;
+        tree->setEntry<bool>("ball_visible", false);
         data->ball.boundingBox.xmin = 0;
         data->ball.boundingBox.xmax = 0;
         data->ball.boundingBox.ymin = 0;
