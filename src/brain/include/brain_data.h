@@ -1,5 +1,6 @@
 #pragma once
 
+#include <atomic>
 #include <string>
 #include <mutex>
 #include <tuple>
@@ -45,14 +46,14 @@ public:
     Pose2D odomToField;      
     Pose2D robotPoseToField; 
 
-    double headPitch; 
-    double headYaw;  
+    std::atomic<double> headPitch{0.0};
+    std::atomic<double> headYaw{0.0};
+    std::atomic<bool> headStateReceived{false};
     Eigen::Matrix4d camToRobot = Eigen::Matrix4d::Identity(); 
 
 
     bool ballDetected = false;
-    bool hasReliableBall = false;
-    std::uint64_t reliableBallGeneration = 0;
+    std::atomic<std::uint64_t> ballTrackingGeneration{0};
     GameObject ball{};
     GameObject tmBall{};
     double robotBallAngleToField; 

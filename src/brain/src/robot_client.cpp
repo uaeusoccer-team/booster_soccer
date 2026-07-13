@@ -92,6 +92,11 @@ int RobotClient::setVelocity(double x, double y, double theta)
     x = cap(x, brain->config->get_vx_limit(), -brain->config->get_vx_limit());
     y = cap(y, brain->config->get_vy_limit(), -brain->config->get_vy_limit());
     theta = cap(theta, brain->config->get_vtheta_limit(), -brain->config->get_vtheta_limit());
+
+    if (fabs(theta) > 1e-3)
+    {
+        _lastNonZeroThetaSign.store(theta > 0.0 ? 1 : -1, std::memory_order_relaxed);
+    }
     
     // log simulated path based on velocity
     vector<Pose2D> path = {{0, 0, 0}}; // Coordinate system is based on the robot's position at 0,0, with the linear velocity direction as theta = 0

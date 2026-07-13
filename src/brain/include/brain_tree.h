@@ -127,11 +127,9 @@ public:
     static PortsList providedPorts()
     {
         return {
-            InputPort<double>("body_turn_speed", 0.25, "Angular speed used when tracked head yaw reaches its edge"),
-            InputPort<double>("head_turn_start_ratio", 0.75, "Head yaw threshold where body rotation starts"),
-            InputPort<double>("head_turn_stop_ratio", 0.65, "Head yaw threshold where body rotation stops"),
-            InputPort<double>("stop_angle", 0.1, "Robot-relative ball yaw deadband for optional central fallback"),
-            InputPort<bool>("use_ball_yaw_fallback", true, "Use robot-relative ball yaw when head-edge rotation is inactive"),
+            InputPort<double>("stop_angle", 0.1, "Robot-relative ball yaw deadband"),
+            InputPort<double>("ball_yaw_gain", 4.0, "Body rotation gain applied to robot-relative ball yaw"),
+            InputPort<double>("pitch_turn_gain", 1.0, "Additional body rotation gain per radian of downward head pitch"),
             OutputPort<double>("theta")
         };
     }
@@ -141,7 +139,6 @@ private:
     Brain *brain;
     rclcpp::Time _lastProcessedBallTime = rclcpp::Time(0, 0, RCL_ROS_TIME);
     bool _hasLastProcessedBallFrame = false;
-    double _headYawBodyTurnDir = 0.0;
 };
 
 
@@ -154,9 +151,8 @@ public:
     {
         return {
             InputPort<double>("yaw_limit", 1.1, "Head yaw limit reached before body search begins"),
-            InputPort<double>("head_search_speed", 0.20, "Head yaw speed while looking toward the last reliable ball direction"),
-            InputPort<double>("body_search_speed", 0.25, "Body yaw speed after the head reaches the search edge"),
-            InputPort<double>("direction_deadband", 0.08, "Minimum yaw used to choose the last-ball or current-head direction"),
+            InputPort<double>("head_search_speed", 0.20, "Head yaw speed toward the remembered body-turn direction"),
+            InputPort<double>("body_search_speed", 0.25, "Body yaw speed in the remembered direction after the head reaches the search edge"),
             InputPort<double>("cmd_interval_msec", 100.0, "Minimum time between head commands"),
             OutputPort<double>("theta")
         };
@@ -178,7 +174,6 @@ private:
     double _searchYaw = 0.0;
     double _searchPitch = 0.0;
     double _searchDirection = 1.0;
-    double _alternateSearchDirection = 1.0;
 
     Brain *brain;
 

@@ -8,16 +8,13 @@ VY_LIMIT="0.20"
 STOP_DIST="1.00"
 Y_TOLERANCE="0.03"
 
-BODY_TURN_SPEED="0.25"
-HEAD_TURN_START_RATIO="0.75"
-HEAD_TURN_STOP_RATIO="0.65"
 STOP_ANGLE="0.10"
-USE_BALL_YAW_FALLBACK="true"
+BALL_YAW_GAIN="4.0"
+PITCH_TURN_GAIN="1.0"
 REQUIRE_PLAY="false"
 
 HEAD_SEARCH_SPEED="0.20"
 BODY_SEARCH_SPEED="0.25"
-DIRECTION_DEADBAND="0.08"
 YAW_LIMIT="1.10"
 CMD_INTERVAL_MSEC="100"
 
@@ -33,29 +30,26 @@ Chase settings:
   y_tolerance=0.03
 
 Tracking and rotation settings:
-  body_turn_speed=0.25
-  head_turn_start_ratio=0.75
-  head_turn_stop_ratio=0.65
   stop_angle=0.10
-  use_ball_yaw_fallback=true
+  ball_yaw_gain=4.0
+  pitch_turn_gain=1.0
   require_play=false
 
 Ball-search settings:
   head_search_speed=0.20
   body_search_speed=0.25
-  direction_deadband=0.08
   yaw_limit=1.10
   cmd_interval_msec=100
 
 Examples:
-  # Start chasing immediately with ballYaw x 4 rotation fallback:
+  # Start chasing immediately with base ballYaw x 4 rotation:
   ./scripts/chase_ball_vector.sh
 
   # Change chase limits and stop distance:
   ./scripts/chase_ball_vector.sh vx_limit=0.40 vy_limit=0.15 stop_dist=0.80
 
-  # Tune rotation and require referee GameController PLAY:
-  ./scripts/chase_ball_vector.sh stop_angle=0.20 body_turn_speed=0.50 require_play=true
+  # Tune visible rotation and require referee GameController PLAY:
+  ./scripts/chase_ball_vector.sh stop_angle=0.20 ball_yaw_gain=5.0 pitch_turn_gain=1.5 require_play=true
 
 SimpleChase calculates only vx and vy. CamTrackBall/CamFindBall calculate theta.
 SetVelocity publishes the combined vx, vy, and theta once per active tick.
@@ -88,7 +82,7 @@ set_value() {
   value="$(clean_value "$2")"
 
   case "$key" in
-    use_ball_yaw_fallback|require_play)
+    require_play)
       value="$(normalize_bool "$key" "$value")"
       ;;
     *)
@@ -104,15 +98,12 @@ set_value() {
     vy_limit) VY_LIMIT="$value" ;;
     stop_dist) STOP_DIST="$value" ;;
     y_tolerance) Y_TOLERANCE="$value" ;;
-    body_turn_speed) BODY_TURN_SPEED="$value" ;;
-    head_turn_start_ratio) HEAD_TURN_START_RATIO="$value" ;;
-    head_turn_stop_ratio) HEAD_TURN_STOP_RATIO="$value" ;;
     stop_angle) STOP_ANGLE="$value" ;;
-    use_ball_yaw_fallback) USE_BALL_YAW_FALLBACK="$value" ;;
+    ball_yaw_gain) BALL_YAW_GAIN="$value" ;;
+    pitch_turn_gain) PITCH_TURN_GAIN="$value" ;;
     require_play) REQUIRE_PLAY="$value" ;;
     head_search_speed) HEAD_SEARCH_SPEED="$value" ;;
     body_search_speed) BODY_SEARCH_SPEED="$value" ;;
-    direction_deadband) DIRECTION_DEADBAND="$value" ;;
     yaw_limit) YAW_LIMIT="$value" ;;
     cmd_interval_msec) CMD_INTERVAL_MSEC="$value" ;;
     *) echo "Unknown setting: ${key}" >&2; exit 2 ;;
@@ -126,7 +117,7 @@ parse_args() {
         usage
         exit 0
         ;;
-      vx_limit=*|vy_limit=*|stop_dist=*|y_tolerance=*|body_turn_speed=*|head_turn_start_ratio=*|head_turn_stop_ratio=*|stop_angle=*|use_ball_yaw_fallback=*|require_play=*|head_search_speed=*|body_search_speed=*|direction_deadband=*|yaw_limit=*|cmd_interval_msec=*)
+      vx_limit=*|vy_limit=*|stop_dist=*|y_tolerance=*|stop_angle=*|ball_yaw_gain=*|pitch_turn_gain=*|require_play=*|head_search_speed=*|body_search_speed=*|yaw_limit=*|cmd_interval_msec=*)
         set_value "${1%%=*}" "${1#*=}"
         shift
         ;;
@@ -182,15 +173,12 @@ echo "  vx_limit=${VX_LIMIT}"
 echo "  vy_limit=${VY_LIMIT}"
 echo "  stop_dist=${STOP_DIST}"
 echo "  y_tolerance=${Y_TOLERANCE}"
-echo "  body_turn_speed=${BODY_TURN_SPEED}"
-echo "  head_turn_start_ratio=${HEAD_TURN_START_RATIO}"
-echo "  head_turn_stop_ratio=${HEAD_TURN_STOP_RATIO}"
 echo "  stop_angle=${STOP_ANGLE}"
-echo "  use_ball_yaw_fallback=${USE_BALL_YAW_FALLBACK}"
+echo "  ball_yaw_gain=${BALL_YAW_GAIN}"
+echo "  pitch_turn_gain=${PITCH_TURN_GAIN}"
 echo "  require_play=${REQUIRE_PLAY}"
 echo "  head_search_speed=${HEAD_SEARCH_SPEED}"
 echo "  body_search_speed=${BODY_SEARCH_SPEED}"
-echo "  direction_deadband=${DIRECTION_DEADBAND}"
 echo "  yaw_limit=${YAW_LIMIT}"
 echo "  cmd_interval_msec=${CMD_INTERVAL_MSEC}"
 
@@ -222,16 +210,13 @@ cat > "$TREE_PATH" <<XML
         <CheckAndStandUp />
         <IfThenElse>
           <ScriptCondition name="Ball visible?" code="ball_visible" />
-          <CamTrackBall body_turn_speed="${BODY_TURN_SPEED}"
-                        head_turn_start_ratio="${HEAD_TURN_START_RATIO}"
-                        head_turn_stop_ratio="${HEAD_TURN_STOP_RATIO}"
-                        stop_angle="${STOP_ANGLE}"
-                        use_ball_yaw_fallback="${USE_BALL_YAW_FALLBACK}"
+          <CamTrackBall stop_angle="${STOP_ANGLE}"
+                        ball_yaw_gain="${BALL_YAW_GAIN}"
+                        pitch_turn_gain="${PITCH_TURN_GAIN}"
                         theta="{tracking_theta}" />
           <CamFindBall yaw_limit="${YAW_LIMIT}"
                        head_search_speed="${HEAD_SEARCH_SPEED}"
                        body_search_speed="${BODY_SEARCH_SPEED}"
-                       direction_deadband="${DIRECTION_DEADBAND}"
                        cmd_interval_msec="${CMD_INTERVAL_MSEC}"
                        theta="{tracking_theta}" />
         </IfThenElse>

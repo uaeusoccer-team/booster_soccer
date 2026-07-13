@@ -1,5 +1,6 @@
 #pragma once
 
+#include <atomic>
 #include <iostream>
 #include <string>
 
@@ -45,6 +46,17 @@ public:
      * 
     */
     int setVelocity(double x, double y, double theta);
+
+    /**
+     * @brief Sign of the last non-zero angular velocity actually sent.
+     *
+     * Positive is left, negative is right. Zero velocity commands preserve
+     * the previous direction. The initial direction is left.
+     */
+    int getLastTurnDirection() const
+    {
+        return _lastNonZeroThetaSign.load(std::memory_order_relaxed);
+    }
 
     int crabWalk(double angle, double speed);
 
@@ -127,4 +139,5 @@ private:
     double _vx, _vy, _vtheta;
     rclcpp::Time _lastCmdTime;
     rclcpp::Time _lastNonZeroCmdTime;
+    std::atomic<int> _lastNonZeroThetaSign{1};
 };

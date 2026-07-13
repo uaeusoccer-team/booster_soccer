@@ -3,15 +3,12 @@ set -Eeo pipefail
 
 WORKSPACE="${WORKSPACE:-$HOME/booster_soccer}"
 
-BODY_TURN_SPEED="0.25"
-HEAD_TURN_START_RATIO="0.75"
-HEAD_TURN_STOP_RATIO="0.65"
 STOP_ANGLE="0.10"
-USE_BALL_YAW_FALLBACK="true"
+BALL_YAW_GAIN="4.0"
+PITCH_TURN_GAIN="1.0"
 REQUIRE_PLAY="false"
 HEAD_SEARCH_SPEED="0.20"
 BODY_SEARCH_SPEED="0.25"
-DIRECTION_DEADBAND="0.08"
 YAW_LIMIT="1.10"
 CMD_INTERVAL_MSEC="100"
 
@@ -21,24 +18,21 @@ Usage:
   ./scripts/test_head_tracking_rotation.sh [setting=value ...]
 
 Settings:
-  body_turn_speed=0.25
-  head_turn_start_ratio=0.75
-  head_turn_stop_ratio=0.65
   stop_angle=0.10
-  use_ball_yaw_fallback=true
+  ball_yaw_gain=4.0
+  pitch_turn_gain=1.0
   require_play=false
   head_search_speed=0.20
   body_search_speed=0.25
-  direction_deadband=0.08
   yaw_limit=1.10
   cmd_interval_msec=100
 
 Examples:
-  # Run immediately with the ballYaw x 4 fallback:
-  ./scripts/test_head_tracking_rotation.sh stop_angle=0.10
+  # Run immediately with base ballYaw x 4 body rotation:
+  ./scripts/test_head_tracking_rotation.sh
 
-  # Isolate head-edge rotation and choose its fixed speed:
-  ./scripts/test_head_tracking_rotation.sh use_ball_yaw_fallback=false body_turn_speed=0.50
+  # Tune visible-ball rotation and the extra speed while looking down:
+  ./scripts/test_head_tracking_rotation.sh stop_angle=0.20 ball_yaw_gain=5.0 pitch_turn_gain=1.5
 
   # Require referee GameController PLAY instead of starting immediately:
   ./scripts/test_head_tracking_rotation.sh require_play=true
@@ -78,7 +72,7 @@ set_value() {
   value="$(clean_value "$2")"
 
   case "$key" in
-    use_ball_yaw_fallback|require_play)
+    require_play)
       value="$(normalize_bool "$key" "$value")"
       ;;
     *)
@@ -90,15 +84,12 @@ set_value() {
   esac
 
   case "$key" in
-    body_turn_speed) BODY_TURN_SPEED="$value" ;;
-    head_turn_start_ratio) HEAD_TURN_START_RATIO="$value" ;;
-    head_turn_stop_ratio) HEAD_TURN_STOP_RATIO="$value" ;;
     stop_angle) STOP_ANGLE="$value" ;;
-    use_ball_yaw_fallback) USE_BALL_YAW_FALLBACK="$value" ;;
+    ball_yaw_gain) BALL_YAW_GAIN="$value" ;;
+    pitch_turn_gain) PITCH_TURN_GAIN="$value" ;;
     require_play) REQUIRE_PLAY="$value" ;;
     head_search_speed) HEAD_SEARCH_SPEED="$value" ;;
     body_search_speed) BODY_SEARCH_SPEED="$value" ;;
-    direction_deadband) DIRECTION_DEADBAND="$value" ;;
     yaw_limit) YAW_LIMIT="$value" ;;
     cmd_interval_msec) CMD_INTERVAL_MSEC="$value" ;;
     *) echo "Unknown setting: ${key}" >&2; exit 2 ;;
@@ -112,7 +103,7 @@ parse_args() {
         usage
         exit 0
         ;;
-      body_turn_speed=*|head_turn_start_ratio=*|head_turn_stop_ratio=*|stop_angle=*|use_ball_yaw_fallback=*|require_play=*|head_search_speed=*|body_search_speed=*|direction_deadband=*|yaw_limit=*|cmd_interval_msec=*)
+      stop_angle=*|ball_yaw_gain=*|pitch_turn_gain=*|require_play=*|head_search_speed=*|body_search_speed=*|yaw_limit=*|cmd_interval_msec=*)
         set_value "${1%%=*}" "${1#*=}"
         shift
         ;;
@@ -166,15 +157,12 @@ trap 'controlled_stop "terminal disconnected"' HUP
 echo "Head tracking + body rotation test settings:"
 echo "  vx=0 (fixed)"
 echo "  vy=0 (fixed)"
-echo "  body_turn_speed=${BODY_TURN_SPEED}"
-echo "  head_turn_start_ratio=${HEAD_TURN_START_RATIO}"
-echo "  head_turn_stop_ratio=${HEAD_TURN_STOP_RATIO}"
 echo "  stop_angle=${STOP_ANGLE}"
-echo "  use_ball_yaw_fallback=${USE_BALL_YAW_FALLBACK}"
+echo "  ball_yaw_gain=${BALL_YAW_GAIN}"
+echo "  pitch_turn_gain=${PITCH_TURN_GAIN}"
 echo "  require_play=${REQUIRE_PLAY}"
 echo "  head_search_speed=${HEAD_SEARCH_SPEED}"
 echo "  body_search_speed=${BODY_SEARCH_SPEED}"
-echo "  direction_deadband=${DIRECTION_DEADBAND}"
 echo "  yaw_limit=${YAW_LIMIT}"
 echo "  cmd_interval_msec=${CMD_INTERVAL_MSEC}"
 if [[ "$REQUIRE_PLAY" == "true" ]]; then
@@ -205,16 +193,13 @@ cat > "$TREE_PATH" <<XML
           <CheckAndStandUp />
           <IfThenElse>
             <ScriptCondition name="Ball visible?" code="ball_visible" />
-            <CamTrackBall body_turn_speed="${BODY_TURN_SPEED}"
-                          head_turn_start_ratio="${HEAD_TURN_START_RATIO}"
-                          head_turn_stop_ratio="${HEAD_TURN_STOP_RATIO}"
-                          stop_angle="${STOP_ANGLE}"
-                          use_ball_yaw_fallback="${USE_BALL_YAW_FALLBACK}"
+            <CamTrackBall stop_angle="${STOP_ANGLE}"
+                          ball_yaw_gain="${BALL_YAW_GAIN}"
+                          pitch_turn_gain="${PITCH_TURN_GAIN}"
                           theta="{tracking_theta}" />
             <CamFindBall yaw_limit="${YAW_LIMIT}"
                          head_search_speed="${HEAD_SEARCH_SPEED}"
                          body_search_speed="${BODY_SEARCH_SPEED}"
-                         direction_deadband="${DIRECTION_DEADBAND}"
                          cmd_interval_msec="${CMD_INTERVAL_MSEC}"
                          theta="{tracking_theta}" />
           </IfThenElse>

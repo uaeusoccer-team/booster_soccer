@@ -1337,9 +1337,12 @@ void Brain::odometerCallback(const booster_interface::msg::Odometer &msg)
 
 void Brain::lowStateCallback(const booster_interface::msg::LowState &msg)
 {
-    data->headYaw = msg.motor_state_serial[0].q;
-    data->headPitch = msg.motor_state_serial[1].q;
-    log->debug("head_angles", format("pitch: %.1f, yaw: %.1f", data->headPitch, data->headYaw));
+    const double headYaw = msg.motor_state_serial[0].q;
+    const double headPitch = msg.motor_state_serial[1].q;
+    data->headYaw.store(headYaw, std::memory_order_relaxed);
+    data->headPitch.store(headPitch, std::memory_order_relaxed);
+    data->headStateReceived.store(true, std::memory_order_release);
+    log->debug("head_angles", format("pitch: %.1f, yaw: %.1f", headPitch, headYaw));
 }
 
 void Brain::imageCameraInfoCallback(const sensor_msgs::msg::CameraInfo::SharedPtr msg)
@@ -1796,8 +1799,10 @@ void Brain::detectProcessBalls(const vector<GameObject> &ballObjs)
 
         data->ball = ballObjs[indexRealBall];
         data->ball.confidence = bestConfidence;
-        data->hasReliableBall = true;
-        data->reliableBallGeneration++;
+        if (!wasTrackingBall)
+        {
+            data->ballTrackingGeneration.fetch_add(1, std::memory_order_relaxed);
+        }
 
         tree->setEntry<bool>("ball_location_known", true);
         updateBallOut();
@@ -2208,8 +2213,9 @@ void Brain::processDepthImage(const cv::Mat &depthFloat, int width, int height, 
         // Clean up old obstacles
         for (int i = 0; i < obs_old.size(); i++) {
            // First, clear old obstacles within the current field of view. Note that the angle is only roughly calculated, and the range is appropriately expanded using an offset.
-            double visionLeft = data->headYaw + config->depthCameraFovX / 2;
-            double visionRight = data->headYaw - config->depthCameraFovX / 2;
+            const double headYaw = data->headYaw.load(std::memory_order_relaxed);
+            double visionLeft = headYaw + config->depthCameraFovX / 2;
+            double visionRight = headYaw - config->depthCameraFovX / 2;
             auto obs = obs_old[i];
             const double offset = 0.20;
             double obsYawLeft = atan2(obs.posToRobot.y - offset, obs.posToRobot.x + offset);
