@@ -29,6 +29,13 @@
                                        kick_yaw_abs="0.50"
                                        kick_lateral_abs="0.30"
                                        kick_dir_abs="0.70"
+                                       adaptive_kick_range="true"
+                                       well_aligned_kick_range="0.90"
+                                       poor_aligned_kick_range="0.55"
+                                       well_aligned_yaw_abs="0.18"
+                                       well_aligned_lateral_abs="0.10"
+                                       poor_aligned_yaw_abs="0.35"
+                                       poor_aligned_lateral_abs="0.22"
                                        require_kick_direction="true"
                                        solo_lead_when_com_disabled="true" />
                         <SubTree ID="FindBall" _while="decision=='find'" _autoremap="true" />

@@ -919,12 +919,26 @@ NodeStatus StrikerDecide::tick() {
     double kickYawAbs;
     double kickLateralAbs;
     double kickDirAbs;
+    bool adaptiveKickRange;
+    double wellAlignedKickRange;
+    double poorAlignedKickRange;
+    double wellAlignedYawAbs;
+    double wellAlignedLateralAbs;
+    double poorAlignedYawAbs;
+    double poorAlignedLateralAbs;
     bool requireKickDirection;
     bool soloLeadWhenComDisabled;
     getInput("kick_range", kickRange);
     getInput("kick_yaw_abs", kickYawAbs);
     getInput("kick_lateral_abs", kickLateralAbs);
     getInput("kick_dir_abs", kickDirAbs);
+    getInput("adaptive_kick_range", adaptiveKickRange);
+    getInput("well_aligned_kick_range", wellAlignedKickRange);
+    getInput("poor_aligned_kick_range", poorAlignedKickRange);
+    getInput("well_aligned_yaw_abs", wellAlignedYawAbs);
+    getInput("well_aligned_lateral_abs", wellAlignedLateralAbs);
+    getInput("poor_aligned_yaw_abs", poorAlignedYawAbs);
+    getInput("poor_aligned_lateral_abs", poorAlignedLateralAbs);
     getInput("require_kick_direction", requireKickDirection);
     getInput("solo_lead_when_com_disabled", soloLeadWhenComDisabled);
     string lastDecision, position;
@@ -938,6 +952,8 @@ NodeStatus StrikerDecide::tick() {
     double ballYaw = ball.yawToRobot;
     double ballX = ball.posToRobot.x;
     double ballY = ball.posToRobot.y;
+    const double absBallYaw = fabs(ballYaw);
+    const double absBallY = fabs(ballY);
     
     const double goalpostMargin = 0.3; 
     bool angleGoodForKick = brain->isAngleGood(goalpostMargin, "kick");
@@ -965,8 +981,24 @@ NodeStatus StrikerDecide::tick() {
 
     const bool soloLead = soloLeadWhenComDisabled && !brain->config->get_enable_com();
     const bool imLead = brain->data->tmImLead || soloLead;
-    const bool closeEnoughForKick = ballRange <= kickRange + (lastDecision == "kick" || lastDecision == "cross" ? 0.10 : 0.0);
-    const bool ballCenteredForKick = fabs(ballYaw) <= kickYawAbs && fabs(ballY) <= kickLateralAbs && ballX > 0.0;
+
+    double effectiveKickRange = kickRange;
+    string kickRangeMode = "base";
+    if (adaptiveKickRange) {
+        const bool wellAlignedForRange = absBallYaw <= wellAlignedYawAbs && absBallY <= wellAlignedLateralAbs;
+        const bool poorAlignedForRange = absBallYaw >= poorAlignedYawAbs || absBallY >= poorAlignedLateralAbs;
+        if (wellAlignedForRange) {
+            effectiveKickRange = max(kickRange, wellAlignedKickRange);
+            kickRangeMode = "well";
+        } else if (poorAlignedForRange) {
+            effectiveKickRange = min(kickRange, poorAlignedKickRange);
+            kickRangeMode = "poor";
+        }
+    }
+
+    const double kickRangeHysteresis = (lastDecision == "kick" || lastDecision == "cross") ? 0.10 : 0.0;
+    const bool closeEnoughForKick = ballRange <= effectiveKickRange + kickRangeHysteresis;
+    const bool ballCenteredForKick = absBallYaw <= kickYawAbs && absBallY <= kickLateralAbs && ballX > 0.0;
     const bool kickDirectionReady = !requireKickDirection || ((angleGoodForKick && fabs(deltaDir) <= kickDirAbs) || reachedKickDir);
     const bool kickWindowReady = closeEnoughForKick
         && ballCenteredForKick
@@ -975,14 +1007,16 @@ NodeStatus StrikerDecide::tick() {
         && !avoidKick;
 
     log(format(
-        "lead: %d soloLead: %d closeKick: %d centeredKick: %d dirReady: %d avoidKick: %d deltaDir: %.2f",
+        "lead: %d soloLead: %d closeKick: %d centeredKick: %d dirReady: %d avoidKick: %d deltaDir: %.2f kickRangeMode: %s effectiveKickRange: %.2f",
         imLead,
         soloLead,
         closeEnoughForKick,
         ballCenteredForKick,
         kickDirectionReady,
         avoidKick,
-        deltaDir));
+        deltaDir,
+        kickRangeMode.c_str(),
+        effectiveKickRange));
 
     string newDecision;
     bool iKnowBallPos = brain->tree->getEntry<bool>("ball_location_known");
