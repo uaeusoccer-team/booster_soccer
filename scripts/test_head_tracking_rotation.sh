@@ -3,11 +3,12 @@ set -Eeo pipefail
 
 WORKSPACE="${WORKSPACE:-$HOME/booster_soccer}"
 
-BODY_TURN_SPEED="1.20"
+BODY_TURN_SPEED="0.25"
 HEAD_TURN_START_RATIO="0.75"
 HEAD_TURN_STOP_RATIO="0.65"
 STOP_ANGLE="0.10"
-USE_BALL_YAW_FALLBACK="false"
+USE_BALL_YAW_FALLBACK="true"
+REQUIRE_PLAY="false"
 TURN_BODY_ON_LOSS="false"
 LOST_TURN_MSEC="800"
 LOST_TURN_SPEED="0.20"
@@ -25,11 +26,12 @@ Usage:
   ./scripts/test_head_tracking_rotation.sh [setting=value ...]
 
 Settings:
-  body_turn_speed=1.20
+  body_turn_speed=0.25
   head_turn_start_ratio=0.75
   head_turn_stop_ratio=0.65
   stop_angle=0.10
-  use_ball_yaw_fallback=false
+  use_ball_yaw_fallback=true
+  require_play=false
   turn_body_on_loss=false
   lost_turn_msec=800
   lost_turn_speed=0.20
@@ -42,17 +44,22 @@ Settings:
   cmd_interval_msec=100
 
 Examples:
-  # Isolate head-edge rotation (recommended first test):
-  ./scripts/test_head_tracking_rotation.sh
+  # Run immediately with the ballYaw x 4 fallback:
+  ./scripts/test_head_tracking_rotation.sh stop_angle=0.10
 
-  # Also rotate from robot-relative ball yaw before the head reaches its edge:
-  ./scripts/test_head_tracking_rotation.sh use_ball_yaw_fallback=true
+  # Isolate head-edge rotation and choose its fixed speed:
+  ./scripts/test_head_tracking_rotation.sh use_ball_yaw_fallback=false body_turn_speed=0.50
+
+  # Require referee GameController PLAY instead of starting immediately:
+  ./scripts/test_head_tracking_rotation.sh require_play=true
 
   # Also test brief recent-memory rotation after vision loss:
   ./scripts/test_head_tracking_rotation.sh turn_body_on_loss=true
 
-The script always commands vx=0 and vy=0. Rotation is enabled only while the
-GameController state is PLAY. Press s or Ctrl-C to stop the test stack.
+The script always commands vx=0 and vy=0. With require_play=false (the default),
+tracking and rotation begin as soon as the brain starts. Set require_play=true
+if GameController PLAY should gate the test.
+Press s or Ctrl-C to stop the test stack.
 USAGE
 }
 
@@ -67,10 +74,10 @@ clean_value() {
 
 normalize_bool() {
   local key="$1"
-  local value="${2,,}"
+  local value="$2"
   case "$value" in
-    true|1) printf 'true' ;;
-    false|0) printf 'false' ;;
+    [Tt][Rr][Uu][Ee]|1) printf 'true' ;;
+    [Ff][Aa][Ll][Ss][Ee]|0) printf 'false' ;;
     *) echo "Invalid boolean for ${key}: ${value}" >&2; exit 2 ;;
   esac
 }
@@ -81,7 +88,7 @@ set_value() {
   value="$(clean_value "$2")"
 
   case "$key" in
-    use_ball_yaw_fallback|turn_body_on_loss)
+    use_ball_yaw_fallback|require_play|turn_body_on_loss)
       value="$(normalize_bool "$key" "$value")"
       ;;
     *)
@@ -98,6 +105,7 @@ set_value() {
     head_turn_stop_ratio) HEAD_TURN_STOP_RATIO="$value" ;;
     stop_angle) STOP_ANGLE="$value" ;;
     use_ball_yaw_fallback) USE_BALL_YAW_FALLBACK="$value" ;;
+    require_play) REQUIRE_PLAY="$value" ;;
     turn_body_on_loss) TURN_BODY_ON_LOSS="$value" ;;
     lost_turn_msec) LOST_TURN_MSEC="$value" ;;
     lost_turn_speed) LOST_TURN_SPEED="$value" ;;
@@ -119,7 +127,7 @@ parse_args() {
         usage
         exit 0
         ;;
-      body_turn_speed=*|head_turn_start_ratio=*|head_turn_stop_ratio=*|stop_angle=*|use_ball_yaw_fallback=*|turn_body_on_loss=*|lost_turn_msec=*|lost_turn_speed=*|lost_turn_min_yaw=*|low_pitch=*|high_pitch=*|yaw_limit=*|sweep_msec=*|pitch_cycle_msec=*|cmd_interval_msec=*)
+      body_turn_speed=*|head_turn_start_ratio=*|head_turn_stop_ratio=*|stop_angle=*|use_ball_yaw_fallback=*|require_play=*|turn_body_on_loss=*|lost_turn_msec=*|lost_turn_speed=*|lost_turn_min_yaw=*|low_pitch=*|high_pitch=*|yaw_limit=*|sweep_msec=*|pitch_cycle_msec=*|cmd_interval_msec=*)
         set_value "${1%%=*}" "${1#*=}"
         shift
         ;;
@@ -178,6 +186,7 @@ echo "  head_turn_start_ratio=${HEAD_TURN_START_RATIO}"
 echo "  head_turn_stop_ratio=${HEAD_TURN_STOP_RATIO}"
 echo "  stop_angle=${STOP_ANGLE}"
 echo "  use_ball_yaw_fallback=${USE_BALL_YAW_FALLBACK}"
+echo "  require_play=${REQUIRE_PLAY}"
 echo "  turn_body_on_loss=${TURN_BODY_ON_LOSS}"
 echo "  lost_turn_msec=${LOST_TURN_MSEC}"
 echo "  lost_turn_speed=${LOST_TURN_SPEED}"
@@ -188,7 +197,15 @@ echo "  yaw_limit=${YAW_LIMIT}"
 echo "  sweep_msec=${SWEEP_MSEC}"
 echo "  pitch_cycle_msec=${PITCH_CYCLE_MSEC}"
 echo "  cmd_interval_msec=${CMD_INTERVAL_MSEC}"
-echo "Rotation will follow GameController PLAY/stop state."
+if [[ "$REQUIRE_PLAY" == "true" ]]; then
+  STOP_CONDITION="gc_game_state!='PLAY'"
+  RUN_CONDITION="gc_game_state=='PLAY'"
+  echo "Tracking waits for GameController PLAY."
+else
+  STOP_CONDITION="gc_game_state=='END'"
+  RUN_CONDITION="gc_game_state!='END'"
+  echo "Tracking starts immediately; GameController END or app stop disables it."
+fi
 
 # Avoid multiple brain nodes publishing conflicting movement commands.
 ./scripts/stop.sh || true
@@ -199,10 +216,12 @@ TREE_PATH="${BRAIN_SHARE}/behavior_trees/head_tracking_rotation_test.xml"
 cat > "$TREE_PATH" <<XML
 <root BTCPP_format="4">
   <BehaviorTree ID="MainTree">
-    <ReactiveSequence name="GameController-controlled head tracking rotation">
-      <IfThenElse>
-        <ScriptCondition name="GameController PLAY?" code="gc_game_state == 'PLAY'" />
-        <Sequence name="Track and rotate during PLAY">
+    <Sequence name="root">
+      <ReactiveSequence _while="${STOP_CONDITION}" name="rotation disabled">
+        <SetVelocity x="0" y="0" theta="0" />
+      </ReactiveSequence>
+
+      <ReactiveSequence _while="${RUN_CONDITION}" name="head tracking with body rotation">
           <CheckAndStandUp />
           <IfThenElse>
             <ScriptCondition name="Ball visible?" code="ball_visible" />
@@ -225,16 +244,14 @@ cat > "$TREE_PATH" <<XML
                          theta="{tracking_theta}" />
           </IfThenElse>
           <SetVelocity x="0" y="0" theta="{tracking_theta}" />
-        </Sequence>
-        <SetVelocity x="0" y="0" theta="0" />
-      </IfThenElse>
-    </ReactiveSequence>
+      </ReactiveSequence>
+    </Sequence>
   </BehaviorTree>
 </root>
 XML
 
 echo "Wrote ${TREE_PATH}"
-echo "Starting vision, brain, and GameController receiver..."
+echo "Starting vision, immediate rotation test, and GameController receiver..."
 ros2 launch vision launch.py > vision.log 2>&1 &
 ros2 launch brain launch.py \
   tree:=head_tracking_rotation_test.xml \
@@ -246,7 +263,11 @@ ros2 launch brain launch.py \
   > brain.log 2>&1 &
 ros2 launch game_controller launch.py > game_controller.log 2>&1 &
 
-echo "Ready. Use GameController PLAY to enable rotation; other states command zero."
+if [[ "$REQUIRE_PLAY" == "true" ]]; then
+  echo "Ready. GameController PLAY runs the test; non-PLAY states command zero."
+else
+  echo "Running immediately."
+fi
 echo "Press s or Ctrl-C to stop."
 echo "Diagnostics: tail -f brain.log | grep -E 'CamTrackBall/direct_pixel|CamFindBall/search'"
 
