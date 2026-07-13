@@ -21,10 +21,7 @@ brain_node:
       min_vtheta: 0.25 # Minimum theta velocity when command is too small, to prevent no response
 
     strategy:
-      # Detection messages use a 0-100 confidence scale. Keep tracking an
-      # established ball at 40, but require 80 to acquire/reacquire a ball.
-      ball_confidence_threshold: 40.0
-      ball_search_confidence_threshold: 80.0
+      ball_confidence_threshold: 50.0
       ball_memory_timeout: 2.0
       tm_ball_dist_threshold: 2.0
       limit_near_ball_speed: false

@@ -254,7 +254,7 @@ else
   echo "Chasing immediately."
 fi
 echo "Press s or Ctrl-C to stop."
-echo "Diagnostics: tail -f brain.log | grep -E 'CamTrackBall/direct_pixel|CamFindBall/search|SimpleChase/vector'"
+echo "Diagnostics: tail -f brain.log | grep -E 'CamTrackBall/direct_pixel|CamFindBall/(wait_direction|start|search)|SimpleChase/vector'"
 
 while true; do
   if ! read -rsn1 key; then

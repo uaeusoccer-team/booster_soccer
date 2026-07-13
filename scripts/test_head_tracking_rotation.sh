@@ -229,7 +229,7 @@ else
   echo "Running immediately."
 fi
 echo "Press s or Ctrl-C to stop."
-echo "Diagnostics: tail -f brain.log | grep -E 'CamTrackBall/direct_pixel|CamFindBall/search'"
+echo "Diagnostics: tail -f brain.log | grep -E 'CamTrackBall/direct_pixel|CamFindBall/(wait_direction|start|search)'"
 
 while true; do
   if ! read -rsn1 key; then

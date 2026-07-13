@@ -268,6 +268,7 @@ NodeStatus CamFindBall::tick()
     if (brain->data->ballDetected)
     {
         _searchInitialized = false;
+        _waitingForTurnDirectionLogged = false;
         _timeLastCmd = rclcpp::Time(0, 0, RCL_ROS_TIME);
         return NodeStatus::SUCCESS;
     }
@@ -293,18 +294,40 @@ NodeStatus CamFindBall::tick()
     bodySearchSpeed = std::fabs(bodySearchSpeed);
     cmdIntervalMsec = std::max(20.0, cmdIntervalMsec);
 
-    // A confirmed acquisition advances this generation. It is used only to
+    // An accepted acquisition advances this generation. It is used only to
     // recognize a new loss episode; no remembered ball position chooses the
     // search direction.
     const auto ballTrackingGeneration =
         brain->data->ballTrackingGeneration.load(std::memory_order_relaxed);
     const bool ballTrackingGenerationChanged =
-        _searchInitialized &&
         ballTrackingGeneration != _searchBallGeneration;
 
     if (!_searchInitialized || ballTrackingGenerationChanged)
     {
-        _searchDirection = brain->client->getLastTurnDirection() >= 0 ? 1.0 : -1.0;
+        if (ballTrackingGenerationChanged)
+        {
+            _waitingForTurnDirectionLogged = false;
+        }
+
+        const int rememberedTurnDirection = brain->client->getLastTurnDirection();
+        if (rememberedTurnDirection == 0)
+        {
+            if (!_waitingForTurnDirectionLogged)
+            {
+                brain->log->log(
+                    "CamFindBall/wait_direction",
+                    "No non-zero theta has been recorded; holding head and body still");
+                _waitingForTurnDirectionLogged = true;
+            }
+
+            _searchInitialized = false;
+            _timeLastCmd = rclcpp::Time(0, 0, RCL_ROS_TIME);
+            _searchBallGeneration = ballTrackingGeneration;
+            return NodeStatus::SUCCESS;
+        }
+
+        _waitingForTurnDirectionLogged = false;
+        _searchDirection = rememberedTurnDirection > 0 ? 1.0 : -1.0;
         _searchYaw = measuredHeadYaw;
         _searchPitch = measuredHeadPitch;
         _searchPhase = SearchPhase::HEAD_LOOK;
@@ -314,9 +337,10 @@ NodeStatus CamFindBall::tick()
 
         brain->log->log(
             "CamFindBall/start",
-            format("pitch: %.3f yaw: %.3f direction: %.0f ballTrackingGeneration: %llu",
+            format("pitch: %.3f yaw: %.3f rememberedDirection: %d direction: %.0f ballTrackingGeneration: %llu",
                    _searchPitch,
                    _searchYaw,
+                   rememberedTurnDirection,
                    _searchDirection,
                    static_cast<unsigned long long>(_searchBallGeneration)));
     }

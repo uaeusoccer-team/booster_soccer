@@ -58,8 +58,7 @@ Brain::Brain() : rclcpp::Node("brain_node")
     declare_parameter<double>("robot.min_vy", 0.3);
     declare_parameter<double>("robot.min_vtheta", 0.2);
 
-    declare_parameter<double>("strategy.ball_confidence_threshold", 40.0);
-    declare_parameter<double>("strategy.ball_search_confidence_threshold", 80.0);
+    declare_parameter<double>("strategy.ball_confidence_threshold", 50.0);
     declare_parameter<double>("strategy.ball_memory_timeout", 3.0);
     declare_parameter<double>("strategy.tm_ball_dist_threshold", 3.0);
     declare_parameter<bool>("strategy.limit_near_ball_speed", true);
@@ -1695,22 +1694,10 @@ vector<GameObject> Brain::getGameObjects(const vision_interface::msg::Detections
 void Brain::detectProcessBalls(const vector<GameObject> &ballObjs)
 {
     static rclcpp::Time lastSeenRealBallTime;
-    constexpr int SEARCH_CONFIRM_FRAMES = 2;
-    constexpr double SEARCH_CONFIRM_MAX_JUMP = 0.75;
-    constexpr double TRACKING_MAX_JUMP = 1.50;
-
     const bool wasTrackingBall = data->ballDetected;
-    const double confidenceThreshold = wasTrackingBall
-        ? config->get_ball_confidence_threshold()
-        : config->get_ball_search_confidence_threshold();
+    double bestConfidence = 0.0;
+    int indexRealBall = -1;
 
-    double bestConfidence = -1.0;
-    double bestTrackingJump = 1e9;
-    int indexCandidate = -1;
-
-    // While tracking, preserve identity by preferring the candidate nearest to
-    // the previously accepted ball. While searching, consider only the
-    // highest-confidence candidate above the stricter reacquisition threshold.
     for (int i = 0; i < ballObjs.size(); i++)
     {
         const auto &ballObj = ballObjs[i];
@@ -1719,75 +1706,14 @@ void Brain::detectProcessBalls(const vector<GameObject> &ballObjs)
         if (ballObj.posToRobot.x < -0.5 || ballObj.posToRobot.x > 15.0)
             continue;
 
-        if (ballObj.confidence < confidenceThreshold)
+        if (ballObj.confidence < config->get_ball_confidence_threshold())
             continue;
 
-        if (wasTrackingBall)
-        {
-            const double positionJump = norm(
-                ballObj.posToField.x - data->ball.posToField.x,
-                ballObj.posToField.y - data->ball.posToField.y);
-            if (positionJump > TRACKING_MAX_JUMP)
-                continue;
-
-            if (positionJump < bestTrackingJump ||
-                (std::fabs(positionJump - bestTrackingJump) < 1e-6 && ballObj.confidence > bestConfidence))
-            {
-                bestTrackingJump = positionJump;
-                bestConfidence = ballObj.confidence;
-                indexCandidate = i;
-            }
-        }
-        else if (ballObj.confidence > bestConfidence)
+        if (ballObj.confidence > bestConfidence)
         {
             bestConfidence = ballObj.confidence;
-            indexCandidate = i;
+            indexRealBall = i;
         }
-    }
-
-    int indexRealBall = -1;
-    if (indexCandidate >= 0 && wasTrackingBall)
-    {
-        indexRealBall = indexCandidate;
-        hasPendingBallReacquire = false;
-        pendingBallReacquireFrames = 0;
-    }
-    else if (indexCandidate >= 0)
-    {
-        const auto &candidate = ballObjs[indexCandidate];
-        // Duplicate delivery of one stamped image is still only one frame.
-        const bool newVisionFrame =
-            !hasPendingBallReacquire ||
-            candidate.timePoint.nanoseconds() != pendingBallReacquire.timePoint.nanoseconds();
-
-        if (!hasPendingBallReacquire)
-        {
-            pendingBallReacquire = candidate;
-            hasPendingBallReacquire = true;
-            pendingBallReacquireFrames = 1;
-        }
-        else if (newVisionFrame)
-        {
-            const double pendingJump = norm(
-                candidate.posToField.x - pendingBallReacquire.posToField.x,
-                candidate.posToField.y - pendingBallReacquire.posToField.y);
-            pendingBallReacquireFrames = pendingJump <= SEARCH_CONFIRM_MAX_JUMP
-                ? pendingBallReacquireFrames + 1
-                : 1;
-            pendingBallReacquire = candidate;
-        }
-
-        if (pendingBallReacquireFrames >= SEARCH_CONFIRM_FRAMES)
-        {
-            indexRealBall = indexCandidate;
-            hasPendingBallReacquire = false;
-            pendingBallReacquireFrames = 0;
-        }
-    }
-    else
-    {
-        hasPendingBallReacquire = false;
-        pendingBallReacquireFrames = 0;
     }
 
     auto now = this->get_clock()->now();
@@ -1806,18 +1732,9 @@ void Brain::detectProcessBalls(const vector<GameObject> &ballObjs)
 
         tree->setEntry<bool>("ball_location_known", true);
         updateBallOut();
-        
+
         lastSeenRealBallTime = now;
         data->lose_ball = false;
-
-        log->debug(
-            "ball_acceptance",
-            format("mode: %s confidence: %.1f threshold: %.1f x: %.2f y: %.2f",
-                   wasTrackingBall ? "TRACK" : "REACQUIRE",
-                   bestConfidence,
-                   confidenceThreshold,
-                   data->ball.posToRobot.x,
-                   data->ball.posToRobot.y));
     }
     else
     { // No ball detected

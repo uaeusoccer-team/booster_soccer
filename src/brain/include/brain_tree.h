@@ -171,9 +171,10 @@ private:
     std::uint64_t _searchBallGeneration = 0;
     SearchPhase _searchPhase = SearchPhase::HEAD_LOOK;
     bool _searchInitialized = false;
+    bool _waitingForTurnDirectionLogged = false;
     double _searchYaw = 0.0;
     double _searchPitch = 0.0;
-    double _searchDirection = 1.0;
+    double _searchDirection = 0.0;
 
     Brain *brain;
 

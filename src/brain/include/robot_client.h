@@ -50,8 +50,9 @@ public:
     /**
      * @brief Sign of the last non-zero angular velocity actually sent.
      *
-     * Positive is left, negative is right. Zero velocity commands preserve
-     * the previous direction. The initial direction is left.
+     * Positive is left, negative is right, and zero means no non-zero turn
+     * has been recorded yet. Zero velocity commands preserve the previous
+     * recorded direction.
      */
     int getLastTurnDirection() const
     {
@@ -139,5 +140,5 @@ private:
     double _vx, _vy, _vtheta;
     rclcpp::Time _lastCmdTime;
     rclcpp::Time _lastNonZeroCmdTime;
-    std::atomic<int> _lastNonZeroThetaSign{1};
+    std::atomic<int> _lastNonZeroThetaSign{0};
 };
