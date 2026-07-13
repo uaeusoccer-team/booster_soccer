@@ -3,6 +3,7 @@
 #include <string>
 #include <mutex>
 #include <tuple>
+#include <cstdint>
 
 #include <sensor_msgs/msg/image.hpp>
 #include "booster_interface/msg/odometer.hpp"
@@ -49,9 +50,11 @@ public:
     Eigen::Matrix4d camToRobot = Eigen::Matrix4d::Identity(); 
 
 
-    bool ballDetected = false;   
-    GameObject ball;              
-    GameObject tmBall;           
+    bool ballDetected = false;
+    bool hasReliableBall = false;
+    std::uint64_t reliableBallGeneration = 0;
+    GameObject ball{};
+    GameObject tmBall{};
     double robotBallAngleToField; 
     bool lose_ball = false;
 

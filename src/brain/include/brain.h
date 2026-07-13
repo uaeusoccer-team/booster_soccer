@@ -255,6 +255,12 @@ private:
     vector<GameObject> getGameObjects(const vision_interface::msg::Detections &msg);
     void detectProcessBalls(const vector<GameObject> &ballObjs);
 
+    // A search-mode ball must be seen in two consecutive, distinct, consistent
+    // high-confidence frames before it can replace the last accepted ball.
+    GameObject pendingBallReacquire{};
+    bool hasPendingBallReacquire = false;
+    int pendingBallReacquireFrames = 0;
+
     void detectProcessMarkings(const vector<GameObject> &markingObjs);
 
     void detectProcessRobots(const vector<GameObject> &robotObjs);

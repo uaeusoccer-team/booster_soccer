@@ -12,26 +12,6 @@
 #include <fstream>
 #include <ios>
 
-namespace
-{
-double recentlyLostBallTheta(Brain *brain, bool enabled, double maxRecentLostMsec, double turnSpeed, double minYaw)
-{
-    if (!enabled || maxRecentLostMsec <= 0.0 || turnSpeed <= 0.0)
-    {
-        return 0.0;
-    }
-
-    const double lostMsec = brain->msecsSince(brain->data->ball.timePoint);
-    const double lastYaw = brain->data->ball.yawToRobot;
-    if (lostMsec >= 0.0 && lostMsec < maxRecentLostMsec && std::fabs(lastYaw) > minYaw)
-    {
-        return lastYaw > 0.0 ? std::fabs(turnSpeed) : -std::fabs(turnSpeed);
-    }
-
-    return 0.0;
-}
-}
-
 /**
  * Here we use a macro definition to reduce the code for RegisterBuilder. The effect of REGISTER_BUILDER(Test) after expansion is
  * factory.registerBuilder<Test>(  \
@@ -304,10 +284,7 @@ NodeStatus CamTrackBall::tick()
 
 CamFindBall::CamFindBall(const string &name, const NodeConfig &config, Brain *_brain) : SyncActionNode(name, config), brain(_brain)
 {
-    _timeSearchStart = brain->get_clock()->now();
     _timeLastCmd = rclcpp::Time(0, 0, RCL_ROS_TIME);
-    _searchBallTime = rclcpp::Time(0, 0, RCL_ROS_TIME);
-    _cmdRestartIntervalMSec = 60000;
 }
 
 NodeStatus CamFindBall::tick()
@@ -317,45 +294,95 @@ NodeStatus CamFindBall::tick()
 
     if (brain->data->ballDetected)
     {
-        _timeSearchStart = curTime;
+        _searchInitialized = false;
         _timeLastCmd = rclcpp::Time(0, 0, RCL_ROS_TIME);
-        _searchBallTime = brain->data->ball.timePoint;
         return NodeStatus::SUCCESS;
     }
 
-    double lowPitch, highPitch, yawLimit, sweepMsec, pitchCycleMsec, cmdIntervalMsec;
-    bool turnBodyOnLoss;
-    double lostTurnMsec, lostTurnSpeed, lostTurnMinYaw;
-    getInput("low_pitch", lowPitch);
-    getInput("high_pitch", highPitch);
+    double yawLimit, headSearchSpeed, bodySearchSpeed, directionDeadband, cmdIntervalMsec;
     getInput("yaw_limit", yawLimit);
-    getInput("sweep_msec", sweepMsec);
-    getInput("pitch_cycle_msec", pitchCycleMsec);
+    getInput("head_search_speed", headSearchSpeed);
+    getInput("body_search_speed", bodySearchSpeed);
+    getInput("direction_deadband", directionDeadband);
     getInput("cmd_interval_msec", cmdIntervalMsec);
-    getInput("turn_body_on_loss", turnBodyOnLoss);
-    getInput("lost_turn_msec", lostTurnMsec);
-    getInput("lost_turn_speed", lostTurnSpeed);
-    getInput("lost_turn_min_yaw", lostTurnMinYaw);
 
-    const auto ballTime = brain->data->ball.timePoint;
-    if (_searchBallTime.nanoseconds() == 0 || ballTime.nanoseconds() != _searchBallTime.nanoseconds())
+    yawLimit = std::fabs(yawLimit);
+    headSearchSpeed = std::fabs(headSearchSpeed);
+    bodySearchSpeed = std::fabs(bodySearchSpeed);
+    directionDeadband = std::fabs(directionDeadband);
+    cmdIntervalMsec = std::max(20.0, cmdIntervalMsec);
+
+    // Only an accepted ball advances this generation, so rejected search
+    // candidates cannot restart the current head/body search.
+    const bool reliableBallChanged =
+        _searchInitialized &&
+        brain->data->reliableBallGeneration != _searchBallGeneration;
+
+    if (!_searchInitialized || reliableBallChanged)
     {
-        _timeSearchStart = curTime;
+        const double lastBallYaw = brain->data->hasReliableBall
+            ? brain->data->ball.yawToRobot
+            : 0.0;
+        if (brain->data->hasReliableBall && std::fabs(lastBallYaw) > directionDeadband)
+        {
+            _searchDirection = lastBallYaw > 0.0 ? 1.0 : -1.0;
+        }
+        else if (std::fabs(brain->data->headYaw) > directionDeadband)
+        {
+            _searchDirection = brain->data->headYaw > 0.0 ? 1.0 : -1.0;
+        }
+        else
+        {
+            _searchDirection = _alternateSearchDirection;
+            _alternateSearchDirection *= -1.0;
+        }
+
+        _searchYaw = brain->data->headYaw;
+        _searchPitch = brain->data->headPitch;
+        _searchPhase = SearchPhase::HEAD_LOOK;
+        _searchInitialized = true;
         _timeLastCmd = rclcpp::Time(0, 0, RCL_ROS_TIME);
-        _searchBallTime = ballTime;
+        _searchBallGeneration = brain->data->reliableBallGeneration;
+
+        brain->log->log(
+            "CamFindBall/start",
+            format("pitch: %.3f yaw: %.3f reliableBall: %s lastBallYaw: %.3f direction: %.0f",
+                   _searchPitch,
+                   _searchYaw,
+                   brain->data->hasReliableBall ? "true" : "false",
+                   lastBallYaw,
+                   _searchDirection));
     }
 
-    const double theta = recentlyLostBallTheta(
-        brain,
-        turnBodyOnLoss,
-        lostTurnMsec,
-        lostTurnSpeed,
-        std::fabs(lostTurnMinYaw));
-    setOutput("theta", theta);
+    const double hardwareYawLimit = _searchDirection > 0.0
+        ? std::fabs(brain->config->get_head_yaw_limit_left())
+        : std::fabs(brain->config->get_head_yaw_limit_right());
+    const double effectiveYawLimit = std::min(yawLimit, hardwareYawLimit);
+    const double targetYaw = _searchDirection * effectiveYawLimit;
+    constexpr double HEAD_EDGE_TOLERANCE = 0.05;
 
-    cmdIntervalMsec = std::max(20.0, cmdIntervalMsec);
-    sweepMsec = std::max(500.0, sweepMsec);
-    pitchCycleMsec = std::max(500.0, pitchCycleMsec);
+    if (_searchPhase == SearchPhase::HEAD_LOOK)
+    {
+        const bool measuredAtLimit = _searchDirection > 0.0
+            ? brain->data->headYaw >= targetYaw - HEAD_EDGE_TOLERANCE
+            : brain->data->headYaw <= targetYaw + HEAD_EDGE_TOLERANCE;
+        if (headSearchSpeed <= 0.0 || effectiveYawLimit <= 0.0)
+        {
+            _searchPhase = SearchPhase::BODY_TURN;
+        }
+        else if (measuredAtLimit)
+        {
+            _searchYaw = targetYaw;
+            _searchPhase = SearchPhase::BODY_TURN;
+        }
+    }
+
+    double theta = 0.0;
+    if (_searchPhase == SearchPhase::BODY_TURN)
+    {
+        theta = _searchDirection * bodySearchSpeed;
+    }
+    setOutput("theta", theta);
 
     auto timeSinceLastCmd = (curTime - _timeLastCmd).nanoseconds() / 1e6;
     if (_timeLastCmd.nanoseconds() > 0 && timeSinceLastCmd < cmdIntervalMsec)
@@ -363,29 +390,43 @@ NodeStatus CamFindBall::tick()
         return NodeStatus::SUCCESS;
     }
 
-    auto searchMsec = (curTime - _timeSearchStart).nanoseconds() / 1e6;
-    if (searchMsec < 0.0 || searchMsec > _cmdRestartIntervalMSec)
+    double dtSec = 0.0;
+    if (_timeLastCmd.nanoseconds() > 0 && timeSinceLastCmd > 0.0)
     {
-        _timeSearchStart = curTime;
-        searchMsec = 0.0;
+        dtSec = std::min(timeSinceLastCmd / 1000.0, 0.25);
     }
 
-    const double yawPhase = 2.0 * M_PI * std::fmod(searchMsec, sweepMsec) / sweepMsec;
-    const double pitchPhase = 2.0 * M_PI * std::fmod(searchMsec, pitchCycleMsec) / pitchCycleMsec;
-    const double pitchBlend = 0.5 * (1.0 - std::cos(pitchPhase));
-    const double yaw = yawLimit * std::sin(yawPhase);
-    const double pitch = highPitch + (lowPitch - highPitch) * pitchBlend;
+    if (_searchPhase == SearchPhase::HEAD_LOOK)
+    {
+        _searchYaw += _searchDirection * headSearchSpeed * dtSec;
+        if (_searchDirection > 0.0 && _searchYaw >= targetYaw)
+        {
+            _searchYaw = targetYaw;
+        }
+        else if (_searchDirection < 0.0 && _searchYaw <= targetYaw)
+        {
+            _searchYaw = targetYaw;
+        }
+    }
 
-    brain->client->moveHead(pitch, yaw);
-    _timeLastCmd = brain->get_clock()->now();
+    if (_searchPhase == SearchPhase::BODY_TURN)
+    {
+        theta = _searchDirection * bodySearchSpeed;
+        setOutput("theta", theta);
+    }
+
+    brain->client->moveHead(_searchPitch, _searchYaw);
+    _timeLastCmd = curTime;
 
     brain->log->log(
         "CamFindBall/search",
-        format("searchMsec: %.0f pitch: %.3f yaw: %.3f lastBallYaw: %.3f theta: %.3f",
-               searchMsec,
-               pitch,
-               yaw,
-               brain->data->ball.yawToRobot,
+        format("phase: %s pitch: %.3f commandedYaw: %.3f measuredYaw: %.3f lastBallYaw: %.3f direction: %.0f theta: %.3f",
+               _searchPhase == SearchPhase::HEAD_LOOK ? "HEAD_LOOK" : "BODY_TURN",
+               _searchPitch,
+               _searchYaw,
+               brain->data->headYaw,
+               brain->data->hasReliableBall ? brain->data->ball.yawToRobot : 0.0,
+               _searchDirection,
                theta));
     return NodeStatus::SUCCESS;
 }

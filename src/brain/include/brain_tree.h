@@ -4,6 +4,7 @@
 #include <behaviortree_cpp/behavior_tree.h>
 #include <behaviortree_cpp/bt_factory.h>
 #include <algorithm>
+#include <cstdint>
 
 #include "types.h"
 
@@ -152,16 +153,11 @@ public:
     static PortsList providedPorts()
     {
         return {
-            InputPort<double>("low_pitch", 1.0, "Lowest pitch used while sweeping for the ball"),
-            InputPort<double>("high_pitch", 0.45, "Highest pitch used while sweeping for the ball"),
-            InputPort<double>("yaw_limit", 1.1, "Maximum absolute yaw used while sweeping for the ball"),
-            InputPort<double>("sweep_msec", 3000.0, "Milliseconds for one left-right-left head sweep"),
-            InputPort<double>("pitch_cycle_msec", 6000.0, "Milliseconds for one high-low-high pitch cycle"),
+            InputPort<double>("yaw_limit", 1.1, "Head yaw limit reached before body search begins"),
+            InputPort<double>("head_search_speed", 0.20, "Head yaw speed while looking toward the last reliable ball direction"),
+            InputPort<double>("body_search_speed", 0.25, "Body yaw speed after the head reaches the search edge"),
+            InputPort<double>("direction_deadband", 0.08, "Minimum yaw used to choose the last-ball or current-head direction"),
             InputPort<double>("cmd_interval_msec", 100.0, "Minimum time between head commands"),
-            InputPort<bool>("turn_body_on_loss", true, "Rotate toward the most recent ball yaw for a short time after losing sight"),
-            InputPort<double>("lost_turn_msec", 1200.0, "Milliseconds to keep turning toward the recent lost-ball direction"),
-            InputPort<double>("lost_turn_speed", 0.25, "Body yaw speed while turning toward a recently lost ball"),
-            InputPort<double>("lost_turn_min_yaw", 0.08, "Minimum remembered ball yaw required before body turn is used"),
             OutputPort<double>("theta")
         };
     }
@@ -169,10 +165,20 @@ public:
     NodeStatus tick() override;
 
 private:
-    rclcpp::Time _timeSearchStart;
+    enum class SearchPhase
+    {
+        HEAD_LOOK,
+        BODY_TURN
+    };
+
     rclcpp::Time _timeLastCmd;
-    rclcpp::Time _searchBallTime;
-    long _cmdRestartIntervalMSec;
+    std::uint64_t _searchBallGeneration = 0;
+    SearchPhase _searchPhase = SearchPhase::HEAD_LOOK;
+    bool _searchInitialized = false;
+    double _searchYaw = 0.0;
+    double _searchPitch = 0.0;
+    double _searchDirection = 1.0;
+    double _alternateSearchDirection = 1.0;
 
     Brain *brain;
 

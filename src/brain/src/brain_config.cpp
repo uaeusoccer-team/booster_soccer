@@ -114,7 +114,11 @@ double BrainConfig::get_min_vtheta() {
 }
 
 double BrainConfig::get_ball_confidence_threshold() {
-    return static_cast<rclcpp::Node*>(brain)->get_parameter_or("strategy.ball_confidence_threshold", 50.0);
+    return static_cast<rclcpp::Node*>(brain)->get_parameter_or("strategy.ball_confidence_threshold", 40.0);
+}
+
+double BrainConfig::get_ball_search_confidence_threshold() {
+    return static_cast<rclcpp::Node*>(brain)->get_parameter_or("strategy.ball_search_confidence_threshold", 80.0);
 }
 
 double BrainConfig::get_ball_memory_timeout() {
@@ -524,6 +528,17 @@ void BrainConfig::calcMapMarkings() {
 void BrainConfig::handle()
 {
 
+    const double trackingBallConfidence = get_ball_confidence_threshold();
+    const double searchBallConfidence = get_ball_search_confidence_threshold();
+    if (trackingBallConfidence < 0.0 || trackingBallConfidence > 100.0)
+    {
+        throw invalid_argument("strategy.ball_confidence_threshold must be between 0 and 100");
+    }
+    if (searchBallConfidence < trackingBallConfidence || searchBallConfidence > 100.0)
+    {
+        throw invalid_argument("strategy.ball_search_confidence_threshold must be between the tracking threshold and 100");
+    }
+
 
     // fieldType [adult_size, kid_size]
     if (get_field_type() == "adult_size")
@@ -567,6 +582,7 @@ void BrainConfig::print(ostream &os)
     os << "----------------------------------------" << endl;
     os << "Strategy:" << endl;
     os << "    ballConfidenceThreshold = " << get_ball_confidence_threshold() << endl;
+    os << "    ballSearchConfidenceThreshold = " << get_ball_search_confidence_threshold() << endl;
     os << "----------------------------------------" << endl;
     os << "Locator:" << endl;
     os << "    pfMinMarkerCnt = " << get_min_marker_count() << endl;

@@ -9,15 +9,10 @@ HEAD_TURN_STOP_RATIO="0.65"
 STOP_ANGLE="0.10"
 USE_BALL_YAW_FALLBACK="true"
 REQUIRE_PLAY="false"
-TURN_BODY_ON_LOSS="false"
-LOST_TURN_MSEC="800"
-LOST_TURN_SPEED="0.20"
-LOST_TURN_MIN_YAW="0.08"
-LOW_PITCH="1.00"
-HIGH_PITCH="0.45"
+HEAD_SEARCH_SPEED="0.20"
+BODY_SEARCH_SPEED="0.25"
+DIRECTION_DEADBAND="0.08"
 YAW_LIMIT="1.10"
-SWEEP_MSEC="3000"
-PITCH_CYCLE_MSEC="6000"
 CMD_INTERVAL_MSEC="100"
 
 usage() {
@@ -32,15 +27,10 @@ Settings:
   stop_angle=0.10
   use_ball_yaw_fallback=true
   require_play=false
-  turn_body_on_loss=false
-  lost_turn_msec=800
-  lost_turn_speed=0.20
-  lost_turn_min_yaw=0.08
-  low_pitch=1.00
-  high_pitch=0.45
+  head_search_speed=0.20
+  body_search_speed=0.25
+  direction_deadband=0.08
   yaw_limit=1.10
-  sweep_msec=3000
-  pitch_cycle_msec=6000
   cmd_interval_msec=100
 
 Examples:
@@ -53,8 +43,8 @@ Examples:
   # Require referee GameController PLAY instead of starting immediately:
   ./scripts/test_head_tracking_rotation.sh require_play=true
 
-  # Also test brief recent-memory rotation after vision loss:
-  ./scripts/test_head_tracking_rotation.sh turn_body_on_loss=true
+  # Tune the slow head look and following body rotation after ball loss:
+  ./scripts/test_head_tracking_rotation.sh head_search_speed=0.15 body_search_speed=0.35
 
 The script always commands vx=0 and vy=0. With require_play=false (the default),
 tracking and rotation begin as soon as the brain starts. Set require_play=true
@@ -88,7 +78,7 @@ set_value() {
   value="$(clean_value "$2")"
 
   case "$key" in
-    use_ball_yaw_fallback|require_play|turn_body_on_loss)
+    use_ball_yaw_fallback|require_play)
       value="$(normalize_bool "$key" "$value")"
       ;;
     *)
@@ -106,15 +96,10 @@ set_value() {
     stop_angle) STOP_ANGLE="$value" ;;
     use_ball_yaw_fallback) USE_BALL_YAW_FALLBACK="$value" ;;
     require_play) REQUIRE_PLAY="$value" ;;
-    turn_body_on_loss) TURN_BODY_ON_LOSS="$value" ;;
-    lost_turn_msec) LOST_TURN_MSEC="$value" ;;
-    lost_turn_speed) LOST_TURN_SPEED="$value" ;;
-    lost_turn_min_yaw) LOST_TURN_MIN_YAW="$value" ;;
-    low_pitch) LOW_PITCH="$value" ;;
-    high_pitch) HIGH_PITCH="$value" ;;
+    head_search_speed) HEAD_SEARCH_SPEED="$value" ;;
+    body_search_speed) BODY_SEARCH_SPEED="$value" ;;
+    direction_deadband) DIRECTION_DEADBAND="$value" ;;
     yaw_limit) YAW_LIMIT="$value" ;;
-    sweep_msec) SWEEP_MSEC="$value" ;;
-    pitch_cycle_msec) PITCH_CYCLE_MSEC="$value" ;;
     cmd_interval_msec) CMD_INTERVAL_MSEC="$value" ;;
     *) echo "Unknown setting: ${key}" >&2; exit 2 ;;
   esac
@@ -127,7 +112,7 @@ parse_args() {
         usage
         exit 0
         ;;
-      body_turn_speed=*|head_turn_start_ratio=*|head_turn_stop_ratio=*|stop_angle=*|use_ball_yaw_fallback=*|require_play=*|turn_body_on_loss=*|lost_turn_msec=*|lost_turn_speed=*|lost_turn_min_yaw=*|low_pitch=*|high_pitch=*|yaw_limit=*|sweep_msec=*|pitch_cycle_msec=*|cmd_interval_msec=*)
+      body_turn_speed=*|head_turn_start_ratio=*|head_turn_stop_ratio=*|stop_angle=*|use_ball_yaw_fallback=*|require_play=*|head_search_speed=*|body_search_speed=*|direction_deadband=*|yaw_limit=*|cmd_interval_msec=*)
         set_value "${1%%=*}" "${1#*=}"
         shift
         ;;
@@ -187,15 +172,10 @@ echo "  head_turn_stop_ratio=${HEAD_TURN_STOP_RATIO}"
 echo "  stop_angle=${STOP_ANGLE}"
 echo "  use_ball_yaw_fallback=${USE_BALL_YAW_FALLBACK}"
 echo "  require_play=${REQUIRE_PLAY}"
-echo "  turn_body_on_loss=${TURN_BODY_ON_LOSS}"
-echo "  lost_turn_msec=${LOST_TURN_MSEC}"
-echo "  lost_turn_speed=${LOST_TURN_SPEED}"
-echo "  lost_turn_min_yaw=${LOST_TURN_MIN_YAW}"
-echo "  low_pitch=${LOW_PITCH}"
-echo "  high_pitch=${HIGH_PITCH}"
+echo "  head_search_speed=${HEAD_SEARCH_SPEED}"
+echo "  body_search_speed=${BODY_SEARCH_SPEED}"
+echo "  direction_deadband=${DIRECTION_DEADBAND}"
 echo "  yaw_limit=${YAW_LIMIT}"
-echo "  sweep_msec=${SWEEP_MSEC}"
-echo "  pitch_cycle_msec=${PITCH_CYCLE_MSEC}"
 echo "  cmd_interval_msec=${CMD_INTERVAL_MSEC}"
 if [[ "$REQUIRE_PLAY" == "true" ]]; then
   STOP_CONDITION="gc_game_state!='PLAY'"
@@ -231,16 +211,11 @@ cat > "$TREE_PATH" <<XML
                           stop_angle="${STOP_ANGLE}"
                           use_ball_yaw_fallback="${USE_BALL_YAW_FALLBACK}"
                           theta="{tracking_theta}" />
-            <CamFindBall low_pitch="${LOW_PITCH}"
-                         high_pitch="${HIGH_PITCH}"
-                         yaw_limit="${YAW_LIMIT}"
-                         sweep_msec="${SWEEP_MSEC}"
-                         pitch_cycle_msec="${PITCH_CYCLE_MSEC}"
+            <CamFindBall yaw_limit="${YAW_LIMIT}"
+                         head_search_speed="${HEAD_SEARCH_SPEED}"
+                         body_search_speed="${BODY_SEARCH_SPEED}"
+                         direction_deadband="${DIRECTION_DEADBAND}"
                          cmd_interval_msec="${CMD_INTERVAL_MSEC}"
-                         turn_body_on_loss="${TURN_BODY_ON_LOSS}"
-                         lost_turn_msec="${LOST_TURN_MSEC}"
-                         lost_turn_speed="${LOST_TURN_SPEED}"
-                         lost_turn_min_yaw="${LOST_TURN_MIN_YAW}"
                          theta="{tracking_theta}" />
           </IfThenElse>
           <SetVelocity x="0" y="0" theta="{tracking_theta}" />

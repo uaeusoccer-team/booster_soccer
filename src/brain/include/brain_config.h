@@ -52,6 +52,7 @@ public:
     double get_min_vtheta();
 
     double get_ball_confidence_threshold();
+    double get_ball_search_confidence_threshold();
     double get_ball_memory_timeout();
     double get_tm_ball_dist_threshold();
     bool get_limit_near_ball_speed();
