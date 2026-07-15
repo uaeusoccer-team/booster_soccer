@@ -22,9 +22,9 @@ Settings:
   ball_yaw_gain=4.0
   pitch_turn_gain=1.0
   require_play=false
-  head_search_speed=0.20
-  body_search_speed=0.25
-  yaw_limit=1.10
+  head_search_speed=0.20          # head-only scan speed
+  body_search_speed=0.25          # used only if loss happens during a turn
+  yaw_limit=1.10                  # head scan endpoint, radians
   cmd_interval_msec=100
 
 Examples:
@@ -37,12 +37,18 @@ Examples:
   # Require referee GameController PLAY instead of starting immediately:
   ./scripts/test_head_tracking_rotation.sh require_play=true
 
-  # Tune the slow head look and following body rotation after ball loss:
+  # Tune the head scan and continued body turn after ball loss:
   ./scripts/test_head_tracking_rotation.sh head_search_speed=0.15 body_search_speed=0.35
 
 The script always commands vx=0 and vy=0. With require_play=false (the default),
 tracking and rotation begin as soon as the brain starts. Set require_play=true
 if GameController PLAY should gate the test.
+
+After a ball loss, a stationary robot scans with its head only, first toward
+the last visual head direction, then back and forth between yaw_limit edges.
+If the body was already rotating at loss, it continues that current direction
+at body_search_speed while the head moves toward the same side. Before the
+first observed ball, search holds still.
 Press s or Ctrl-C to stop the test stack.
 USAGE
 }
@@ -229,7 +235,7 @@ else
   echo "Running immediately."
 fi
 echo "Press s or Ctrl-C to stop."
-echo "Diagnostics: tail -f brain.log | grep -E 'CamTrackBall/direct_pixel|CamFindBall/(wait_direction|start|search)'"
+echo "Diagnostics: tail -f brain.log | grep -E 'CamTrackBall/direct_pixel|CamFindBall/(wait_observation|start|search)'"
 
 while true; do
   if ! read -rsn1 key; then

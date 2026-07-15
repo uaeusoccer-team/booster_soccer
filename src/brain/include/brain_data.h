@@ -54,6 +54,13 @@ public:
 
     bool ballDetected = false;
     std::atomic<std::uint64_t> ballTrackingGeneration{0};
+    // Last horizontal direction in which the head was viewing an accepted
+    // ball. This is visual/head-relative search memory, deliberately kept
+    // separate from the projected ground position used for chase motion.
+    // Positive is left, negative is right, and zero means the last image was
+    // centered enough that it did not choose a side.
+    std::atomic<int> lastBallSearchDirection{0};
+    std::atomic<std::uint64_t> lastBallSearchGeneration{0};
     GameObject ball{};
     GameObject tmBall{};
     double robotBallAngleToField; 

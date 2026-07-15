@@ -59,6 +59,20 @@ public:
         return _lastNonZeroThetaSign.load(std::memory_order_relaxed);
     }
 
+    /**
+     * @brief Sign of the angular velocity in the command currently active.
+     *
+     * Unlike getLastTurnDirection(), this returns zero as soon as the active
+     * command stops turning. CamFindBall snapshots it at ball loss to decide
+     * whether to continue an ongoing body turn or run a head-only scan.
+     */
+    int getCurrentTurnDirection(double epsilon = 1e-3) const
+    {
+        if (_vtheta > epsilon) return 1;
+        if (_vtheta < -epsilon) return -1;
+        return 0;
+    }
+
     int crabWalk(double angle, double speed);
 
     /**
@@ -137,7 +151,9 @@ private:
     int call(booster_interface::msg::BoosterApiReqMsg msg);
     rclcpp::Publisher<booster_msgs::msg::RpcReqMsg>::SharedPtr publisher;
     Brain *brain;
-    double _vx, _vy, _vtheta;
+    double _vx = 0.0;
+    double _vy = 0.0;
+    double _vtheta = 0.0;
     rclcpp::Time _lastCmdTime;
     rclcpp::Time _lastNonZeroCmdTime;
     std::atomic<int> _lastNonZeroThetaSign{0};

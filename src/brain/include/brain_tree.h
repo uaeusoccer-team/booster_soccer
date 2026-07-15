@@ -150,9 +150,9 @@ public:
     static PortsList providedPorts()
     {
         return {
-            InputPort<double>("yaw_limit", 1.1, "Head yaw limit reached before body search begins"),
-            InputPort<double>("head_search_speed", 0.20, "Head yaw speed toward the remembered body-turn direction"),
-            InputPort<double>("body_search_speed", 0.25, "Body yaw speed in the remembered direction after the head reaches the search edge"),
+            InputPort<double>("yaw_limit", 1.1, "Maximum absolute head yaw used by the ball search"),
+            InputPort<double>("head_search_speed", 0.20, "Head yaw scan speed"),
+            InputPort<double>("body_search_speed", 0.25, "Body yaw speed when continuing an active turn after ball loss"),
             InputPort<double>("cmd_interval_msec", 100.0, "Minimum time between head commands"),
             OutputPort<double>("theta")
         };
@@ -161,20 +161,21 @@ public:
     NodeStatus tick() override;
 
 private:
-    enum class SearchPhase
+    enum class SearchMode
     {
-        HEAD_LOOK,
-        BODY_TURN
+        HEAD_SCAN,
+        CONTINUE_TURN
     };
 
     rclcpp::Time _timeLastCmd;
     std::uint64_t _searchBallGeneration = 0;
-    SearchPhase _searchPhase = SearchPhase::HEAD_LOOK;
+    SearchMode _searchMode = SearchMode::HEAD_SCAN;
     bool _searchInitialized = false;
-    bool _waitingForTurnDirectionLogged = false;
+    bool _waitingForObservationLogged = false;
     double _searchYaw = 0.0;
     double _searchPitch = 0.0;
     double _searchDirection = 0.0;
+    double _alternateScanDirection = 1.0;
 
     Brain *brain;
 
@@ -717,6 +718,53 @@ private:
     Brain *brain;
 };
 
+
+/**
+ * @brief Fine robot-relative positioning for a shooting pose.
+ *
+ * Tracks the ball head to an optionally shifted image center, then publishes
+ * vx, vy, and theta outputs. The caller owns the single SetVelocity command.
+ */
+class ShootingAdjust : public SyncActionNode
+{
+public:
+    ShootingAdjust(const string &name, const NodeConfig &config, Brain *_brain) : SyncActionNode(name, config), brain(_brain) {}
+
+    static PortsList providedPorts()
+    {
+        return {
+            InputPort<double>("target_range", 0.40, "Desired forward ball position in the robot frame (m)"),
+            InputPort<double>("target_y_offset", 0.0, "Desired lateral ball position in the robot frame (m)"),
+            InputPort<double>("theta_offset", 0.0, "Desired robot-relative ball yaw (rad)"),
+            InputPort<double>("range_tolerance", 0.06, "Forward position deadband (m)"),
+            InputPort<double>("y_tolerance", 0.05, "Lateral position deadband (m)"),
+            InputPort<double>("stop_angle", 0.10, "Yaw deadband around theta_offset (rad)"),
+            InputPort<double>("range_gain", 1.0, "Forward position gain"),
+            InputPort<double>("y_gain", 1.0, "Lateral position gain"),
+            InputPort<double>("ball_yaw_gain", 4.0, "Yaw gain outside the deadband"),
+            InputPort<double>("vx_limit", 0.4, "Forward speed limit (m/s)"),
+            InputPort<double>("vy_limit", 0.4, "Lateral speed limit (m/s)"),
+            InputPort<double>("vtheta_limit", 0.8, "Body yaw speed limit (rad/s)"),
+            InputPort<double>("turn_first_threshold", 0.50, "Stop translation while yaw error exceeds this angle (rad); zero disables it"),
+            InputPort<double>("yaw_limit", 0.70, "Maximum absolute head yaw for shifted shooting tracking (rad)"),
+            InputPort<double>("image_center_x_offset_px", 0.0, "Positive means the desired ball pixel is right of image center"),
+            InputPort<double>("image_center_y_offset_px", 0.0, "Positive means the desired ball pixel is below image center"),
+            InputPort<double>("head_deadband_x_px", 35.0, "Horizontal image deadband for head tracking (px)"),
+            InputPort<double>("head_deadband_y_px", 35.0, "Vertical image deadband for head tracking (px)"),
+            InputPort<double>("head_step_rad", 0.04, "Head yaw/pitch step per new vision frame (rad)"),
+            OutputPort<double>("vx"),
+            OutputPort<double>("vy"),
+            OutputPort<double>("theta")
+        };
+    }
+
+    NodeStatus tick() override;
+
+private:
+    Brain *brain;
+    rclcpp::Time _lastProcessedBallTime = rclcpp::Time(0, 0, RCL_ROS_TIME);
+    bool _hasLastProcessedBallFrame = false;
+};
 
 class CalibrateOdom : public SyncActionNode
 {

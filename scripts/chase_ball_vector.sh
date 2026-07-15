@@ -36,9 +36,9 @@ Tracking and rotation settings:
   require_play=false
 
 Ball-search settings:
-  head_search_speed=0.20
-  body_search_speed=0.25
-  yaw_limit=1.10
+  head_search_speed=0.20          # head-only scan speed
+  body_search_speed=0.25          # used only if loss happens during a turn
+  yaw_limit=1.10                  # head scan endpoint, radians
   cmd_interval_msec=100
 
 Examples:
@@ -53,6 +53,12 @@ Examples:
 
 SimpleChase calculates only vx and vy. CamTrackBall/CamFindBall calculate theta.
 SetVelocity publishes the combined vx, vy, and theta once per active tick.
+
+After a ball loss, a stationary robot scans with its head only, first toward
+the last visual head direction, then back and forth between yaw_limit edges.
+If the body was already rotating at loss, it continues that current direction
+at body_search_speed while the head moves toward the same side. Before the
+first observed ball, search holds still.
 Press s or Ctrl-C to stop the test stack.
 USAGE
 }
@@ -254,7 +260,7 @@ else
   echo "Chasing immediately."
 fi
 echo "Press s or Ctrl-C to stop."
-echo "Diagnostics: tail -f brain.log | grep -E 'CamTrackBall/direct_pixel|CamFindBall/(wait_direction|start|search)|SimpleChase/vector'"
+echo "Diagnostics: tail -f brain.log | grep -E 'CamTrackBall/direct_pixel|CamFindBall/(wait_observation|start|search)|SimpleChase/vector'"
 
 while true; do
   if ! read -rsn1 key; then
