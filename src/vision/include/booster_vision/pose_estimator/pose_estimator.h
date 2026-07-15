@@ -48,6 +48,9 @@ private:
     int min_points_above_ground_;
     float min_height_above_ground_;
     float min_above_ground_ratio_;
+    float ground_ring_scale_;
+    int min_ground_points_;
+    float max_height_above_ground_;
 };
 
 class HumanLikePoseEstimator : public PoseEstimator {

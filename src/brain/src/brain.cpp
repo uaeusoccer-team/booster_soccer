@@ -1668,6 +1668,7 @@ vector<GameObject> Brain::getGameObjects(const vision_interface::msg::Detections
         gObj.boundingBox.ymax = obj.ymax;
         gObj.boundingBox.ymin = obj.ymin;
         gObj.confidence = obj.confidence;
+        gObj.positionConfidence = obj.position_confidence;
 
         // Do not use depth measurement, directly use projection distance
         gObj.posToRobot.x = obj.position_projection[0];
@@ -1730,7 +1731,7 @@ void Brain::detectProcessBalls(const vector<GameObject> &ballObjs)
             data->ballTrackingGeneration.fetch_add(1, std::memory_order_relaxed);
         }
 
-        tree->setEntry<bool>("ball_location_known", true);
+        tree->setEntry<bool>("ball_location_known", ballObjs[indexRealBall].positionConfidence > 0);
         updateBallOut();
 
         lastSeenRealBallTime = now;
