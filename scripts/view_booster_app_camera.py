@@ -14,6 +14,7 @@ import base64
 import hashlib
 import http.server
 import json
+import math
 import os
 import socket
 import struct
@@ -29,6 +30,7 @@ from typing import Optional, Union
 JPEG_SOI = b"\xff\xd8"
 JPEG_EOI = b"\xff\xd9"
 DETECTION_FIELDS = {"label", "confidence", "xmin", "ymin", "xmax", "ymax"}
+DETECTION_OPTIONAL_FIELDS = {"position_confidence"}
 DETECTION_VECTOR_FIELDS = {"position", "position_projection"}
 
 
@@ -42,6 +44,7 @@ class Detection:
     ymax: int
     position: list[float] = field(default_factory=list)
     position_projection: list[float] = field(default_factory=list)
+    position_confidence: int = 0
 
     def as_dict(self) -> dict[str, object]:
         return {
@@ -53,10 +56,21 @@ class Detection:
             "ymax": self.ymax,
             "position": self.position,
             "position_projection": self.position_projection,
+            "position_confidence": self.position_confidence,
         }
 
     def is_ball(self) -> bool:
         return self.label.strip().lower() == "ball"
+
+    def has_depth(self) -> bool:
+        """Return whether this detection has a usable depth position."""
+        if self.position_confidence > 0:
+            return True
+        if len(self.position) < 3:
+            return False
+        return all(math.isfinite(value) for value in self.position) and any(
+            abs(value) > 0.0001 for value in self.position
+        )
 
 
 @dataclass
@@ -65,6 +79,7 @@ class FrameStore:
     jpeg: Optional[bytes] = None
     detections: list[Detection] = field(default_factory=list)
     yolo_only_ball: bool = False
+    yolo_only_ball_with_depth: bool = False
     frame_id: int = 0
     last_error: str = ""
     last_update: float = 0.0
@@ -92,11 +107,15 @@ class FrameStore:
 
     def set_detections(self, detections: list[Detection]) -> None:
         with self.condition:
-            self.detections = (
-                [detection for detection in detections if detection.is_ball()]
-                if self.yolo_only_ball
-                else detections
-            )
+            if self.yolo_only_ball_with_depth:
+                self.detections = [
+                    detection for detection in detections
+                    if detection.is_ball() and detection.has_depth()
+                ]
+            elif self.yolo_only_ball:
+                self.detections = [detection for detection in detections if detection.is_ball()]
+            else:
+                self.detections = detections
             self.detections_last_update = time.time()
             self.detections_last_error = ""
             self.detections_connected = True
@@ -291,7 +310,7 @@ class RosDetectionParser:
             return
         key, raw_value = text.split(":", 1)
         key = key.strip()
-        if key not in DETECTION_FIELDS and key not in DETECTION_VECTOR_FIELDS:
+        if key not in DETECTION_FIELDS and key not in DETECTION_OPTIONAL_FIELDS and key not in DETECTION_VECTOR_FIELDS:
             self.active_vector_field = None
             return
         raw_value = raw_value.strip().strip("'\"")
@@ -306,7 +325,7 @@ class RosDetectionParser:
 
         self.active_vector_field = None
         try:
-            if key in {"xmin", "ymin", "xmax", "ymax"}:
+            if key in {"xmin", "ymin", "xmax", "ymax", "position_confidence"}:
                 value: object = int(float(raw_value))
             elif key == "confidence":
                 value = float(raw_value)
@@ -368,6 +387,7 @@ class RosDetectionParser:
                     ymax=ymax,
                     position=list(obj.get("position", [])),
                     position_projection=list(obj.get("position_projection", [])),
+                    position_confidence=int(obj.get("position_confidence", 0)),
                 )
             )
         self.objects = []
@@ -708,9 +728,12 @@ def apply_legacy_key_value_args(args: argparse.Namespace, extras: list[str]) -> 
             raise SystemExit(f"unknown argument: {extra}")
         key, value = extra.split("=", 1)
         normalized_key = key.strip().lower().replace("-", "_")
-        if normalized_key != "yolo_only_ball":
+        if normalized_key not in {"yolo_only_ball", "yolo_only_ball_with_depth"}:
             raise SystemExit(f"unknown argument: {extra}")
-        args.yolo_only_ball = str_to_bool(value)
+        if normalized_key == "yolo_only_ball":
+            args.yolo_only_ball = str_to_bool(value)
+        else:
+            args.yolo_only_ball_with_depth = str_to_bool(value)
 
 
 def parse_args() -> argparse.Namespace:
@@ -739,6 +762,11 @@ def parse_args() -> argparse.Namespace:
         type=str_to_bool,
         help="show only Ball detections; default shows all YOLO objects",
     )
+    parser.add_argument(
+        "--yolo-only-ball-with-depth",
+        action="store_true",
+        help="show only Ball detections with a valid depth position",
+    )
     args, extras = parser.parse_known_args()
     apply_legacy_key_value_args(args, extras)
     return args
@@ -746,7 +774,10 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> int:
     args = parse_args()
-    store = FrameStore(yolo_only_ball=args.yolo_only_ball)
+    store = FrameStore(
+        yolo_only_ball=args.yolo_only_ball,
+        yolo_only_ball_with_depth=args.yolo_only_ball_with_depth,
+    )
     reader = threading.Thread(
         target=camera_reader,
         args=(store, args.robot, args.ws_port, args.ws_path, args.timeout),
@@ -777,6 +808,11 @@ def main() -> int:
             detection_command = args.detections_cmd
             detection_shell = True
             print(f"Detection source command: {args.detections_cmd}", flush=True)
+
+        if args.yolo_only_ball_with_depth:
+            print("Detection filter: Ball detections with valid depth", flush=True)
+        elif args.yolo_only_ball:
+            print("Detection filter: Ball detections", flush=True)
 
         detections = threading.Thread(
             target=detection_reader,
