@@ -130,6 +130,10 @@ public:
             InputPort<double>("stop_angle", 0.1, "Robot-relative ball yaw deadband"),
             InputPort<double>("ball_yaw_gain", 4.0, "Body rotation gain applied to robot-relative ball yaw"),
             InputPort<double>("pitch_turn_gain", 1.0, "Additional body rotation gain per radian of downward head pitch"),
+            InputPort<double>("head_step_rad", 0.04, "Normal head yaw/pitch step per new vision frame (rad)"),
+            InputPort<double>("head_settle_step_rad", 0.02, "Head yaw/pitch step near the pixel deadband (rad)"),
+            InputPort<double>("head_deadband_x_px", 35.0, "Horizontal head tracking deadband (px)"),
+            InputPort<double>("head_deadband_y_px", 35.0, "Vertical head tracking deadband (px)"),
             OutputPort<double>("theta")
         };
     }

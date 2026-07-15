@@ -11,6 +11,10 @@ HEAD_SEARCH_SPEED="0.20"
 BODY_SEARCH_SPEED="0.25"
 YAW_LIMIT="1.10"
 CMD_INTERVAL_MSEC="100"
+HEAD_STEP_RAD="0.04"
+HEAD_SETTLE_STEP_RAD="0.02"
+HEAD_DEADBAND_X_PX="35"
+HEAD_DEADBAND_Y_PX="35"
 
 usage() {
   cat <<'USAGE'
@@ -26,6 +30,10 @@ Settings:
   body_search_speed=0.25          # used only if loss happens during a turn
   yaw_limit=1.10                  # head scan endpoint, radians
   cmd_interval_msec=100
+  head_step_rad=0.04              # normal head yaw/pitch step per vision frame
+  head_settle_step_rad=0.02       # step within 20 px of the pixel deadband
+  head_deadband_x_px=35            # horizontal head deadband
+  head_deadband_y_px=35            # vertical head deadband
 
 Examples:
   # Run immediately with base ballYaw x 4 body rotation:
@@ -98,6 +106,10 @@ set_value() {
     body_search_speed) BODY_SEARCH_SPEED="$value" ;;
     yaw_limit) YAW_LIMIT="$value" ;;
     cmd_interval_msec) CMD_INTERVAL_MSEC="$value" ;;
+    head_step_rad) HEAD_STEP_RAD="$value" ;;
+    head_settle_step_rad) HEAD_SETTLE_STEP_RAD="$value" ;;
+    head_deadband_x_px) HEAD_DEADBAND_X_PX="$value" ;;
+    head_deadband_y_px) HEAD_DEADBAND_Y_PX="$value" ;;
     *) echo "Unknown setting: ${key}" >&2; exit 2 ;;
   esac
 }
@@ -109,7 +121,7 @@ parse_args() {
         usage
         exit 0
         ;;
-      stop_angle=*|ball_yaw_gain=*|pitch_turn_gain=*|require_play=*|head_search_speed=*|body_search_speed=*|yaw_limit=*|cmd_interval_msec=*)
+      stop_angle=*|ball_yaw_gain=*|pitch_turn_gain=*|require_play=*|head_search_speed=*|body_search_speed=*|yaw_limit=*|cmd_interval_msec=*|head_step_rad=*|head_settle_step_rad=*|head_deadband_x_px=*|head_deadband_y_px=*)
         set_value "${1%%=*}" "${1#*=}"
         shift
         ;;
@@ -171,6 +183,10 @@ echo "  head_search_speed=${HEAD_SEARCH_SPEED}"
 echo "  body_search_speed=${BODY_SEARCH_SPEED}"
 echo "  yaw_limit=${YAW_LIMIT}"
 echo "  cmd_interval_msec=${CMD_INTERVAL_MSEC}"
+echo "  head_step_rad=${HEAD_STEP_RAD}"
+echo "  head_settle_step_rad=${HEAD_SETTLE_STEP_RAD}"
+echo "  head_deadband_x_px=${HEAD_DEADBAND_X_PX}"
+echo "  head_deadband_y_px=${HEAD_DEADBAND_Y_PX}"
 if [[ "$REQUIRE_PLAY" == "true" ]]; then
   STOP_CONDITION="gc_game_state!='PLAY'"
   RUN_CONDITION="gc_game_state=='PLAY'"
@@ -202,6 +218,10 @@ cat > "$TREE_PATH" <<XML
             <CamTrackBall stop_angle="${STOP_ANGLE}"
                           ball_yaw_gain="${BALL_YAW_GAIN}"
                           pitch_turn_gain="${PITCH_TURN_GAIN}"
+                          head_step_rad="${HEAD_STEP_RAD}"
+                          head_settle_step_rad="${HEAD_SETTLE_STEP_RAD}"
+                          head_deadband_x_px="${HEAD_DEADBAND_X_PX}"
+                          head_deadband_y_px="${HEAD_DEADBAND_Y_PX}"
                           theta="{tracking_theta}" />
             <CamFindBall yaw_limit="${YAW_LIMIT}"
                          head_search_speed="${HEAD_SEARCH_SPEED}"

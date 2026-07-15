@@ -149,13 +149,25 @@ NodeStatus CamTrackBall::tick()
     double stopAngle = 0.1;
     double ballYawGain = 4.0;
     double pitchTurnGain = 1.0;
+    double headStep = 0.04;
+    double headSettleStep = 0.02;
+    double headDeadbandX = 35.0;
+    double headDeadbandY = 35.0;
     getInput("stop_angle", stopAngle);
     getInput("ball_yaw_gain", ballYawGain);
     getInput("pitch_turn_gain", pitchTurnGain);
+    getInput("head_step_rad", headStep);
+    getInput("head_settle_step_rad", headSettleStep);
+    getInput("head_deadband_x_px", headDeadbandX);
+    getInput("head_deadband_y_px", headDeadbandY);
 
     stopAngle = std::fabs(stopAngle);
     ballYawGain = std::max(0.0, ballYawGain);
     pitchTurnGain = std::max(0.0, pitchTurnGain);
+    headStep = std::fabs(headStep);
+    headSettleStep = std::fabs(headSettleStep);
+    headDeadbandX = std::fabs(headDeadbandX);
+    headDeadbandY = std::fabs(headDeadbandY);
 
     if (!brain->data->headStateReceived.load(std::memory_order_acquire))
     {
@@ -217,10 +229,7 @@ NodeStatus CamTrackBall::tick()
     const double dx = ballX - xCenter;  // + means ball is right of image center
     const double dy = ballY - yCenter;  // + means ball is below image center
 
-    const double deadbandX = 35.0;
-    const double deadbandY = 35.0;
-
-    const double step = 0.04;
+    const double settleZonePx = 20.0;
 
     // Search direction is a visual/head memory, not a reuse of the projected
     // ground point. A pixel outside centre tells us which way the head was
@@ -228,7 +237,7 @@ NodeStatus CamTrackBall::tick()
     // this separate prevents a moving-head projection error from deciding a
     // later stationary head scan.
     int visualSearchDirection = 0;
-    if (std::fabs(dx) > deadbandX)
+    if (std::fabs(dx) > headDeadbandX)
     {
         visualSearchDirection = dx > 0.0 ? -1 : 1;
     }
@@ -241,13 +250,15 @@ NodeStatus CamTrackBall::tick()
         brain->data->ballTrackingGeneration.load(std::memory_order_relaxed),
         std::memory_order_relaxed);
 
-    if (std::fabs(dx) > deadbandX)
+    if (std::fabs(dx) > headDeadbandX)
     {
+        const double step = std::fabs(dx) <= headDeadbandX + settleZonePx ? headSettleStep : headStep;
         yaw += (dx > 0.0) ? -step : step;
     }
 
-    if (std::fabs(dy) > deadbandY)
+    if (std::fabs(dy) > headDeadbandY)
     {
+        const double step = std::fabs(dy) <= headDeadbandY + settleZonePx ? headSettleStep : headStep;
         pitch += (dy > 0.0) ? step : -step;
     }
 
