@@ -52,7 +52,7 @@ camera:
       - 0
       - 1
   pitch_compensation: 0
-  yaw_compensation: 0
+  yaw_compensation: -6.0
   z_compensation: 0
 detection_model:
   model_path: ./src/vision/model/best_digua_1223_10.3.engine
