@@ -727,8 +727,7 @@ NodeStatus ShootingAdjust::tick()
     double rangeTolerance, yTolerance, stopAngle;
     double rangeGain, yGain, ballYawGain;
     double vxLimit, vyLimit, vthetaLimit;
-    double turnFirstThreshold, yawLimit, maxBallRange;
-    double imageCenterXOffset, imageCenterYOffset, headDeadbandX, headDeadbandY, headStep;
+    double turnFirstThreshold, fixedHeadYaw, maxBallRange;
 
     getInput("target_range", targetRange);
     getInput("target_y_offset", targetYOffset);
@@ -743,12 +742,7 @@ NodeStatus ShootingAdjust::tick()
     getInput("vy_limit", vyLimit);
     getInput("vtheta_limit", vthetaLimit);
     getInput("turn_first_threshold", turnFirstThreshold);
-    getInput("yaw_limit", yawLimit);
-    getInput("image_center_x_offset_px", imageCenterXOffset);
-    getInput("image_center_y_offset_px", imageCenterYOffset);
-    getInput("head_deadband_x_px", headDeadbandX);
-    getInput("head_deadband_y_px", headDeadbandY);
-    getInput("head_step_rad", headStep);
+    getInput("fixed_head_yaw", fixedHeadYaw);
     getInput("max_ball_range", maxBallRange);
 
     rangeTolerance = std::fabs(rangeTolerance);
@@ -761,10 +755,6 @@ NodeStatus ShootingAdjust::tick()
     vyLimit = std::fabs(vyLimit);
     vthetaLimit = std::fabs(vthetaLimit);
     turnFirstThreshold = std::fabs(turnFirstThreshold);
-    yawLimit = std::fabs(yawLimit);
-    headDeadbandX = std::fabs(headDeadbandX);
-    headDeadbandY = std::fabs(headDeadbandY);
-    headStep = std::fabs(headStep);
     maxBallRange = std::fabs(maxBallRange);
 
     double vx = 0.0;
@@ -783,8 +773,43 @@ NodeStatus ShootingAdjust::tick()
         bboxValid;
     if (!visualBallUsable || !brain->data->headStateReceived.load(std::memory_order_acquire))
     {
-        _hasLastProcessedBallFrame = false;
         return NodeStatus::SUCCESS;
+    }
+
+    const double measuredHeadPitch = brain->data->headPitch.load(std::memory_order_relaxed);
+    const double measuredHeadYaw = brain->data->headYaw.load(std::memory_order_relaxed);
+    const double ballPixelX = mean(
+        brain->data->ball.boundingBox.xmax,
+        brain->data->ball.boundingBox.xmin);
+    const double imageCenterX = brain->config->cameraImageWidth / 2.0;
+    int visualSearchDirection = 0;
+    if (ballPixelX > imageCenterX)
+    {
+        visualSearchDirection = -1;
+    }
+    else if (ballPixelX < imageCenterX)
+    {
+        visualSearchDirection = 1;
+    }
+    else if (std::fabs(measuredHeadYaw) > 0.0)
+    {
+        visualSearchDirection = measuredHeadYaw > 0.0 ? 1 : -1;
+    }
+
+    const auto ballTrackingGeneration =
+        brain->data->ballTrackingGeneration.load(std::memory_order_relaxed);
+    brain->data->lastBallSearchDirection.store(visualSearchDirection, std::memory_order_relaxed);
+    brain->data->lastBallSearchGeneration.store(ballTrackingGeneration, std::memory_order_relaxed);
+
+    const double hardwareYawLimit = fixedHeadYaw >= 0.0
+        ? std::fabs(brain->config->get_head_yaw_limit_left())
+        : std::fabs(brain->config->get_head_yaw_limit_right());
+    const double commandedHeadYaw = cap(fixedHeadYaw, hardwareYawLimit, -hardwareYawLimit);
+    const bool fixedHeadCommandSent = ballTrackingGeneration != _fixedHeadCommandGeneration;
+    if (fixedHeadCommandSent)
+    {
+        brain->client->moveHead(measuredHeadPitch, commandedHeadYaw);
+        _fixedHeadCommandGeneration = ballTrackingGeneration;
     }
 
     const double ballX = brain->data->ball.posToRobot.x;
@@ -810,7 +835,6 @@ NodeStatus ShootingAdjust::tick()
         theta = thetaError * ballYawGain;
     }
 
-    const double headYaw = brain->data->headYaw.load(std::memory_order_relaxed);
     const char *thetaSource = !ballLocationKnown
         ? "NO_DEPTH"
         : (!bodyUsable ? "OUT_OF_RANGE" : (std::fabs(thetaError) > stopAngle ? "BALL_YAW" : "DEADBAND"));
@@ -826,55 +850,9 @@ NodeStatus ShootingAdjust::tick()
     setOutput("vy", vy);
     setOutput("theta", theta);
 
-    const double measuredHeadPitch = brain->data->headPitch.load(std::memory_order_relaxed);
-    double targetHeadPitch = measuredHeadPitch;
-    double targetHeadYaw = headYaw;
-    double pixelErrorX = 0.0;
-    double pixelErrorY = 0.0;
-
-    if (bboxValid)
-    {
-        const double ballPixelX = mean(brain->data->ball.boundingBox.xmax, brain->data->ball.boundingBox.xmin);
-        const double ballPixelY = mean(brain->data->ball.boundingBox.ymax, brain->data->ball.boundingBox.ymin);
-        const double desiredPixelX = brain->config->cameraImageWidth / 2.0 + imageCenterXOffset;
-        const double desiredPixelY = brain->config->cameraImageHeight / 2.0 + imageCenterYOffset;
-        pixelErrorX = ballPixelX - desiredPixelX;
-        pixelErrorY = ballPixelY - desiredPixelY;
-
-        const auto ballTime = brain->data->ball.timePoint;
-        const bool sameVisionFrame =
-            _hasLastProcessedBallFrame &&
-            ballTime.nanoseconds() == _lastProcessedBallTime.nanoseconds();
-        if (!sameVisionFrame)
-        {
-            if (std::fabs(pixelErrorX) > headDeadbandX)
-            {
-                targetHeadYaw += pixelErrorX > 0.0 ? -headStep : headStep;
-            }
-            if (std::fabs(pixelErrorY) > headDeadbandY)
-            {
-                targetHeadPitch += pixelErrorY > 0.0 ? headStep : -headStep;
-            }
-
-            const double hardwareYawLimit = targetHeadYaw >= 0.0
-                ? std::fabs(brain->config->get_head_yaw_limit_left())
-                : std::fabs(brain->config->get_head_yaw_limit_right());
-            const double effectiveYawLimit = std::min(yawLimit, hardwareYawLimit);
-            targetHeadYaw = cap(targetHeadYaw, effectiveYawLimit, -effectiveYawLimit);
-
-            brain->client->moveHead(targetHeadPitch, targetHeadYaw);
-            _lastProcessedBallTime = ballTime;
-            _hasLastProcessedBallFrame = true;
-        }
-    }
-    else
-    {
-        _hasLastProcessedBallFrame = false;
-    }
-
     brain->log->log(
         "ShootingAdjust/vector",
-        format("ballX: %.3f ballY: %.3f ballRange: %.3f maxBallRange: %.3f ballYaw: %.3f rangeError: %.3f yError: %.3f thetaError: %.3f vx: %.3f vy: %.3f theta: %.3f source: %s headYaw: %.3f pixelErrorX: %.1f pixelErrorY: %.1f",
+        format("ballX: %.3f ballY: %.3f ballRange: %.3f maxBallRange: %.3f ballYaw: %.3f rangeError: %.3f yError: %.3f thetaError: %.3f vx: %.3f vy: %.3f theta: %.3f source: %s measuredHeadYaw: %.3f fixedHeadYaw: %.3f fixedHeadCommandSent: %d visualSearchDirection: %d",
                ballX,
                ballY,
                brain->data->ball.range,
@@ -887,9 +865,10 @@ NodeStatus ShootingAdjust::tick()
                vy,
                theta,
                thetaSource,
-               headYaw,
-               pixelErrorX,
-               pixelErrorY));
+               measuredHeadYaw,
+               commandedHeadYaw,
+               fixedHeadCommandSent,
+               visualSearchDirection));
     return NodeStatus::SUCCESS;
 }
 

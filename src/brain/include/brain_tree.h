@@ -726,8 +726,8 @@ private:
 /**
  * @brief Fine robot-relative positioning for a shooting pose.
  *
- * Tracks the ball head to an optionally shifted image center, then publishes
- * vx, vy, and theta outputs. The caller owns the single SetVelocity command.
+ * Commands one fixed head yaw for each ball acquisition, then publishes vx,
+ * vy, and theta outputs. The caller owns the single SetVelocity command.
  */
 class ShootingAdjust : public SyncActionNode
 {
@@ -750,12 +750,7 @@ public:
             InputPort<double>("vy_limit", 0.4, "Lateral speed limit (m/s)"),
             InputPort<double>("vtheta_limit", 0.8, "Body yaw speed limit (rad/s)"),
             InputPort<double>("turn_first_threshold", 0.50, "Stop translation while yaw error exceeds this angle (rad); zero disables it"),
-            InputPort<double>("yaw_limit", 0.70, "Maximum absolute head yaw for shifted shooting tracking (rad)"),
-            InputPort<double>("image_center_x_offset_px", 0.0, "Positive means the desired ball pixel is right of image center"),
-            InputPort<double>("image_center_y_offset_px", 0.0, "Positive means the desired ball pixel is below image center"),
-            InputPort<double>("head_deadband_x_px", 35.0, "Horizontal image deadband for head tracking (px)"),
-            InputPort<double>("head_deadband_y_px", 35.0, "Vertical image deadband for head tracking (px)"),
-            InputPort<double>("head_step_rad", 0.04, "Head yaw/pitch step per new vision frame (rad)"),
+            InputPort<double>("fixed_head_yaw", 0.0, "Head yaw commanded once whenever the ball is acquired (rad)"),
             InputPort<double>("max_ball_range", 1.20, "Maximum depth range that enables shooting-adjustment body motion (m)"),
             OutputPort<double>("vx"),
             OutputPort<double>("vy"),
@@ -767,8 +762,7 @@ public:
 
 private:
     Brain *brain;
-    rclcpp::Time _lastProcessedBallTime = rclcpp::Time(0, 0, RCL_ROS_TIME);
-    bool _hasLastProcessedBallFrame = false;
+    std::uint64_t _fixedHeadCommandGeneration = 0;
 };
 
 class CalibrateOdom : public SyncActionNode

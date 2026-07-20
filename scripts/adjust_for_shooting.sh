@@ -16,12 +16,7 @@ VX_LIMIT="0.40"
 VY_LIMIT="0.40"
 VTHETA_LIMIT="0.80"
 TURN_FIRST_THRESHOLD="0.50"
-YAW_LIMIT="0.70"
-IMAGE_CENTER_X_OFFSET_PX="50"
-IMAGE_CENTER_Y_OFFSET_PX="0"
-HEAD_DEADBAND_X_PX="35"
-HEAD_DEADBAND_Y_PX="35"
-HEAD_STEP_RAD="0.04"
+FIXED_HEAD_YAW="0.00"
 MAX_BALL_RANGE="1.20"
 REQUIRE_PLAY="false"
 
@@ -51,46 +46,37 @@ Robot motion:
   vtheta_limit=0.80               # rad/s
   turn_first_threshold=0.50       # radians; zero disables turn-first
 
-Shifted head tracking:
-  image_center_x_offset_px=50     # positive = desired ball pixel right of center
-  image_center_y_offset_px=0      # positive = desired ball pixel below center
-  head_deadband_x_px=35
-  head_deadband_y_px=35
-  head_step_rad=0.04
-  yaw_limit=0.70                  # maximum absolute head yaw, radians
+Fixed head:
+  fixed_head_yaw=0.00             # commanded once per ball acquisition, radians
 
 Test control:
   max_ball_range=1.20             # metres; zero outside this range
   require_play=false
 
 Examples:
-  # Start immediately. The ball is held a little right in the image:
+  # Start immediately and hold the head at zero yaw while the ball is visible:
   ./scripts/adjust_for_shooting.sh
 
   # Leave the ball on positive robot Y and use a slight positive yaw offset:
   ./scripts/adjust_for_shooting.sh target_y_offset=0.06 theta_offset=0.05
-
-  # Move the desired camera target lower and farther right:
-  ./scripts/adjust_for_shooting.sh image_center_x_offset_px=50 image_center_y_offset_px=20
 
 Positive target_y_offset is positive robot Y (normally robot-left). Positive
 theta_offset is counter-clockwise/left ball yaw. The node uses errors:
 ballX-target_range, ballY-target_y_offset, and ballYaw-theta_offset.
 
 Body theta is the offset-adjusted ball yaw, capped by vtheta_limit and zero
-inside stop_angle. The shifted image center controls the head only; it does not
-create a separate body-turn priority.
-
-An image-center offset must be larger than its matching head deadband to move
-the head. For example, the default 50 px X offset is larger than the default
-35 px X deadband.
+inside stop_angle. On each ball acquisition, the node commands fixed_head_yaw
+once while preserving the measured pitch. It sends no more head commands while
+the ball remains visible. If the ball is lost, body motion stops and CamFindBall
+performs head-only recovery; reacquisition commands fixed_head_yaw once again.
 
 RobotClient raises smaller nonzero requests to vx/vy=0.30 m/s and theta=0.25
 rad/s. Tolerances prevent those minimum speeds from causing oscillation.
 
-The script commands zero if the ball is unavailable or too far. It does not
-search, chase, or kick. Run only with the robot on the floor in open space;
-press s or Ctrl-C to stop.
+The script commands zero body motion if the ball is unavailable or too far. It
+uses head-only search after a previously seen ball is lost; it does not chase
+or kick. Run only with the robot on the floor in open space; press s or Ctrl-C
+to stop.
 USAGE
 }
 
@@ -130,7 +116,7 @@ set_value() {
     require_play)
       value="$(normalize_bool "$key" "$value")"
       ;;
-    target_y_offset|theta_offset|image_center_x_offset_px|image_center_y_offset_px)
+    target_y_offset|theta_offset|fixed_head_yaw)
       if ! is_signed_number "$value"; then
         echo "Invalid signed numeric value for ${key}: ${value}" >&2
         exit 2
@@ -158,12 +144,7 @@ set_value() {
     vy_limit) VY_LIMIT="$value" ;;
     vtheta_limit) VTHETA_LIMIT="$value" ;;
     turn_first_threshold) TURN_FIRST_THRESHOLD="$value" ;;
-    yaw_limit) YAW_LIMIT="$value" ;;
-    image_center_x_offset_px) IMAGE_CENTER_X_OFFSET_PX="$value" ;;
-    image_center_y_offset_px) IMAGE_CENTER_Y_OFFSET_PX="$value" ;;
-    head_deadband_x_px) HEAD_DEADBAND_X_PX="$value" ;;
-    head_deadband_y_px) HEAD_DEADBAND_Y_PX="$value" ;;
-    head_step_rad) HEAD_STEP_RAD="$value" ;;
+    fixed_head_yaw) FIXED_HEAD_YAW="$value" ;;
     max_ball_range) MAX_BALL_RANGE="$value" ;;
     require_play) REQUIRE_PLAY="$value" ;;
     *) echo "Unknown setting: ${key}" >&2; exit 2 ;;
@@ -177,7 +158,7 @@ parse_args() {
         usage
         exit 0
         ;;
-      target_range=*|target_y_offset=*|theta_offset=*|range_tolerance=*|y_tolerance=*|stop_angle=*|range_gain=*|y_gain=*|ball_yaw_gain=*|vx_limit=*|vy_limit=*|vtheta_limit=*|turn_first_threshold=*|yaw_limit=*|image_center_x_offset_px=*|image_center_y_offset_px=*|head_deadband_x_px=*|head_deadband_y_px=*|head_step_rad=*|max_ball_range=*|require_play=*)
+      target_range=*|target_y_offset=*|theta_offset=*|range_tolerance=*|y_tolerance=*|stop_angle=*|range_gain=*|y_gain=*|ball_yaw_gain=*|vx_limit=*|vy_limit=*|vtheta_limit=*|turn_first_threshold=*|fixed_head_yaw=*|max_ball_range=*|require_play=*)
         set_value "${1%%=*}" "${1#*=}"
         shift
         ;;
@@ -242,12 +223,7 @@ echo "  vx_limit=${VX_LIMIT}"
 echo "  vy_limit=${VY_LIMIT}"
 echo "  vtheta_limit=${VTHETA_LIMIT}"
 echo "  turn_first_threshold=${TURN_FIRST_THRESHOLD}"
-echo "  yaw_limit=${YAW_LIMIT}"
-echo "  image_center_x_offset_px=${IMAGE_CENTER_X_OFFSET_PX}"
-echo "  image_center_y_offset_px=${IMAGE_CENTER_Y_OFFSET_PX}"
-echo "  head_deadband_x_px=${HEAD_DEADBAND_X_PX}"
-echo "  head_deadband_y_px=${HEAD_DEADBAND_Y_PX}"
-echo "  head_step_rad=${HEAD_STEP_RAD}"
+echo "  fixed_head_yaw=${FIXED_HEAD_YAW}"
 echo "  max_ball_range=${MAX_BALL_RANGE}"
 echo "  require_play=${REQUIRE_PLAY}"
 
@@ -293,19 +269,17 @@ cat > "$TREE_PATH" <<XML
                             vy_limit="${VY_LIMIT}"
                             vtheta_limit="${VTHETA_LIMIT}"
                             turn_first_threshold="${TURN_FIRST_THRESHOLD}"
-                            yaw_limit="${YAW_LIMIT}"
-                            image_center_x_offset_px="${IMAGE_CENTER_X_OFFSET_PX}"
-                            image_center_y_offset_px="${IMAGE_CENTER_Y_OFFSET_PX}"
-                            head_deadband_x_px="${HEAD_DEADBAND_X_PX}"
-                            head_deadband_y_px="${HEAD_DEADBAND_Y_PX}"
-                            head_step_rad="${HEAD_STEP_RAD}"
+                            fixed_head_yaw="${FIXED_HEAD_YAW}"
                             max_ball_range="${MAX_BALL_RANGE}"
                             vx="{shoot_vx}"
                             vy="{shoot_vy}"
                             theta="{shoot_theta}" />
             <SetVelocity x="{shoot_vx}" y="{shoot_vy}" theta="{shoot_theta}" />
           </Sequence>
-          <SetVelocity x="0" y="0" theta="0" />
+          <Sequence name="recover missing ball with head only">
+            <SetVelocity x="0" y="0" theta="0" />
+            <CamFindBall body_search_speed="0.0" theta="{recovery_theta}" />
+          </Sequence>
         </IfThenElse>
       </ReactiveSequence>
     </Sequence>
@@ -332,7 +306,7 @@ else
   echo "Running. The robot moves only for a usable ball within max_ball_range."
 fi
 echo "Press s or Ctrl-C to stop."
-echo "Diagnostics: tail -f brain.log | grep -E 'ShootingAdjust/vector|RobotClient/setVelocity_(in|out)'"
+echo "Diagnostics: tail -f brain.log | grep -E 'ShootingAdjust/vector|CamFindBall/(start|search)|RobotClient/setVelocity_(in|out)'"
 
 while true; do
   if ! read -rsn1 key; then
