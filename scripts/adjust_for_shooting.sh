@@ -70,10 +70,8 @@ once while preserving the measured pitch. It sends no more head commands while
 the ball remains visible. If the ball is lost, body motion stops and the head
 remains untouched while the script waits for visual reacquisition.
 
-This test bypasses RobotClient's global minimum-speed promotion, so vx_limit,
-vy_limit, and vtheta_limit are honored. Very small commands may be below the
-physical locomotion controller's usable range; increase the corresponding
-limit if an axis does not respond.
+RobotClient raises smaller nonzero requests to vx/vy=0.30 m/s and theta=0.25
+rad/s. Tolerances prevent those minimum speeds from causing oscillation.
 
 The script commands zero body motion if the ball is unavailable or too far. It
 does not search, chase, or kick. Run only with the robot on the floor in open
@@ -275,12 +273,7 @@ cat > "$TREE_PATH" <<XML
                             vx="{shoot_vx}"
                             vy="{shoot_vy}"
                             theta="{shoot_theta}" />
-            <SetVelocity x="{shoot_vx}"
-                         y="{shoot_vy}"
-                         theta="{shoot_theta}"
-                         apply_min_x="false"
-                         apply_min_y="false"
-                         apply_min_theta="false" />
+            <SetVelocity x="{shoot_vx}" y="{shoot_vy}" theta="{shoot_theta}" />
           </Sequence>
           <SetVelocity x="0" y="0" theta="0" />
         </IfThenElse>
