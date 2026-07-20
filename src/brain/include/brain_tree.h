@@ -572,6 +572,9 @@ public:
             InputPort<double>("x", 0, "Default x is 0"),
             InputPort<double>("y", 0, "Default y is 0"),
             InputPort<double>("theta", 0, "Default  theta is 0"),
+            InputPort<bool>("apply_min_x", true, "Raise small nonzero x commands to the configured minimum"),
+            InputPort<bool>("apply_min_y", true, "Raise small nonzero y commands to the configured minimum"),
+            InputPort<bool>("apply_min_theta", true, "Raise small nonzero theta commands to the configured minimum"),
         };
     }
 

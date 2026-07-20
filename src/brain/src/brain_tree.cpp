@@ -126,12 +126,22 @@ void BrainTree::tick()
 NodeStatus SetVelocity::tick()
 {
     double x, y, theta;
+    bool applyMinX, applyMinY, applyMinTheta;
     vector<double> targetVec;
     getInput("x", x);
     getInput("y", y);
     getInput("theta", theta);
+    getInput("apply_min_x", applyMinX);
+    getInput("apply_min_y", applyMinY);
+    getInput("apply_min_theta", applyMinTheta);
 
-    auto res = brain->client->setVelocity(x, y, theta);
+    auto res = brain->client->setVelocity(
+        x,
+        y,
+        theta,
+        applyMinX,
+        applyMinY,
+        applyMinTheta);
     return NodeStatus::SUCCESS;
 }
 

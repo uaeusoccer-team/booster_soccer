@@ -40,12 +40,19 @@ public:
      * @param x double, 
      * @param y double, 
      * @param theta double, 
-     * @param applyMinX, applyMinY, applyMinTheta bool 
+     * @param applyMinX, applyMinY, applyMinTheta Whether to raise a small
+     * nonzero command to the configured minimum speed for that axis.
      * 
     * @return int , 0 indicates success
      * 
     */
-    int setVelocity(double x, double y, double theta);
+    int setVelocity(
+        double x,
+        double y,
+        double theta,
+        bool applyMinX = true,
+        bool applyMinY = true,
+        bool applyMinTheta = true);
 
     /**
      * @brief Sign of the last non-zero angular velocity actually sent.
