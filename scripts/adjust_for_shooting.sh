@@ -67,16 +67,15 @@ ballX-target_range, ballY-target_y_offset, and ballYaw-theta_offset.
 Body theta is the offset-adjusted ball yaw, capped by vtheta_limit and zero
 inside stop_angle. On each ball acquisition, the node commands fixed_head_yaw
 once while preserving the measured pitch. It sends no more head commands while
-the ball remains visible. If the ball is lost, body motion stops and CamFindBall
-performs head-only recovery; reacquisition commands fixed_head_yaw once again.
+the ball remains visible. If the ball is lost, body motion stops and the head
+remains untouched while the script waits for visual reacquisition.
 
 RobotClient raises smaller nonzero requests to vx/vy=0.30 m/s and theta=0.25
 rad/s. Tolerances prevent those minimum speeds from causing oscillation.
 
 The script commands zero body motion if the ball is unavailable or too far. It
-uses head-only search after a previously seen ball is lost; it does not chase
-or kick. Run only with the robot on the floor in open space; press s or Ctrl-C
-to stop.
+does not search, chase, or kick. Run only with the robot on the floor in open
+space; press s or Ctrl-C to stop.
 USAGE
 }
 
@@ -276,10 +275,7 @@ cat > "$TREE_PATH" <<XML
                             theta="{shoot_theta}" />
             <SetVelocity x="{shoot_vx}" y="{shoot_vy}" theta="{shoot_theta}" />
           </Sequence>
-          <Sequence name="recover missing ball with head only">
-            <SetVelocity x="0" y="0" theta="0" />
-            <CamFindBall body_search_speed="0.0" theta="{recovery_theta}" />
-          </Sequence>
+          <SetVelocity x="0" y="0" theta="0" />
         </IfThenElse>
       </ReactiveSequence>
     </Sequence>
@@ -306,7 +302,7 @@ else
   echo "Running. The robot moves only for a usable ball within max_ball_range."
 fi
 echo "Press s or Ctrl-C to stop."
-echo "Diagnostics: tail -f brain.log | grep -E 'ShootingAdjust/vector|CamFindBall/(start|search)|RobotClient/setVelocity_(in|out)'"
+echo "Diagnostics: tail -f brain.log | grep -E 'ShootingAdjust/vector|RobotClient/setVelocity_(in|out)'"
 
 while true; do
   if ! read -rsn1 key; then
