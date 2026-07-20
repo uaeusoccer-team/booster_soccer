@@ -756,6 +756,7 @@ public:
             InputPort<double>("head_deadband_x_px", 35.0, "Horizontal image deadband for head tracking (px)"),
             InputPort<double>("head_deadband_y_px", 35.0, "Vertical image deadband for head tracking (px)"),
             InputPort<double>("head_step_rad", 0.04, "Head yaw/pitch step per new vision frame (rad)"),
+            InputPort<double>("max_ball_range", 1.20, "Maximum depth range that enables shooting-adjustment body motion (m)"),
             OutputPort<double>("vx"),
             OutputPort<double>("vy"),
             OutputPort<double>("theta")

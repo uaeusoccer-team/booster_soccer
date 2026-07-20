@@ -78,7 +78,6 @@ segmentation_model:
 use_depth: true
 ball_pose_estimator:
   use_depth: true
-  filter_distance: 3.0
   check_ball_height: true
   depth_sample_step: 4
   min_depth_points: 12
@@ -88,6 +87,7 @@ ball_pose_estimator:
   ground_ring_scale: 1.5
   min_ground_points: 12
   max_height_above_ground: 0.35
+  cluster_neighbor_distance: 0.20
 human_like_pose_estimator:
   use_depth: false
   down_sample_leaf_size: 0.01

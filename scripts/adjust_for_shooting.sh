@@ -278,7 +278,7 @@ cat > "$TREE_PATH" <<XML
       <ReactiveSequence _while="${RUN_CONDITION}" name="shooting adjustment">
         <CheckAndStandUp />
         <IfThenElse>
-          <ScriptCondition name="Usable nearby ball?" code="ball_visible &amp;&amp; ball_location_known &amp;&amp; ball_range &lt;= ${MAX_BALL_RANGE}" />
+          <ScriptCondition name="Ball visible?" code="ball_visible" />
           <Sequence name="track and position for shot">
             <ShootingAdjust target_range="${TARGET_RANGE}"
                             target_y_offset="${TARGET_Y_OFFSET}"
@@ -299,6 +299,7 @@ cat > "$TREE_PATH" <<XML
                             head_deadband_x_px="${HEAD_DEADBAND_X_PX}"
                             head_deadband_y_px="${HEAD_DEADBAND_Y_PX}"
                             head_step_rad="${HEAD_STEP_RAD}"
+                            max_ball_range="${MAX_BALL_RANGE}"
                             vx="{shoot_vx}"
                             vy="{shoot_vy}"
                             theta="{shoot_theta}" />

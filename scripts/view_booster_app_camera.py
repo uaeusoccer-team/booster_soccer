@@ -64,12 +64,11 @@ class Detection:
 
     def has_depth(self) -> bool:
         """Return whether this detection has a usable depth position."""
-        if self.position_confidence > 0:
-            return True
-        if len(self.position) < 3:
+        if self.position_confidence <= 0 or len(self.position) < 3:
             return False
-        return all(math.isfinite(value) for value in self.position) and any(
-            abs(value) > 0.0001 for value in self.position
+        return (
+            all(math.isfinite(value) for value in self.position)
+            and math.hypot(self.position[0], self.position[1]) > 0.0001
         )
 
 
@@ -605,7 +604,39 @@ INDEX_HTML = """<!doctype html>
       return `${value.toFixed(2)}m`;
     }
 
-    function ballPositionLines(det) {
+    function hasValidDepth(det) {
+      const depthPosition = numericVector(det.position);
+      return Number(det.position_confidence) > 0 &&
+        depthPosition.length >= 3 &&
+        Math.hypot(depthPosition[0], depthPosition[1]) > 0.0001;
+    }
+
+    function selectedBallIndex(detections) {
+      let selected = -1;
+      for (let index = 0; index < detections.length; index += 1) {
+        const candidate = detections[index];
+        if (!detectionIsBall(candidate)) {
+          continue;
+        }
+        if (selected < 0) {
+          selected = index;
+          continue;
+        }
+
+        const selectedDetection = detections[selected];
+        const candidateHasDepth = hasValidDepth(candidate);
+        const selectedHasDepth = hasValidDepth(selectedDetection);
+        const candidateConfidence = Number(candidate.confidence) || 0;
+        const selectedConfidence = Number(selectedDetection.confidence) || 0;
+        if ((candidateHasDepth && !selectedHasDepth) ||
+            (candidateHasDepth === selectedHasDepth && candidateConfidence > selectedConfidence)) {
+          selected = index;
+        }
+      }
+      return selected;
+    }
+
+    function ballPositionLines(det, isSelected) {
       if (!detectionIsBall(det)) {
         return [];
       }
@@ -613,13 +644,21 @@ INDEX_HTML = """<!doctype html>
       const depthPosition = numericVector(det.position);
       const projection = numericVector(det.position_projection);
       const lines = [];
+      const depthValid = hasValidDepth(det);
 
-      if (vectorHasSignal(depthPosition)) {
+      if (isSelected) {
+        lines.push(depthValid ? 'control=BODY DEPTH' : 'control=HEAD ONLY');
+      } else {
+        lines.push(depthValid ? 'control=DEPTH CANDIDATE' : 'control=VISUAL ONLY');
+      }
+
+      if (depthValid) {
         const x = depthPosition[0] ?? 0;
         const y = depthPosition[1] ?? 0;
         const z = depthPosition[2] ?? 0;
-        const range = Math.hypot(x, y, z);
-        lines.push(`depth x=${formatMeters(x)} y=${formatMeters(y)} z=${formatMeters(z)} r=${formatMeters(range)}`);
+        const range = Math.hypot(x, y);
+        const yaw = Math.atan2(y, x);
+        lines.push(`depth x=${formatMeters(x)} y=${formatMeters(y)} z=${formatMeters(z)} r=${formatMeters(range)} yaw=${yaw.toFixed(3)}rad`);
       } else {
         lines.push('depth none');
       }
@@ -627,7 +666,8 @@ INDEX_HTML = """<!doctype html>
       if (vectorHasSignal(projection)) {
         const x = projection[0] ?? 0;
         const y = projection[1] ?? 0;
-        lines.push(`proj x=${formatMeters(x)} y=${formatMeters(y)}`);
+        const yaw = Math.atan2(y, x);
+        lines.push(`projection diagnostic x=${formatMeters(x)} y=${formatMeters(y)} yaw=${yaw.toFixed(3)}rad`);
       }
 
       return lines;
@@ -635,7 +675,8 @@ INDEX_HTML = """<!doctype html>
 
     function renderDetections(detections, layer) {
       setOverlayViewBox();
-      for (const det of detections) {
+      const selectedBall = selectedBallIndex(detections);
+      for (const [detectionIndex, det] of detections.entries()) {
         const x = Number(det.xmin);
         const y = Number(det.ymin);
         const width = Number(det.xmax) - x;
@@ -648,7 +689,7 @@ INDEX_HTML = """<!doctype html>
         const textY = y > 26 ? y - 7 : y + 25;
         const centerX = Math.round(x + width / 2);
         const centerY = Math.round(y + height / 2);
-        const positionLines = ballPositionLines(det);
+        const positionLines = ballPositionLines(det, detectionIndex === selectedBall);
         const lineGap = 24;
         const infoLines = [`center=(${centerX},${centerY})`, ...positionLines];
         const belowStartY = y + height + 34;

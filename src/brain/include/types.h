@@ -103,6 +103,7 @@ struct GameObject
     double confidence;
     int positionConfidence = 0;
     Point posToRobot;
+    Point projectionToRobot;
 
     Point posToField;
     double range;

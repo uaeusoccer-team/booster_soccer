@@ -1,4 +1,5 @@
 #include <iostream>
+#include <cmath>
 #include <string>
 #include <fstream> 
 #include <yaml-cpp/yaml.h>
@@ -1668,11 +1669,42 @@ vector<GameObject> Brain::getGameObjects(const vision_interface::msg::Detections
         gObj.boundingBox.ymax = obj.ymax;
         gObj.boundingBox.ymin = obj.ymin;
         gObj.confidence = obj.confidence;
-        gObj.positionConfidence = obj.position_confidence;
 
-        // Do not use depth measurement, directly use projection distance
-        gObj.posToRobot.x = obj.position_projection[0];
-        gObj.posToRobot.y = obj.position_projection[1];
+        gObj.projectionToRobot = {0.0, 0.0, 0.0};
+        if (obj.position_projection.size() >= 2 &&
+            std::isfinite(obj.position_projection[0]) &&
+            std::isfinite(obj.position_projection[1])) {
+            gObj.projectionToRobot.x = obj.position_projection[0];
+            gObj.projectionToRobot.y = obj.position_projection[1];
+            if (obj.position_projection.size() >= 3 && std::isfinite(obj.position_projection[2])) {
+                gObj.projectionToRobot.z = obj.position_projection[2];
+            }
+        }
+
+        const bool isBall = obj.label == "Ball";
+        const bool hasValidDepthPosition =
+            isBall &&
+            obj.position_confidence > 0 &&
+            obj.position.size() >= 3 &&
+            std::isfinite(obj.position[0]) &&
+            std::isfinite(obj.position[1]) &&
+            std::isfinite(obj.position[2]) &&
+            norm(obj.position[0], obj.position[1]) > 0.0001;
+
+        gObj.positionConfidence = isBall
+            ? (hasValidDepthPosition ? obj.position_confidence : 0)
+            : obj.position_confidence;
+        if (hasValidDepthPosition) {
+            gObj.posToRobot.x = obj.position[0];
+            gObj.posToRobot.y = obj.position[1];
+            gObj.posToRobot.z = obj.position[2];
+        } else if (isBall) {
+            // A visual-only ball may move the head, but it must not supply body
+            // coordinates through the RGB ground projection.
+            gObj.posToRobot = {0.0, 0.0, 0.0};
+        } else {
+            gObj.posToRobot = gObj.projectionToRobot;
+        }
 
         // Calculate angles
         gObj.range = norm(gObj.posToRobot.x, gObj.posToRobot.y);
@@ -1696,23 +1728,32 @@ void Brain::detectProcessBalls(const vector<GameObject> &ballObjs)
 {
     static rclcpp::Time lastSeenRealBallTime;
     const bool wasTrackingBall = data->ballDetected;
-    double bestConfidence = 0.0;
+    double bestConfidence = -1.0;
+    bool bestHasDepth = false;
     int indexRealBall = -1;
 
     for (int i = 0; i < ballObjs.size(); i++)
     {
         const auto &ballObj = ballObjs[i];
 
-        // Prevent misidentifying lights in the sky as balls
-        if (ballObj.posToRobot.x < -0.5 || ballObj.posToRobot.x > 15.0)
+        const bool hasDepth = ballObj.positionConfidence > 0;
+        const double candidateX = hasDepth
+            ? ballObj.posToRobot.x
+            : ballObj.projectionToRobot.x;
+
+        // Prevent misidentifying lights in the sky as balls. Visual-only
+        // candidates use projection for filtering, never for body motion.
+        if (candidateX < -0.5 || candidateX > 15.0)
             continue;
 
         if (ballObj.confidence < config->get_ball_confidence_threshold())
             continue;
 
-        if (ballObj.confidence > bestConfidence)
+        if ((hasDepth && !bestHasDepth) ||
+            (hasDepth == bestHasDepth && ballObj.confidence > bestConfidence))
         {
             bestConfidence = ballObj.confidence;
+            bestHasDepth = hasDepth;
             indexRealBall = i;
         }
     }
@@ -1731,8 +1772,10 @@ void Brain::detectProcessBalls(const vector<GameObject> &ballObjs)
             data->ballTrackingGeneration.fetch_add(1, std::memory_order_relaxed);
         }
 
-        tree->setEntry<bool>("ball_location_known", ballObjs[indexRealBall].positionConfidence > 0);
-        updateBallOut();
+        tree->setEntry<bool>("ball_location_known", bestHasDepth);
+        if (bestHasDepth) {
+            updateBallOut();
+        }
 
         lastSeenRealBallTime = now;
         data->lose_ball = false;

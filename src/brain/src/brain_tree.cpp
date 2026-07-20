@@ -197,15 +197,16 @@ NodeStatus CamTrackBall::tick()
         return NodeStatus::SUCCESS;
     }
 
-    const double ballYaw = brain->data->ball.yawToRobot;
+    const bool ballLocationKnown = brain->tree->getEntry<bool>("ball_location_known");
+    const double ballYaw = ballLocationKnown ? brain->data->ball.yawToRobot : 0.0;
     const double normalPitch = brain->config->get_head_pitch_limit_up();
     const double pitchDown = std::max(0.0, measuredHeadPitch - normalPitch);
     const double pitchMultiplier = 1.0 + pitchTurnGain * pitchDown;
     const double vthetaLimit = std::fabs(brain->config->get_vtheta_limit());
     double theta = 0.0;
-    const char *thetaSource = "DEADBAND";
+    const char *thetaSource = ballLocationKnown ? "DEADBAND" : "NO_DEPTH";
 
-    if (std::fabs(ballYaw) > stopAngle)
+    if (ballLocationKnown && std::fabs(ballYaw) > stopAngle)
     {
         const double requestedTheta = ballYaw * ballYawGain * pitchMultiplier;
         theta = cap(requestedTheta, vthetaLimit, -vthetaLimit);
@@ -268,7 +269,7 @@ NodeStatus CamTrackBall::tick()
 
     brain->log->log(
         "CamTrackBall/direct_pixel",
-        format("ballX: %.1f ballY: %.1f dx: %.1f dy: %.1f headPitch: %.3f headYaw: %.3f projectionX: %.3f projectionY: %.3f ballYaw: %.3f pitchMultiplier: %.3f theta: %.3f source: %s visualSearchDirection: %d",
+        format("ballX: %.1f ballY: %.1f dx: %.1f dy: %.1f headPitch: %.3f headYaw: %.3f depthX: %.3f depthY: %.3f ballYaw: %.3f pitchMultiplier: %.3f theta: %.3f source: %s visualSearchDirection: %d",
                ballX,
                ballY,
                dx,
@@ -710,7 +711,7 @@ NodeStatus SimpleChase::tick()
 
     brain->log->log(
         "SimpleChase/vector",
-        format("range: %.3f ballX: %.3f ballY: %.3f vx: %.3f vy: %.3f",
+        format("range: %.3f ballX: %.3f ballY: %.3f vx: %.3f vy: %.3f source: DEPTH",
                ballRange,
                brain->data->ball.posToRobot.x,
                brain->data->ball.posToRobot.y,
@@ -726,7 +727,7 @@ NodeStatus ShootingAdjust::tick()
     double rangeTolerance, yTolerance, stopAngle;
     double rangeGain, yGain, ballYawGain;
     double vxLimit, vyLimit, vthetaLimit;
-    double turnFirstThreshold, yawLimit;
+    double turnFirstThreshold, yawLimit, maxBallRange;
     double imageCenterXOffset, imageCenterYOffset, headDeadbandX, headDeadbandY, headStep;
 
     getInput("target_range", targetRange);
@@ -748,6 +749,7 @@ NodeStatus ShootingAdjust::tick()
     getInput("head_deadband_x_px", headDeadbandX);
     getInput("head_deadband_y_px", headDeadbandY);
     getInput("head_step_rad", headStep);
+    getInput("max_ball_range", maxBallRange);
 
     rangeTolerance = std::fabs(rangeTolerance);
     yTolerance = std::fabs(yTolerance);
@@ -763,6 +765,7 @@ NodeStatus ShootingAdjust::tick()
     headDeadbandX = std::fabs(headDeadbandX);
     headDeadbandY = std::fabs(headDeadbandY);
     headStep = std::fabs(headStep);
+    maxBallRange = std::fabs(maxBallRange);
 
     double vx = 0.0;
     double vy = 0.0;
@@ -774,12 +777,11 @@ NodeStatus ShootingAdjust::tick()
     const bool bboxValid =
         brain->data->ball.boundingBox.xmax > brain->data->ball.boundingBox.xmin &&
         brain->data->ball.boundingBox.ymax > brain->data->ball.boundingBox.ymin;
-    const bool ballUsable =
+    const bool visualBallUsable =
         brain->tree->getEntry<bool>("ball_visible") &&
-        brain->tree->getEntry<bool>("ball_location_known") &&
         brain->data->ballDetected &&
         bboxValid;
-    if (!ballUsable || !brain->data->headStateReceived.load(std::memory_order_acquire))
+    if (!visualBallUsable || !brain->data->headStateReceived.load(std::memory_order_acquire))
     {
         _hasLastProcessedBallFrame = false;
         return NodeStatus::SUCCESS;
@@ -788,28 +790,32 @@ NodeStatus ShootingAdjust::tick()
     const double ballX = brain->data->ball.posToRobot.x;
     const double ballY = brain->data->ball.posToRobot.y;
     const double ballYaw = brain->data->ball.yawToRobot;
-    const double rangeError = ballX - targetRange;
-    const double yError = ballY - targetYOffset;
-    const double thetaError = toPInPI(ballYaw - thetaOffset);
+    const bool ballLocationKnown = brain->tree->getEntry<bool>("ball_location_known");
+    const bool bodyUsable = ballLocationKnown && brain->data->ball.range <= maxBallRange;
+    const double rangeError = bodyUsable ? ballX - targetRange : 0.0;
+    const double yError = bodyUsable ? ballY - targetYOffset : 0.0;
+    const double thetaError = bodyUsable ? toPInPI(ballYaw - thetaOffset) : 0.0;
 
-    if (std::fabs(rangeError) > rangeTolerance)
+    if (bodyUsable && std::fabs(rangeError) > rangeTolerance)
     {
         vx = cap(rangeError * rangeGain, vxLimit, -vxLimit);
     }
-    if (std::fabs(yError) > yTolerance)
+    if (bodyUsable && std::fabs(yError) > yTolerance)
     {
         vy = cap(yError * yGain, vyLimit, -vyLimit);
     }
 
-    if (std::fabs(thetaError) > stopAngle)
+    if (bodyUsable && std::fabs(thetaError) > stopAngle)
     {
         theta = thetaError * ballYawGain;
     }
 
     const double headYaw = brain->data->headYaw.load(std::memory_order_relaxed);
-    const char *thetaSource = std::fabs(thetaError) > stopAngle ? "BALL_YAW" : "DEADBAND";
+    const char *thetaSource = !ballLocationKnown
+        ? "NO_DEPTH"
+        : (!bodyUsable ? "OUT_OF_RANGE" : (std::fabs(thetaError) > stopAngle ? "BALL_YAW" : "DEADBAND"));
 
-    if (turnFirstThreshold > 0.0 && std::fabs(thetaError) > turnFirstThreshold)
+    if (bodyUsable && turnFirstThreshold > 0.0 && std::fabs(thetaError) > turnFirstThreshold)
     {
         vx = 0.0;
         vy = 0.0;
@@ -868,9 +874,11 @@ NodeStatus ShootingAdjust::tick()
 
     brain->log->log(
         "ShootingAdjust/vector",
-        format("ballX: %.3f ballY: %.3f ballYaw: %.3f rangeError: %.3f yError: %.3f thetaError: %.3f vx: %.3f vy: %.3f theta: %.3f source: %s headYaw: %.3f pixelErrorX: %.1f pixelErrorY: %.1f",
+        format("ballX: %.3f ballY: %.3f ballRange: %.3f maxBallRange: %.3f ballYaw: %.3f rangeError: %.3f yError: %.3f thetaError: %.3f vx: %.3f vy: %.3f theta: %.3f source: %s headYaw: %.3f pixelErrorX: %.1f pixelErrorY: %.1f",
                ballX,
                ballY,
+               brain->data->ball.range,
+               maxBallRange,
                ballYaw,
                rangeError,
                yError,
