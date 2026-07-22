@@ -545,6 +545,7 @@ INDEX_HTML = """<!doctype html>
     img, svg { position: absolute; inset: 0; display: block; width: 100%; height: 100%; object-fit: contain; }
     svg { pointer-events: none; }
     .box { fill: none; stroke: #00e676; stroke-width: 3; vector-effect: non-scaling-stroke; }
+    .box-visual-only { stroke: #ffd600; }
     .box-text { fill: #fff; font-size: 22px; font-weight: 700; paint-order: stroke; stroke: #000; stroke-width: 4px; stroke-linejoin: round; }
     .center-dot { fill: #ff2d16; stroke: #7a0e06; stroke-width: 2; vector-effect: non-scaling-stroke; }
     .center-text { fill: #ffe94a; font-size: 22px; font-weight: 800; paint-order: stroke; stroke: #000; stroke-width: 4px; stroke-linejoin: round; }
@@ -663,9 +664,10 @@ INDEX_HTML = """<!doctype html>
       const [x, y, z] = position;
       const range = Math.hypot(x, y);
       const yaw = Math.atan2(y, x);
+      const yawDegrees = yaw * 180 / Math.PI;
       return [
         'POSITION VALID',
-        `x=${formatMeters(x)} y=${formatMeters(y)} z=${formatMeters(z)} r=${formatMeters(range)} yaw=${yaw.toFixed(3)}rad`,
+        `x=${formatMeters(x)} y=${formatMeters(y)} z=${formatMeters(z)} r=${formatMeters(range)} yaw=${yaw.toFixed(3)}rad/${yawDegrees.toFixed(1)}deg`,
       ];
     }
 
@@ -698,21 +700,23 @@ INDEX_HTML = """<!doctype html>
       }
 
       const selected = detections[selectedIndex];
+      const position = validPosition(selected);
+      if (position === null) {
+        return;
+      }
+
       const box = detectionBox(selected);
       const normalized = box === null ? null : normalizedBox(box);
       if (normalized === null) {
         return;
       }
 
-      const position = validPosition(selected);
       const now = Number.isFinite(observedAt) ? observedAt : Date.now();
       lastSelectedBall = {
         box: normalized,
         seenAt: now,
-        lastValidPosition: position ?? lastSelectedBall?.lastValidPosition ?? null,
-        positionSeenAt: position !== null
-          ? now
-          : lastSelectedBall?.positionSeenAt ?? null,
+        lastValidPosition: position,
+        positionSeenAt: now,
       };
     }
 
@@ -777,7 +781,10 @@ INDEX_HTML = """<!doctype html>
           img.naturalHeight && infoBlockBottom > img.naturalHeight
             ? Math.max(24, aboveStartY)
             : belowStartY;
-        layer.appendChild(makeSvg('rect', {class: 'box', x, y, width, height, rx: 2}));
+        const boxClass = detectionIsBall(det) && !hasValidPosition(det)
+          ? 'box box-visual-only'
+          : 'box';
+        layer.appendChild(makeSvg('rect', {class: boxClass, x, y, width, height, rx: 2}));
         layer.appendChild(makeSvg('text', {class: 'box-text', x: x + 4, y: textY}, label));
         layer.lastChild.textContent = label;
         layer.appendChild(makeSvg('circle', {class: 'center-dot', cx: centerX, cy: centerY, r: 8}));

@@ -1,7 +1,12 @@
 #include "booster_vision/pose_estimator/pose_estimator.h"
 
 #include <algorithm>
+#include <atomic>
+#include <chrono>
 #include <cmath>
+#include <cstdint>
+#include <iostream>
+#include <limits>
 #include <utility>
 #include <vector>
 
@@ -11,8 +16,6 @@
 namespace booster_vision {
 
 namespace {
-
-constexpr float kInnerEllipseRadiusScale = 0.8f;
 
 float Median(std::vector<float> values) {
     if (values.empty()) return 0.0f;
@@ -52,9 +55,40 @@ Pose PoseEstimator::EstimateByDepth(const Pose &p_eye2base, const DetectionRes &
 }
 
 void BallPoseEstimator::Init(const YAML::Node &node) {
+    auto finite_or = [](const YAML::Node &value, float fallback) {
+        const float parsed = as_or<float>(value, fallback);
+        return std::isfinite(parsed) ? parsed : fallback;
+    };
+
     use_depth_ = as_or<bool>(node["use_depth"], false);
-    depth_sample_step_ = as_or<int>(node["depth_sample_step"], 4);
-    min_depth_points_ = as_or<int>(node["min_depth_points"], 12);
+    // Debugging is explicitly enabled in vision.yaml for this validation phase.
+    // Keep the compiled fallback quiet if that temporary key is later removed.
+    debug_depth_gate_ = as_or<bool>(node["debug_depth_gate"], false);
+    depth_sample_step_ = std::max(1, as_or<int>(node["depth_sample_step"], 2));
+    min_ground_points_ = std::max(1, as_or<int>(node["min_ground_points"], 12));
+    min_depth_points_ = std::max(1, as_or<int>(node["min_depth_points"], 8));
+    min_points_above_ground_ = std::max(1, as_or<int>(node["min_points_above_ground"], 3));
+    min_above_ground_ratio_ = std::clamp(
+        finite_or(node["min_above_ground_ratio"], 0.05f), 0.0f, 1.0f);
+    min_height_above_ground_ = std::max(
+        0.0f, finite_or(node["min_height_above_ground"], 0.04f));
+    max_height_above_ground_ = std::max(
+        min_height_above_ground_, finite_or(node["max_height_above_ground"], 0.35f));
+    ground_ring_scale_ = std::clamp(
+        finite_or(node["ground_ring_scale"], 1.5f), 1.01f, 4.0f);
+
+    if (debug_depth_gate_) {
+        std::cout << "[ball_depth_gate] config"
+                  << " step=" << depth_sample_step_
+                  << " floor_min=" << min_ground_points_
+                  << " bbox_min=" << min_depth_points_
+                  << " elevated_min=" << min_points_above_ground_
+                  << " ratio_min=" << min_above_ground_ratio_
+                  << " height_min=" << min_height_above_ground_
+                  << " height_max=" << max_height_above_ground_
+                  << " ring_scale=" << ground_ring_scale_
+                  << std::endl;
+    }
 }
 
 Pose BallPoseEstimator::EstimateByColor(const Pose &p_eye2base, const DetectionRes &detection, const cv::Mat &rgb) {
@@ -66,12 +100,61 @@ Pose BallPoseEstimator::EstimateByColor(const Pose &p_eye2base, const DetectionR
 }
 
 Pose BallPoseEstimator::EstimateByDepth(const Pose &p_eye2base, const DetectionRes &detection, const cv::Mat &rgb, const cv::Mat &depth) {
-    if (!use_depth_ || depth.empty()) return Pose();
-    if (depth.depth() != CV_32F || depth.channels() != 1) return Pose();
+    const float unknown = std::numeric_limits<float>::quiet_NaN();
+    const cv::Point3f unknown_position(unknown, unknown, unknown);
+    auto log_gate = [&](const char *result, size_t ground_points, int bbox_points,
+                        int elevated_points, float elevated_ratio, float local_ground_z,
+                        float observed_height_min, float observed_height_max,
+                        const cv::Point3f &position) {
+        if (!debug_depth_gate_) return;
+
+        static std::atomic<int64_t> last_log_ms{0};
+        const int64_t now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                   std::chrono::steady_clock::now().time_since_epoch())
+                                   .count();
+        int64_t previous_ms = last_log_ms.load(std::memory_order_relaxed);
+        if (previous_ms != 0 && now_ms - previous_ms < 1000) return;
+        if (!last_log_ms.compare_exchange_strong(
+                previous_ms, now_ms, std::memory_order_relaxed, std::memory_order_relaxed)) {
+            return;
+        }
+
+        std::cout << "[ball_depth_gate] result=" << result
+                  << " floor=" << ground_points
+                  << " bbox=" << bbox_points
+                  << " elevated=" << elevated_points
+                  << " ratio=" << elevated_ratio
+                  << " ground_z=" << local_ground_z
+                  << " height_min=" << observed_height_min
+                  << " height_max=" << observed_height_max;
+        if (std::isfinite(position.x) && std::isfinite(position.y) &&
+            std::isfinite(position.z) && std::isfinite(local_ground_z)) {
+            std::cout << " height_med=" << position.z - local_ground_z
+                      << " x=" << position.x
+                      << " y=" << position.y
+                      << " z=" << position.z;
+        }
+        std::cout << " box=" << detection.bbox.x << "," << detection.bbox.y
+                  << "," << detection.bbox.width << "x" << detection.bbox.height
+                  << " confidence=" << detection.confidence
+                  << " rgb=" << rgb.cols << "x" << rgb.rows
+                  << " depth=" << depth.cols << "x" << depth.rows
+                  << " depth_type=" << depth.type()
+                  << " depth_channels=" << depth.channels()
+                  << std::endl;
+    };
+
+    if (!use_depth_) return Pose();
+    if (depth.empty()) {
+        log_gate("NO_DEPTH_OR_SYNC", 0, 0, 0, 0.0f, unknown, unknown, unknown, unknown_position);
+        return Pose();
+    }
+    if (depth.depth() != CV_32F || depth.channels() != 1) {
+        log_gate("BAD_DEPTH_TYPE", 0, 0, 0, 0.0f, unknown, unknown, unknown, unknown_position);
+        return Pose();
+    }
     if (rgb.empty() || rgb.size() != depth.size()) {
-        std::cout << "rejected ball depth: RGB/depth images are not registered: rgb="
-                  << rgb.cols << "x" << rgb.rows
-                  << " depth=" << depth.cols << "x" << depth.rows << std::endl;
+        log_gate("UNREGISTERED_IMAGES", 0, 0, 0, 0.0f, unknown, unknown, unknown, unknown_position);
         return Pose();
     }
 
@@ -80,32 +163,71 @@ Pose BallPoseEstimator::EstimateByDepth(const Pose &p_eye2base, const DetectionR
     const int y0 = std::max(0, bbox.y);
     const int x1 = std::min(depth.cols, bbox.x + bbox.width);
     const int y1 = std::min(depth.rows, bbox.y + bbox.height);
-    if (x1 <= x0 || y1 <= y0) return Pose();
+    if (x1 <= x0 || y1 <= y0) {
+        log_gate("INVALID_BBOX", 0, 0, 0, 0.0f, unknown, unknown, unknown, unknown_position);
+        return Pose();
+    }
 
-    const float center_u = bbox.x + bbox.width / 2.0f;
-    const float center_v = bbox.y + bbox.height / 2.0f;
-    const float radius_u = bbox.width * 0.5f * kInnerEllipseRadiusScale;
-    const float radius_v = bbox.height * 0.5f * kInnerEllipseRadiusScale;
-    if (radius_u <= 0.0f || radius_v <= 0.0f) return Pose();
+    const int step = depth_sample_step_;
+    const int bbox_width = x1 - x0;
+    const int bbox_height = y1 - y0;
+    const int pad_x = std::max(
+        step, static_cast<int>(std::ceil((ground_ring_scale_ - 1.0f) * bbox_width * 0.5f)));
+    const int pad_y = std::max(
+        step, static_cast<int>(std::ceil((ground_ring_scale_ - 1.0f) * bbox_height * 0.5f)));
+    const int ring_x0 = std::max(0, x0 - pad_x);
+    const int ring_y0 = std::max(0, y0 - pad_y);
+    const int ring_x1 = std::min(depth.cols, x1 + pad_x);
+    const int ring_y1 = std::min(depth.rows, y1 + pad_y);
 
-    const int step = std::max(1, depth_sample_step_);
+    auto sample_point = [&](int u, int v, cv::Point3f &point_robot) {
+        const float depth_value = depth.at<float>(v, u);
+        if (!std::isfinite(depth_value) || depth_value <= 0.0f) return false;
+
+        const cv::Point3f point_cam = intr_.BackProject(cv::Point2f(u, v), depth_value);
+        point_robot = p_eye2base * point_cam;
+        return std::isfinite(point_robot.x) && std::isfinite(point_robot.y) &&
+               std::isfinite(point_robot.z);
+    };
+
+    std::vector<float> ground_heights;
+    for (int v = ring_y0; v < ring_y1; v += step) {
+        for (int u = ring_x0; u < ring_x1; u += step) {
+            if (u >= x0 && u < x1 && v >= y0 && v < y1) continue;
+
+            cv::Point3f point_robot;
+            if (sample_point(u, v, point_robot)) {
+                ground_heights.push_back(point_robot.z);
+            }
+        }
+    }
+
+    if (ground_heights.size() < static_cast<size_t>(min_ground_points_)) {
+        log_gate("NO_FLOOR", ground_heights.size(), 0, 0, 0.0f,
+                 unknown, unknown, unknown, unknown_position);
+        return Pose();
+    }
+    const size_t ground_point_count = ground_heights.size();
+    const float local_ground_z = Median(std::move(ground_heights));
+
+    int valid_bbox_points = 0;
+    float observed_height_min = std::numeric_limits<float>::infinity();
+    float observed_height_max = -std::numeric_limits<float>::infinity();
     std::vector<float> xs;
     std::vector<float> ys;
     std::vector<float> zs;
 
     for (int v = y0; v < y1; v += step) {
         for (int u = x0; u < x1; u += step) {
-            const float normalized_u = (u + 0.5f - center_u) / radius_u;
-            const float normalized_v = (v + 0.5f - center_v) / radius_v;
-            if (normalized_u * normalized_u + normalized_v * normalized_v > 1.0f) continue;
+            cv::Point3f point_robot;
+            if (!sample_point(u, v, point_robot)) continue;
 
-            const float depth_value = depth.at<float>(v, u);
-            if (!std::isfinite(depth_value) || depth_value <= 0) continue;
-
-            const cv::Point3f point_cam = intr_.BackProject(cv::Point2f(u, v), depth_value);
-            const cv::Point3f point_robot = p_eye2base * point_cam;
-            if (!std::isfinite(point_robot.x) || !std::isfinite(point_robot.y) ||
-                !std::isfinite(point_robot.z)) {
+            ++valid_bbox_points;
+            const float height_above_ground = point_robot.z - local_ground_z;
+            observed_height_min = std::min(observed_height_min, height_above_ground);
+            observed_height_max = std::max(observed_height_max, height_above_ground);
+            if (height_above_ground < min_height_above_ground_ ||
+                height_above_ground > max_height_above_ground_) {
                 continue;
             }
 
@@ -115,15 +237,44 @@ Pose BallPoseEstimator::EstimateByDepth(const Pose &p_eye2base, const DetectionR
         }
     }
 
-    if (xs.size() < static_cast<size_t>(std::max(1, min_depth_points_))) {
-        std::cout << "rejected ball depth: only " << xs.size()
-                  << " valid samples in inner ellipse" << std::endl;
+    if (valid_bbox_points == 0) {
+        observed_height_min = unknown;
+        observed_height_max = unknown;
+    }
+    const int elevated_points = static_cast<int>(xs.size());
+    const float elevated_ratio = valid_bbox_points > 0
+                                     ? static_cast<float>(elevated_points) / valid_bbox_points
+                                     : 0.0f;
+    if (valid_bbox_points < min_depth_points_) {
+        log_gate("NO_BBOX_DEPTH", ground_point_count, valid_bbox_points,
+                 elevated_points, elevated_ratio, local_ground_z,
+                 observed_height_min, observed_height_max, unknown_position);
+        return Pose();
+    }
+
+    if (elevated_points < min_points_above_ground_ ||
+        elevated_ratio < min_above_ground_ratio_) {
+        log_gate("NO_HEIGHT", ground_point_count, valid_bbox_points, elevated_points,
+                 elevated_ratio, local_ground_z, observed_height_min,
+                 observed_height_max, unknown_position);
         return Pose();
     }
 
     const float x = Median(std::move(xs));
     const float y = Median(std::move(ys));
     const float z = Median(std::move(zs));
+    const float squared_norm = x * x + y * y + z * z;
+    const cv::Point3f position(x, y, z);
+    if (!std::isfinite(squared_norm) || squared_norm <= 1e-8f) {
+        log_gate("INVALID_OUTPUT", ground_point_count, valid_bbox_points, elevated_points,
+                 elevated_ratio, local_ground_z, observed_height_min,
+                 observed_height_max, unknown_position);
+        return Pose();
+    }
+
+    log_gate("VALID", ground_point_count, valid_bbox_points, elevated_points,
+             elevated_ratio, local_ground_z, observed_height_min,
+             observed_height_max, position);
     return Pose(x, y, z, 0, 0, 0);
 }
 
