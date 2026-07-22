@@ -45,7 +45,7 @@ When an agent changes code, remind the user that robot testing requires moving t
 1. Push the current working branch.
 2. Merge that branch into `main`.
 3. Connect to the robot and pull `main` in `~/booster_soccer`.
-4. Rebuild on the robot before running.
+4. Fix/verify the robot clock, then rebuild on the robot before running.
 
 Use commands like these, staying on the current dedicated branch:
 
@@ -119,7 +119,29 @@ cd ~/booster_robotics_sdk
 python -c "import booster_robotics_sdk_python; print('SDK OK')"
 ```
 
+## Fix Robot Clock Before Every Build
+
+The robot can boot with its clock reset to 1970, and `systemd-timesyncd` may be masked. A build with the wrong clock emits `Clock skew detected` and cannot be trusted. Before every build, verify `date` on the robot. Do not change the clock while a build is running.
+
+The reusable fix is to copy the development machine's current epoch time to the robot. Run this command from the development machine, not from inside the robot SSH session:
+
+```bash
+ssh -t booster@192.168.68.105 "sudo timedatectl set-ntp false; sudo date -s '@$(date +%s)'; sudo hwclock --systohc 2>/dev/null || true; date"
+```
+
+Then, after connecting to the robot, verify that the year and timezone are correct before building:
+
+```bash
+cd ~/booster_soccer
+date
+timedatectl status
+```
+
+If the date still shows 1970, stop and fix it before continuing. Do not try to restart `systemd-timesyncd` while its service is masked.
+
 ## Build On Robot
+
+Run the clock procedure above before every normal, clean, or selected-package build. Keep the build command as the final command in its copyable block. Do not append `source install/setup.bash`, a launch command, or any other command after it; wait for the build summary and the shell prompt first.
 
 Normal build, run on the robot after connecting over SSH:
 
