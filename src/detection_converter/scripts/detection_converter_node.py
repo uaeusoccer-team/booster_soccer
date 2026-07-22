@@ -10,6 +10,7 @@ from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy, DurabilityPo
 from std_msgs.msg import String
 from vision_interface.msg import Detections, DetectedObject, LineSegments
 import json
+import math
 
 
 class DetectionConverter(Node):
@@ -123,13 +124,22 @@ class DetectionConverter(Node):
                 
                 # Set position
                 pos = det.get('pos', [0.0, 0.0, 0.0])
-                if isinstance(pos, list):
-                    detected_obj.position = [float(p) for p in pos]
-                else:
-                    detected_obj.position = [0.0, 0.0, 0.0]
-                
-                # Set projected position (use pos as position_projection)
-                detected_obj.position_projection = detected_obj.position
+                try:
+                    position = [float(pos[index]) for index in range(3)]
+                except (IndexError, TypeError, ValueError):
+                    position = [0.0, 0.0, 0.0]
+                position_valid = all(math.isfinite(value) for value in position) and math.sqrt(
+                    sum(value * value for value in position)
+                ) > 1e-4
+                detected_obj.position = position if position_valid else [0.0, 0.0, 0.0]
+
+                # Preserve the temporary compatibility mirror for non-Ball
+                # objects only. Ball control consumes canonical position.
+                detected_obj.position_projection = (
+                    list(detected_obj.position)
+                    if detected_obj.label.strip().lower() != 'ball' and position_valid
+                    else []
+                )
                 
                 # Initialize target_uv (precise pixel positions of ground markers)
                 detected_obj.target_uv = []
@@ -146,7 +156,7 @@ class DetectionConverter(Node):
                 detected_obj.color = f"radius_{radius}"  # Temporarily store radius information
                 
                 # Set confidence
-                detected_obj.position_confidence = 1  # Default high confidence
+                detected_obj.position_confidence = 1 if position_valid else 0
                 
                 # Add to detection list
                 detections_msg.detected_objects.append(detected_obj)

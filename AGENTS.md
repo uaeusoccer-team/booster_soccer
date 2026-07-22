@@ -12,11 +12,9 @@ Do not replace this with ad hoc SDK-only demos unless the user explicitly asks f
 
 The code can only be built, launched, and verified on the physical robot over SSH. Laptop-to-robot DDS over Wi-Fi is not the normal workflow because the robot Fast DDS profile is scoped for local robot communication.
 
-Robot SSH target:
+Robot SSH target: `booster@192.168.68.105`
 
-```bash
-ssh booster@192.168.68.103
-```
+When giving the user commands to run on the robot, assume they are already inside an SSH session unless they explicitly ask how to connect. Do not put `ssh booster@...` inside the same copyable command block as robot commands. If a connection reminder is useful, mention the SSH target separately in prose, then provide a copyable robot command block that starts with `cd ~/booster_soccer`.
 
 Do not commit passwords or other credentials into this repo. Ask the user if SSH authentication is needed.
 
@@ -42,12 +40,12 @@ If the GitHub CLI is available and the team's workflow uses it, the agent may us
 
 Do not create new branches, delete branches, rename branches, or switch to a new work branch. Each team member already has a dedicated branch. If the working tree already has uncommitted user changes, do not overwrite them; ask the user before pulling if a conflict or merge would affect those changes.
 
-When an agent changes code, remind the user that robot testing requires moving the changes to the robot:
+For the normal integration workflow, unless the user invokes the explicit `commit++` shortcut below, remind the user that robot testing requires moving changes through `main`:
 
 1. Push the current working branch.
 2. Merge that branch into `main`.
-3. SSH into the robot and pull `main` in `~/booster_soccer`.
-4. Rebuild on the robot before running.
+3. Connect to the robot and pull `main` in `~/booster_soccer`.
+4. Fix/verify the robot clock, then rebuild on the robot before running.
 
 Use commands like these, staying on the current dedicated branch:
 
@@ -61,8 +59,7 @@ git push origin HEAD
 # Merge the current branch into main via PR or the team's existing merge workflow.
 # Do not create, delete, or rename branches.
 
-# On the robot
-ssh booster@192.168.68.103
+# On the robot after connecting over SSH
 cd ~/booster_soccer
 deactivate 2>/dev/null || true
 git switch main
@@ -70,6 +67,59 @@ git pull origin main
 git submodule update --init --recursive
 chmod +x scripts/*.sh
 ```
+
+## `commit++` Shortcut
+
+When the user sends `commit++`, treat it as shorthand for the complete local-commit and robot-transfer handoff. Do not make the user separately ask for `commit`, `push pull commands`, and `build command`.
+
+For `commit++`:
+
+1. Inspect the status and diff and run checks appropriate to the changed files. If a required check fails, stop and report it instead of committing.
+2. Stage only the files belonging to the current task, preserve unrelated user changes, review the staged diff, and run `git diff --cached --check`.
+3. Create one local commit with a clear message and report its hash. Do not create an empty commit if there are no changes.
+4. Do **not** automatically push, merge, connect to the robot, discard robot changes, change the robot clock, or start a build. Instead, return the commands below for the user to run.
+5. Replace the development path and branch placeholders with the actual checkout path and exact current dedicated branch. The final response must not leave placeholders for the user to edit.
+6. Keep development-machine commands and robot commands in separate, clearly labeled copyable blocks. Assume the user is already in the robot SSH session for robot blocks.
+
+First provide the development-machine push block:
+
+```bash
+cd <actual-development-checkout>
+git status --short --branch
+git push origin <current-dedicated-branch>
+```
+
+Then provide the immediate dedicated-branch test pull block for the robot:
+
+```bash
+cd ~/booster_soccer
+git status --short --branch
+git switch <current-dedicated-branch>
+git pull --ff-only origin <current-dedicated-branch>
+git log -1 --oneline
+```
+
+If robot changes prevent switching or pulling, tell the user to stop and share `git status`; never add an automatic stash, reset, or clean operation to this shortcut.
+
+Then provide the clock command, explicitly labeled to run from the development machine:
+
+```bash
+ssh -t booster@192.168.68.105 "sudo timedatectl set-ntp false; sudo date -s '@$(date +%s)'; sudo hwclock --systohc 2>/dev/null || true; date"
+```
+
+Finally provide this clean-build block, explicitly labeled to run inside the robot SSH session. Keep `./scripts/build.sh` as the final command and remind the user to wait for its summary and shell prompt:
+
+```bash
+cd ~/booster_soccer
+date
+timedatectl status
+deactivate 2>/dev/null || true
+source /opt/ros/humble/setup.bash
+rm -rf build install log
+./scripts/build.sh
+```
+
+For `commit++` only, the dedicated-branch pull above replaces the normal `main` pull for immediate robot testing. It does not replace the normal merge into `main` before shared or tournament use.
 
 ## Safety Rules
 
@@ -122,22 +172,42 @@ cd ~/booster_robotics_sdk
 python -c "import booster_robotics_sdk_python; print('SDK OK')"
 ```
 
-## Build On Robot
+## Fix Robot Clock Before Every Build
 
-Normal build:
+The robot can boot with its clock reset to 1970, and `systemd-timesyncd` may be masked. A build with the wrong clock emits `Clock skew detected` and cannot be trusted. Before every build, verify `date` on the robot. Do not change the clock while a build is running.
+
+The reusable fix is to copy the development machine's current epoch time to the robot. Run this command from the development machine, not from inside the robot SSH session:
 
 ```bash
-ssh booster@192.168.68.103
+ssh -t booster@192.168.68.105 "sudo timedatectl set-ntp false; sudo date -s '@$(date +%s)'; sudo hwclock --systohc 2>/dev/null || true; date"
+```
+
+Then, after connecting to the robot, verify that the year and timezone are correct before building:
+
+```bash
+cd ~/booster_soccer
+date
+timedatectl status
+```
+
+If the date still shows 1970, stop and fix it before continuing. Do not try to restart `systemd-timesyncd` while its service is masked.
+
+## Build On Robot
+
+Run the clock procedure above before every normal, clean, or selected-package build. Keep the build command as the final command in its copyable block. Do not append `source install/setup.bash`, a launch command, or any other command after it; wait for the build summary and the shell prompt first.
+
+Normal build, run on the robot after connecting over SSH:
+
+```bash
 cd ~/booster_soccer
 deactivate 2>/dev/null || true
 source /opt/ros/humble/setup.bash
 ./scripts/build.sh
 ```
 
-Clean build when generated state may be stale:
+Clean build when generated state may be stale, run on the robot after connecting over SSH:
 
 ```bash
-ssh booster@192.168.68.103
 cd ~/booster_soccer
 deactivate 2>/dev/null || true
 source /opt/ros/humble/setup.bash
@@ -172,7 +242,6 @@ source install/setup.bash
 Use this for early autonomous testing without the referee GameController:
 
 ```bash
-ssh booster@192.168.68.103
 cd ~/booster_soccer
 deactivate 2>/dev/null || true
 source /opt/ros/humble/setup.bash
@@ -194,7 +263,6 @@ tail -f game_controller.log
 Use this after simplified behavior is proven and GameController packets are verified:
 
 ```bash
-ssh booster@192.168.68.103
 cd ~/booster_soccer
 deactivate 2>/dev/null || true
 source /opt/ros/humble/setup.bash
@@ -208,7 +276,6 @@ source install/setup.bash
 This is the safest first behavior because it keeps body velocity at zero through `SetVelocity`.
 
 ```bash
-ssh booster@192.168.68.103
 cd ~/booster_soccer
 deactivate 2>/dev/null || true
 source /opt/ros/humble/setup.bash
@@ -224,7 +291,7 @@ sleep 2
 ros2 launch vision launch.py > vision.log 2>&1 &
 sleep 8
 
-timeout 5 ros2 topic echo /booster_soccer/detection --once | grep -E 'label:|confidence:|position_projection|xmin:|ymin:|xmax:|ymax:' || true
+timeout 5 ros2 topic echo /booster_soccer/detection --once | grep -E 'label:|confidence:|position:|position_confidence:|xmin:|ymin:|xmax:|ymax:' || true
 
 ros2 launch brain launch.py \
   tree:=head_track_only.xml \
@@ -281,7 +348,7 @@ Then start the brain in another SSH session.
 Only run chase behavior with the robot on the ground in open space. If the robot has the helper script installed:
 
 ```bash
-ssh booster@192.168.68.103
+cd ~/booster_soccer
 ~/safe_chase_vector.sh
 ```
 
@@ -291,7 +358,8 @@ Press `s` in that script to stop if supported by the running helper. Otherwise s
 
 - Official `vision` publishes `/booster_soccer/detection`, `/booster_soccer/line_segments`, and `/booster_soccer/ball`.
 - `brain` primarily consumes `/booster_soccer/detection`, not `/booster_soccer/ball`.
-- A ball detection includes `position_projection: [x, y, z]`.
+- A motion-valid ball detection includes canonical `position: [x, y, z]` with positive `position_confidence`; an RGB-only Ball keeps its bounding box but has no usable position.
+- `position_projection` remains only as a temporary compatibility mirror for non-Ball objects while their canonical coordinates are verified on the robot.
 - For the ball, `x` is forward distance, `y` is lateral offset, and `z` is near zero on the ground plane.
 - Depth is available on `/boostercamera/head/depth` and `/boostercamera/head/depth/camera_info`.
 - T1 camera config in this repo uses `/boostercamera/head/rgb`, `/boostercamera/head/rgb/camera_info`, and `/boostercamera/head/depth`.
@@ -317,7 +385,6 @@ Important files:
 ```text
 src/brain/behavior_trees/game.xml
 src/brain/behavior_trees/head_track_only.xml
-src/brain/behavior_trees/head_track_no_search.xml
 src/brain/behavior_trees/subtrees/subtree_cam_find_and_track_ball.xml
 src/brain/behavior_trees/subtrees/subtree_find_ball.xml
 src/brain/behavior_trees/subtrees/subtree_striker_play.xml
@@ -388,8 +455,9 @@ sudo tcpdump -ni any udp
 
 - Prefer existing behavior tree nodes and `RobotClient` functions over new motion pathways.
 - Keep changes focused; avoid unrelated refactors and generated artifact churn.
+- Do not edit C++ source or header files (`*.cpp`, `*.h`, `*.hpp`, `*.cc`, `*.cxx`) unless the user explicitly approves the C++ change in that turn. Reading, explaining, or reviewing C++ files is allowed without approval.
 - Do not copy `build/`, `install/`, or `log/` from laptop to robot.
 - Do not edit `/opt/booster/BoosterRos2/fastdds_profile.xml` unless the user explicitly approves it.
 - Use `rg` for searching.
 - Use `./scripts/build.sh` or `colcon build --symlink-install --base-paths src ...` on the robot for verification.
-- If you cannot run or verify because the robot is not reachable, say that clearly and give the exact SSH commands for the user.
+- If you cannot run or verify because the robot is not reachable, say that clearly and give the SSH target separately from any copyable robot command block.

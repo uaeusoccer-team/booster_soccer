@@ -125,7 +125,7 @@ public:
 
     static PortsList providedPorts()
     {
-        return {};
+        return {OutputPort<double>("theta")};
     }
     NodeStatus tick() override;
 
@@ -133,9 +133,6 @@ private:
     Brain *brain;
     rclcpp::Time _lastProcessedBallTime = rclcpp::Time(0, 0, RCL_ROS_TIME);
     bool _hasLastProcessedBallFrame = false;
-    bool _hasLastCommandedBallCenter = false;
-    double _lastCommandedBallX = 0.0;
-    double _lastCommandedBallY = 0.0;
 };
 
 
@@ -695,6 +692,14 @@ public:
         return {
             InputPort<double>("stop_dist", 1.0, "Distance from the ball to stop moving towards it"),
             InputPort<double>("stop_angle", 0.1, "Angle of the ball to stop turning towards it"),
+            InputPort<double>("y_tolerance", 0.03, "Sideways ball offset under which SimpleChase will not command lateral motion"),
+            InputPort<double>("body_turn_speed", 0.25, "Angular speed used to rotate the body when tracked head yaw is near its edge"),
+            InputPort<double>("head_turn_start_ratio", 0.75, "Head yaw limit ratio where body rotation starts while tracking the ball"),
+            InputPort<double>("head_turn_stop_ratio", 0.65, "Head yaw limit ratio where body rotation hands back to normal ball-yaw turning"),
+            InputPort<double>("final_head_yaw_min", "Minimum accepted head yaw when stopped near the ball; omit to disable final head-yaw check"),
+            InputPort<double>("final_head_yaw_max", "Maximum accepted head yaw when stopped near the ball; omit to disable final head-yaw check"),
+            InputPort<double>("final_ball_yaw_min", "Minimum accepted ball yaw when stopped near the ball; defaults to -stop_angle"),
+            InputPort<double>("final_ball_yaw_max", "Maximum accepted ball yaw when stopped near the ball; defaults to stop_angle"),
             InputPort<double>("vy_limit", 0.2, "Limit Y direction speed to prevent walking instability. Must be less than the robot's maximum speed 0.4 to take effect"),
             InputPort<double>("vx_limit", 0.6, "Limit X direction speed to prevent walking instability. Must be less than the robot's maximum speed 1.2 to take effect"),
         };

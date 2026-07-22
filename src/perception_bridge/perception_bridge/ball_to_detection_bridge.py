@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 
+import math
+
 import rclpy
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, qos_profile_sensor_data
@@ -44,10 +46,16 @@ class BallToDetectionBridge(Node):
         detected_ball.ymax = 0
         detected_ball.target_uv = []
         detected_ball.received_pos = []
-        detected_ball.position = [float(msg.x), float(msg.y), 0.0]
-        detected_ball.position_projection = [float(msg.x), float(msg.y), 0.0]
+        position = [float(msg.x), float(msg.y), 0.0]
+        position_valid = all(math.isfinite(value) for value in position) and math.hypot(
+            *position
+        ) > 1e-4
+        detected_ball.position = position if position_valid else [0.0, 0.0, 0.0]
+        # Ball consumers use canonical position only. Projection remains in the
+        # message schema during Phase 1 but is intentionally not populated here.
+        detected_ball.position_projection = []
         detected_ball.position_cam = []
-        detected_ball.position_confidence = 1
+        detected_ball.position_confidence = 1 if position_valid else 0
 
         detections = Detections()
         detections.header = msg.header

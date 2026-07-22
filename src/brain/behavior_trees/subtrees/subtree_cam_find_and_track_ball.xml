@@ -4,9 +4,9 @@
   <BehaviorTree ID="CamFindAndTrackBall">
      <Sequence name="root">
          <IfThenElse>
-             <ScriptCondition        name="Ball location known?" code="ball_location_known || tm_ball_pos_reliable" />
-             <Sequence               name="[Yes] -> Track ball and adjust position" >
-                <CamTrackBall />
+             <ScriptCondition        name="Ball visible?" code="ball_visible" />
+             <Sequence               name="[Yes] -> Track visible ball" >
+                <CamTrackBall theta="{tracking_theta}" />
              </Sequence>
              <Sequence               name="[No] -> Find ball">
                 <CamFindBall />

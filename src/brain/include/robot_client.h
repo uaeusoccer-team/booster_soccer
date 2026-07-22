@@ -1,5 +1,6 @@
 #pragma once
 
+#include <atomic>
 #include <iostream>
 #include <string>
 
@@ -120,11 +121,19 @@ public:
 
     bool isStandingStill(double timeBuffer = 1000);
 
+    int getActiveBodyTurnDirection() const
+    {
+        return _activeBodyTurnDirection.load(std::memory_order_relaxed);
+    }
+
 private:
     int call(booster_interface::msg::BoosterApiReqMsg msg);
     rclcpp::Publisher<booster_msgs::msg::RpcReqMsg>::SharedPtr publisher;
     Brain *brain;
-    double _vx, _vy, _vtheta;
+    double _vx = 0.0;
+    double _vy = 0.0;
+    double _vtheta = 0.0;
+    std::atomic<int> _activeBodyTurnDirection{0};
     rclcpp::Time _lastCmdTime;
     rclcpp::Time _lastNonZeroCmdTime;
 };

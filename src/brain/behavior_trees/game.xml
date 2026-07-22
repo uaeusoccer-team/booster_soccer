@@ -24,7 +24,7 @@
                 <SelfLocateEnterField />
             </ReactiveSequence>
 
-            <ReactiveSequence _while="control_state==3 && (!go_manual)" name="wrap a layer for control strategy switch, 3 is the state of LT+B on the controller, 2 is LT+A, 1 is LT+X">
+            <ReactiveSequence _while="control_state==3 &amp;&amp; (!go_manual)" name="wrap a layer for control strategy switch, 3 is the state of LT+B on the controller, 2 is LT+A, 1 is LT+X">
                 <SubTree ID="AutoGetUpAndLocate" _autoremap="true" />
                 <ReactiveSequence _while="gc_is_under_penalty" name="currently under penalty or substitute state">
                     <SetVelocity />
@@ -71,7 +71,7 @@
 
                     </ReactiveSequence>
 
-                    <ReactiveSequence _while="gc_game_sub_state_type=='FREE_KICK' && gc_game_state=='PLAY'" name="free kick">
+                    <ReactiveSequence _while="gc_game_sub_state_type=='FREE_KICK' &amp;&amp; gc_game_state=='PLAY'" name="free kick">
                         <ReactiveSequence _while="gc_game_sub_state=='STOP'">
                             <SubTree ID="CamFindAndTrackBall" _autoremap="true" />
                             <SubTree ID="Locate" _autoremap="true" _while="ball_location_known"/>
