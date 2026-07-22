@@ -93,10 +93,13 @@ void BrainTree::init()
 void BrainTree::initEntry()
 {
     setEntry<string>("player_role", brain->config->get_player_role());
+    setEntry<bool>("ball_visible", false);
+    setEntry<bool>("ball_motion_valid", false);
     setEntry<bool>("ball_location_known", false);
     setEntry<bool>("tm_ball_pos_reliable", false);
     setEntry<bool>("ball_out", false);
     setEntry<bool>("track_ball", true);
+    setEntry<double>("tracking_theta", 0.0);
     setEntry<bool>("odom_calibrated", false);
     setEntry<string>("decision", "");
     setEntry<string>("defend_decision", "chase");
@@ -162,87 +165,83 @@ NodeStatus StepOnSpot::tick()
 
 NodeStatus CamTrackBall::tick()
 {
-    const double xCenter = brain->config->cameraImageWidth / 2.0;
-    const double yCenter = brain->config->cameraImageHeight / 2.0;
+    constexpr double STOP_ANGLE = 0.40;
+    constexpr double TURN_SPEED = 0.40;
+    constexpr double HEAD_STEP = 0.04;
+    constexpr double PIXEL_DEADBAND_X = 35.0;
+    constexpr double PIXEL_DEADBAND_Y = 35.0;
 
-    const bool iSeeBall = brain->data->ballDetected;
+    double theta = 0.0;
+    const bool visible = brain->data->ballVisible;
+    const bool motionValid = brain->data->ballMotionValid;
+    if (visible && motionValid)
+    {
+        const double ballYaw = brain->data->motionBall.yawToRobot;
+        if (std::fabs(ballYaw) > STOP_ANGLE)
+        {
+            theta = ballYaw > 0.0 ? TURN_SPEED : -TURN_SPEED;
+        }
+    }
+    setOutput("theta", theta);
 
-    const bool bboxValid =
-        brain->data->ball.boundingBox.xmax > brain->data->ball.boundingBox.xmin &&
-        brain->data->ball.boundingBox.ymax > brain->data->ball.boundingBox.ymin;
-
-    // For T1 api_id 2006, do not depend on absolute head angle tracking.
-    // Use image pixel error to create a small virtual target offset.
-    // RobotClient::moveHead() converts this offset into pitch_direction/yaw_direction.
-    double pitch = brain->data->headPitch;
-    double yaw = brain->data->headYaw;
-
-    if (!iSeeBall || !bboxValid)
+    if (!brain->data->headStateReceived.load(std::memory_order_acquire))
     {
         _hasLastProcessedBallFrame = false;
-        _hasLastCommandedBallCenter = false;
-        // Explicit stop for directional head API.
-        brain->client->moveHead(pitch, yaw);
-        turnTowardRecentlyLostBall(brain, true, 1200.0, 0.25, 0.08);
         return NodeStatus::SUCCESS;
     }
 
-    const double ballX = mean(brain->data->ball.boundingBox.xmax, brain->data->ball.boundingBox.xmin);
-    const double ballY = mean(brain->data->ball.boundingBox.ymax, brain->data->ball.boundingBox.ymin);
-    const auto ballTime = brain->data->ball.timePoint;
+    const double measuredPitch = brain->data->headPitch.load(std::memory_order_relaxed);
+    const double measuredYaw = brain->data->headYaw.load(std::memory_order_relaxed);
+    const double xCenter = brain->config->cameraImageWidth / 2.0;
+    const double yCenter = brain->config->cameraImageHeight / 2.0;
+    const bool bboxValid =
+        brain->config->cameraImageWidth > 0 &&
+        brain->config->cameraImageHeight > 0 &&
+        brain->data->visualBall.boundingBox.xmax > brain->data->visualBall.boundingBox.xmin &&
+        brain->data->visualBall.boundingBox.ymax > brain->data->visualBall.boundingBox.ymin;
 
-    const double minBallCenterChangePx = 5.0;
+    if (!visible || !bboxValid)
+    {
+        _hasLastProcessedBallFrame = false;
+        // Re-sending measured angles stops the head without starting search.
+        brain->client->moveHead(measuredPitch, measuredYaw);
+        return NodeStatus::SUCCESS;
+    }
+
+    const double ballX = mean(brain->data->visualBall.boundingBox.xmax, brain->data->visualBall.boundingBox.xmin);
+    const double ballY = mean(brain->data->visualBall.boundingBox.ymax, brain->data->visualBall.boundingBox.ymin);
+    const auto ballTime = brain->data->visualBall.timePoint;
     const bool sameVisionFrame =
         _hasLastProcessedBallFrame &&
         ballTime.nanoseconds() == _lastProcessedBallTime.nanoseconds();
-    const bool ballCenterChanged =
-        !_hasLastCommandedBallCenter ||
-        std::fabs(ballX - _lastCommandedBallX) >= minBallCenterChangePx ||
-        std::fabs(ballY - _lastCommandedBallY) >= minBallCenterChangePx;
-
-    if (sameVisionFrame || !ballCenterChanged)
+    if (sameVisionFrame)
     {
-        _lastProcessedBallTime = ballTime;
-        _hasLastProcessedBallFrame = true;
         return NodeStatus::SUCCESS;
     }
 
     const double dx = ballX - xCenter;  // + means ball is right of image center
     const double dy = ballY - yCenter;  // + means ball is below image center
+    double targetPitch = measuredPitch;
+    double targetYaw = measuredYaw;
 
-    const double deadbandX = 35.0;
-    const double deadbandY = 35.0;
-
-    // Small virtual angle offset. It only needs to exceed RobotClient::moveHead deadband.
-    const double step = 0.04;
-
-    if (std::fabs(dx) > deadbandX)
+    if (std::fabs(dx) > PIXEL_DEADBAND_X)
     {
-        // Existing sign convention from original code:
-        // ball right -> yaw target decreases.
-        yaw += (dx > 0.0) ? -step : step;
+        targetYaw += (dx > 0.0) ? -HEAD_STEP : HEAD_STEP;
     }
 
-    if (std::fabs(dy) > deadbandY)
+    if (std::fabs(dy) > PIXEL_DEADBAND_Y)
     {
-        // Existing sign convention from original code:
-        // ball low -> pitch target increases.
-        pitch += (dy > 0.0) ? step : -step;
+        targetPitch += (dy > 0.0) ? HEAD_STEP : -HEAD_STEP;
     }
 
-    // If both errors are inside deadband, pitch/yaw remain current values,
-    // causing RobotClient::moveHead() to publish direction 0,0.
-    brain->client->moveHead(pitch, yaw);
+    brain->client->moveHead(targetPitch, targetYaw);
     _lastProcessedBallTime = ballTime;
     _hasLastProcessedBallFrame = true;
-    _lastCommandedBallX = ballX;
-    _lastCommandedBallY = ballY;
-    _hasLastCommandedBallCenter = true;
 
     brain->log->log(
         "CamTrackBall/direct_pixel",
-        format("ballX: %.1f ballY: %.1f dx: %.1f dy: %.1f pitch: %.2f yaw: %.2f",
-               ballX, ballY, dx, dy, pitch, yaw));
+        format("ballX: %.1f ballY: %.1f dx: %.1f dy: %.1f pitch: %.2f yaw: %.2f theta: %.2f motionValid: %d",
+               ballX, ballY, dx, dy, targetPitch, targetYaw, theta, motionValid));
 
     return NodeStatus::SUCCESS;
 }
@@ -334,6 +333,13 @@ NodeStatus Chase::tick()
         brain->log->debug("Chase4", msg);
     };
     log("ticked");
+
+    if (!brain->data->ballMotionValid.load(std::memory_order_acquire))
+    {
+        brain->client->setVelocity(0.0, 0.0, 0.0);
+        return NodeStatus::SUCCESS;
+    }
+    const auto &ball = brain->data->motionBall;
     
     double vxLimit, vyLimit, vthetaLimit, dist, safeDist;
     getInput("vx_limit", vxLimit);
@@ -347,20 +353,20 @@ NodeStatus Chase::tick()
 
     if (
         brain->config->get_limit_near_ball_speed()
-        && brain->data->ball.range < brain->config->get_near_ball_range()
+        && ball.range < brain->config->get_near_ball_range()
     ) {
         vxLimit = min(brain->config->get_near_ball_speed_limit(), vxLimit);
     }
 
-    double ballRange = brain->data->ball.range;
-    double ballYaw = brain->data->ball.yawToRobot;
+    double ballRange = ball.range;
+    double ballYaw = ball.yawToRobot;
     double kickDir = brain->data->kickDir;
     double theta_br = atan2(
-        brain->data->robotPoseToField.y - brain->data->ball.posToField.y,
-        brain->data->robotPoseToField.x - brain->data->ball.posToField.x
+        brain->data->robotPoseToField.y - ball.posToField.y,
+        brain->data->robotPoseToField.x - ball.posToField.x
     );
     double theta_rb = brain->data->robotBallAngleToField;
-    auto ballPos = brain->data->ball.posToField;
+    auto ballPos = ball.posToField;
 
 
     double vx, vy, vtheta;
@@ -399,7 +405,7 @@ NodeStatus Chase::tick()
         vy = speed * sin(avoidDir);
         vtheta = ballYaw;
     } else {
-        vx = min(vxLimit, brain->data->ball.range);
+        vx = min(vxLimit, ball.range);
         vy = 0;
         vtheta = targetDir;
         if (fabs(targetDir) < 0.1 && ballRange > 2.0) vtheta = 0.0;
@@ -435,16 +441,17 @@ NodeStatus SimpleChase::tick()
 
     static double headYawBodyTurnDir = 0.0;
 
-    if (!brain->tree->getEntry<bool>("ball_location_known"))
+    if (!brain->data->ballMotionValid.load(std::memory_order_acquire))
     {
         headYawBodyTurnDir = 0.0;
         brain->client->setVelocity(0, 0, 0);
         return NodeStatus::SUCCESS;
     }
 
-    const double ballRange = brain->data->ball.range;
-    const double ballYaw = brain->data->ball.yawToRobot;
-    const double headYaw = brain->data->headYaw;
+    const auto &ball = brain->data->motionBall;
+    const double ballRange = ball.range;
+    const double ballYaw = ball.yawToRobot;
+    const double headYaw = brain->data->headYaw.load(std::memory_order_relaxed);
 
     double vx = 0.0;
     double vy = 0.0;
@@ -452,8 +459,8 @@ NodeStatus SimpleChase::tick()
 
     if (ballRange > stopDist)
     {
-        vx = brain->data->ball.posToRobot.x;
-        vy = brain->data->ball.posToRobot.y;
+        vx = ball.posToRobot.x;
+        vy = ball.posToRobot.y;
 
         double linearFactor = 1 / (1 + exp(3 * (ballRange * fabs(ballYaw)) - 3));
         vx *= linearFactor;
@@ -462,7 +469,7 @@ NodeStatus SimpleChase::tick()
         vx = cap(vx, vxLimit, -1.0);
         vy = cap(vy, vyLimit, -vyLimit);
 
-        if (fabs(brain->data->ball.posToRobot.y) <= fabs(yTolerance))
+        if (fabs(ball.posToRobot.y) <= fabs(yTolerance))
         {
             vy = 0;
         }
@@ -471,7 +478,7 @@ NodeStatus SimpleChase::tick()
     const double startRatio = cap(fabs(headTurnStartRatio), 1.0, 0.0);
     const double stopRatio = cap(fabs(headTurnStopRatio), startRatio, 0.0);
     const bool headYawTurnEnabled = bodyTurnSpeed > 0.0 && startRatio > 0.0;
-    const bool ballTracked = brain->data->ballDetected;
+    const bool ballTracked = brain->data->ballVisible.load(std::memory_order_acquire);
     double finalHeadYawMin = -fabs(stopAngle);
     double finalHeadYawMax = fabs(stopAngle);
     const bool finalHeadYawMinSet = static_cast<bool>(getInput("final_head_yaw_min", finalHeadYawMin));
@@ -597,6 +604,15 @@ NodeStatus GoToFreekickPosition::onStart() {
 
 NodeStatus GoToFreekickPosition::onRunning() {
 
+    const bool visualOnly =
+        brain->data->ballVisible.load(std::memory_order_acquire) &&
+        !brain->data->ballMotionValid.load(std::memory_order_acquire);
+    if (!brain->tree->getEntry<bool>("ball_location_known") || visualOnly)
+    {
+        brain->client->setVelocity(0.0, 0.0, 0.0);
+        return NodeStatus::SUCCESS;
+    }
+
     string side;
     getInput("side", side);
     if (side !="attack" && side != "defense") return NodeStatus::SUCCESS;
@@ -704,6 +720,14 @@ void GoToFreekickPosition::onHalted() {
 }
 
 NodeStatus GoToGoalBlockingPosition::tick() {
+    const bool visualOnly =
+        brain->data->ballVisible.load(std::memory_order_acquire) &&
+        !brain->data->ballMotionValid.load(std::memory_order_acquire);
+    if (!brain->tree->getEntry<bool>("ball_location_known") || visualOnly)
+    {
+        brain->client->setVelocity(0.0, 0.0, 0.0);
+        return NodeStatus::SUCCESS;
+    }
     
     double distTolerance = getInput<double>("dist_tolerance").value();
     double thetaTolerance = getInput<double>("theta_tolerance").value();
@@ -758,6 +782,15 @@ NodeStatus Assist::tick() {
         brain->log->debug("Assist", msg);
     };
     log("ticked");
+
+    const bool visualOnly =
+        brain->data->ballVisible.load(std::memory_order_acquire) &&
+        !brain->data->ballMotionValid.load(std::memory_order_acquire);
+    if (!brain->tree->getEntry<bool>("ball_location_known") || visualOnly)
+    {
+        brain->client->setVelocity(0.0, 0.0, 0.0);
+        return NodeStatus::SUCCESS;
+    }
 
     double distTolerance = getInput<double>("dist_tolerance").value();
     double thetaTolerance = getInput<double>("theta_tolerance").value();
@@ -846,10 +879,12 @@ NodeStatus Adjust::tick()
         brain->log->debug("adjust5", msg); 
     };
     log("enter");
-    if (!brain->tree->getEntry<bool>("ball_location_known"))
+    if (!brain->data->ballMotionValid.load(std::memory_order_acquire))
     {
+        brain->client->setVelocity(0.0, 0.0, 0.0);
         return NodeStatus::SUCCESS;
     }
+    const auto &currentBall = brain->data->motionBall;
 
     double turnThreshold, vxLimit, vyLimit, vthetaLimit, range, st_far, st_near, vtheta_factor, NEAR_THRESHOLD;
     getInput("near_threshold", NEAR_THRESHOLD);
@@ -861,7 +896,7 @@ NodeStatus Adjust::tick()
     getInput("vy_limit", vyLimit);
     getInput("vtheta_limit", vthetaLimit);
     getInput("range", range);
-    log(format("ballX: %.1f ballY: %.1f ballYaw: %.1f", brain->data->ball.posToRobot.x, brain->data->ball.posToRobot.y, brain->data->ball.yawToRobot));
+    log(format("ballX: %.1f ballY: %.1f ballYaw: %.1f", currentBall.posToRobot.x, currentBall.posToRobot.y, currentBall.yawToRobot));
     double NO_TURN_THRESHOLD, TURN_FIRST_THRESHOLD;
     getInput("no_turn_threshold", NO_TURN_THRESHOLD);
     getInput("turn_first_threshold", TURN_FIRST_THRESHOLD);
@@ -871,8 +906,8 @@ NodeStatus Adjust::tick()
     double kickDir = brain->data->kickDir;
     double dir_rb_f = brain->data->robotBallAngleToField; 
     double deltaDir = toPInPI(kickDir - dir_rb_f);
-    double ballRange = brain->data->ball.range;
-    double ballYaw = brain->data->ball.yawToRobot;
+    double ballRange = currentBall.range;
+    double ballYaw = currentBall.yawToRobot;
     double st = st_far; 
     double R = ballRange; 
     double r = range;
@@ -914,6 +949,13 @@ NodeStatus Adjust::tick()
 
 NodeStatus CalcKickDir::tick()
 {
+    const bool visualOnly =
+        brain->data->ballVisible.load(std::memory_order_acquire) &&
+        !brain->data->ballMotionValid.load(std::memory_order_acquire);
+    if (!brain->tree->getEntry<bool>("ball_location_known") || visualOnly)
+    {
+        return NodeStatus::SUCCESS;
+    }
     double crossThreshold;
     getInput("cross_threshold", crossThreshold);
 
@@ -962,6 +1004,17 @@ NodeStatus StrikerDecide::tick() {
         brain->log->debug("striker_decide", msg);
     };
 
+    const bool visualOnly =
+        brain->data->ballVisible.load(std::memory_order_acquire) &&
+        !brain->data->ballMotionValid.load(std::memory_order_acquire);
+    if (visualOnly)
+    {
+        brain->data->tmImInVisualKick = false;
+        setOutput("decision_out", std::string("hold"));
+        brain->visualizer->publishPlayerDecision("striker-hold");
+        return NodeStatus::SUCCESS;
+    }
+
     double chaseRangeThreshold;
     getInput("chase_threshold", chaseRangeThreshold);
     string lastDecision, position;
@@ -1007,6 +1060,7 @@ NodeStatus StrikerDecide::tick() {
     {
         newDecision = "find";
     } else if (
+                brain->data->ballMotionValid.load(std::memory_order_acquire) &&
                 brain->config->get_enable_auto_visual_kick() &&
                 brain->data->tmImLead && 
                 brain->data->tmMyCostRank == 0 && 
@@ -1033,7 +1087,7 @@ NodeStatus StrikerDecide::tick() {
             (angleGoodForKick && !brain->data->isFreekickKickingOff) 
             || reachedKickDir
         )
-        && brain->data->ballDetected
+        && brain->data->ballMotionValid.load(std::memory_order_acquire)
         && fabs(brain->data->ball.yawToRobot) < M_PI / 2.
         && !avoidKick
         && ball.range < 1.5
@@ -1074,6 +1128,16 @@ NodeStatus StrikerDecide::tick() {
 NodeStatus GoalieDecide::tick()
 {
 
+    const bool visualOnly =
+        brain->data->ballVisible.load(std::memory_order_acquire) &&
+        !brain->data->ballMotionValid.load(std::memory_order_acquire);
+    if (visualOnly)
+    {
+        setOutput("decision_out", std::string("hold"));
+        brain->visualizer->publishPlayerDecision("goalie-hold");
+        return NodeStatus::SUCCESS;
+    }
+
     double chaseRangeThreshold;
     getInput("chase_threshold", chaseRangeThreshold);
     string lastDecision, position;
@@ -1102,7 +1166,7 @@ NodeStatus GoalieDecide::tick()
     {
         newDecision = "chase";
     }
-    else if (angleIsGood)
+    else if (angleIsGood && brain->data->ballMotionValid.load(std::memory_order_acquire))
     {
         newDecision = "kick";
     }
@@ -1148,9 +1212,10 @@ tuple<double, double, double> Kick::_calcSpeed() {
     double yawOffset = brain->config->get_yaw_offset(); 
 
 
-    double adjustedYaw = brain->data->ball.yawToRobot + yawOffset;
-    double tx = cos(adjustedYaw) * brain->data->ball.range; 
-    double ty = sin(adjustedYaw) * brain->data->ball.range;
+    const auto &currentBall = brain->data->motionBall;
+    double adjustedYaw = currentBall.yawToRobot + yawOffset;
+    double tx = cos(adjustedYaw) * currentBall.range;
+    double ty = sin(adjustedYaw) * currentBall.range;
 
     if (fabs(ty) < 0.01 && fabs(adjustedYaw) < 0.01)
     { 
@@ -1170,14 +1235,20 @@ tuple<double, double, double> Kick::_calcSpeed() {
 
 
     double speed = norm(vx, vy);
-    msecKick = speed > 1e-5 ? minMSecKick + static_cast<int>(brain->data->ball.range / speed * 1000) : minMSecKick;
+    msecKick = speed > 1e-5 ? minMSecKick + static_cast<int>(currentBall.range / speed * 1000) : minMSecKick;
     
     return make_tuple(vx, vy, msecKick);
 }
 
 NodeStatus Kick::onStart()
 {
-    _minRange = brain->data->ball.range;
+    if (!brain->data->ballMotionValid.load(std::memory_order_acquire))
+    {
+        brain->client->setVelocity(0.0, 0.0, 0.0);
+        return NodeStatus::SUCCESS;
+    }
+    const auto &currentBall = brain->data->motionBall;
+    _minRange = currentBall.range;
     _speed = 0.5;
     _startTime = brain->get_clock()->now();
 
@@ -1189,14 +1260,14 @@ NodeStatus Kick::onStart()
         avoidPushing
         && (role != "goal_keeper")
         && brain->data->robotPoseToField.x < brain->config->fieldDimensions.length / 2 - brain->config->fieldDimensions.goalAreaLength
-        && brain->distToObstacle(brain->data->ball.yawToRobot) < kickAoSafeDist
+        && brain->distToObstacle(currentBall.yawToRobot) < kickAoSafeDist
     ) {
         brain->client->setVelocity(-0.1, 0, 0);
         return NodeStatus::SUCCESS;
     }
 
     // Publish movement command
-    double angle = brain->data->ball.yawToRobot;
+    double angle = currentBall.yawToRobot;
     brain->client->crabWalk(angle, _speed);
     return NodeStatus::RUNNING;
 }
@@ -1208,15 +1279,21 @@ NodeStatus Kick::onRunning()
     };
 
 
+    if (!brain->data->ballMotionValid.load(std::memory_order_acquire))
+    {
+        brain->client->setVelocity(0.0, 0.0, 0.0);
+        return NodeStatus::SUCCESS;
+    }
+    const auto &currentBall = brain->data->motionBall;
     bool enableAbort = brain->config->get_abort_kick_when_ball_moved();
-    auto ballRange = brain->data->ball.range;
+    auto ballRange = currentBall.range;
     const double MOVE_RANGE_THRESHOLD = 0.3;
     const double BALL_LOST_THRESHOLD = 1000;  
     if (
         enableAbort 
         && (
-            (brain->data->ballDetected && ballRange - _minRange > MOVE_RANGE_THRESHOLD) 
-            || brain->msecsSince(brain->data->ball.timePoint) > BALL_LOST_THRESHOLD 
+            (ballRange - _minRange > MOVE_RANGE_THRESHOLD)
+            || brain->msecsSince(currentBall.timePoint) > BALL_LOST_THRESHOLD
         )
     ) {
         log("ball moved, abort kick");
@@ -1232,7 +1309,7 @@ NodeStatus Kick::onRunning()
     if (
         avoidPushing
         && brain->data->robotPoseToField.x < brain->config->fieldDimensions.length / 2 - brain->config->fieldDimensions.goalAreaLength
-        && brain->distToObstacle(brain->data->ball.yawToRobot) < kickAoSafeDist
+        && brain->distToObstacle(currentBall.yawToRobot) < kickAoSafeDist
     ) {
         brain->client->setVelocity(-0.1, 0, 0);
         return NodeStatus::SUCCESS;
@@ -1241,26 +1318,25 @@ NodeStatus Kick::onRunning()
 
     double msecs = getInput<double>("min_msec_kick").value();
     double speed = getInput<double>("speed_limit").value();
-    msecs = msecs + brain->data->ball.range / speed * 1000;
+    msecs = msecs + currentBall.range / speed * 1000;
     if (brain->msecsSince(_startTime) > msecs) { 
         brain->client->setVelocity(0, 0, 0);
         return NodeStatus::SUCCESS;
     }
 
 
-    if (brain->data->ballDetected) { 
-        double angle = brain->data->ball.yawToRobot;
-        double speed = getInput<double>("speed_limit").value();
-        _speed += 0.1; 
-        speed = min(speed, _speed);
-        brain->client->crabWalk(angle, speed);
-    }
+    double angle = currentBall.yawToRobot;
+    double currentSpeed = getInput<double>("speed_limit").value();
+    _speed += 0.1;
+    currentSpeed = min(currentSpeed, _speed);
+    brain->client->crabWalk(angle, currentSpeed);
 
     return NodeStatus::RUNNING;
 }
 
 void Kick::onHalted()
 {
+    brain->client->setVelocity(0.0, 0.0, 0.0);
     _startTime -= rclcpp::Duration(100, 0);
 }
 
@@ -1270,6 +1346,11 @@ rclcpp::Time RLVisionKick::_lastExitTime = rclcpp::Time(0, 0, RCL_ROS_TIME);
 
 NodeStatus RLVisionKick::onStart()
 {
+    if (!brain->data->ballMotionValid.load(std::memory_order_acquire))
+    {
+        brain->client->setVelocity(0.0, 0.0, 0.0);
+        return NodeStatus::SUCCESS;
+    }
     _startTime = brain->get_clock()->now();
     _isDecelerating = false;
     _visionKickStarted = false;
@@ -1284,6 +1365,21 @@ NodeStatus RLVisionKick::onStart()
 
 NodeStatus RLVisionKick::onRunning()
 {
+    if (!brain->data->ballMotionValid.load(std::memory_order_acquire))
+    {
+        if (_visionKickStarted)
+        {
+            brain->client->RLVisionKick(false);
+        }
+        brain->data->tmImInVisualKick = false;
+        brain->client->setVelocity(0.0, 0.0, 0.0);
+        brain->client->robocupWalk();
+        recordExitTime();
+        _isDecelerating = false;
+        _visionKickStarted = false;
+        _pendingRobocupWalk = false;
+        return NodeStatus::SUCCESS;
+    }
     // Check exit flag
     if (brain->data->shouldExitRLVisionKick) {
         brain->data->shouldExitRLVisionKick = false;
@@ -1326,7 +1422,7 @@ NodeStatus RLVisionKick::onRunning()
     double minMsecKick = getInput<double>("min_msec_kick").value();
     
     // Check if ball is too far or cost is too high
-    bool ballTooFar = brain->data->ballDetected && brain->data->ball.range > 5.0;
+    bool ballTooFar = brain->data->motionBall.range > 5.0;
     bool shouldExit = (((ballTooFar || brain->data->tmMyCost > 8.0) && (elapsed > minMsecKick)) || brain->data->lose_ball || brain->tree->getEntry<bool>("ball_out"));
     
     if (shouldExit) {
@@ -1343,6 +1439,10 @@ NodeStatus RLVisionKick::onRunning()
 void RLVisionKick::onHalted()
 {
     brain->data->tmImInVisualKick = false;
+    if (_visionKickStarted)
+    {
+        brain->client->RLVisionKick(false);
+    }
     brain->client->setVelocity(0.0, 0.0, 0.0);
     brain->client->robocupWalk();
     recordExitTime();

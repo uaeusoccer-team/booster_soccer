@@ -101,6 +101,7 @@ struct GameObject
     BoundingBox boundingBox;
     Point2D precisePixelPoint;
     double confidence;
+    int positionConfidence = 0;
     Point posToRobot;
 
     Point posToField;
@@ -112,6 +113,39 @@ struct GameObject
     string name;
     double idConfidence;
     string info;
+};
+
+// Snapshot retained for the later ball-search redesign.  Visual and spatial
+// validity are intentionally separate: losing depth must not erase the last
+// accepted RGB observation or the last valid 3D position.
+struct LastBallObservation
+{
+    bool recorded = false;
+    rclcpp::Time timePoint;
+    BoundingBox normalizedBoundingBox{0.0, 0.0, 0.0, 0.0};
+    Point2D normalizedCenter{0.0, 0.0};
+    Point2D pixelCenter{0.0, 0.0};
+    Point lastValidPosition{0.0, 0.0, 0.0};
+    bool hasLastValidPosition = false;
+    double headYaw = 0.0;
+    double headPitch = 0.0;
+    Pose2D robotPoseToOdom{0.0, 0.0, 0.0};
+    Pose2D robotPoseToField{0.0, 0.0, 0.0};
+    int bodyTurnDirection = 0;
+};
+
+struct BallStateSnapshot
+{
+    bool visible = false;
+    bool motionValid = false;
+    GameObject visual{};
+    GameObject motion{};
+    GameObject remembered{};
+    GameObject teammate{};
+    LastBallObservation lastObservation{};
+    rclcpp::Time motionReceivedTime;
+    rclcpp::Time visualReceivedTime;
+    double robotBallAngleToField = 0.0;
 };
 
 // Line

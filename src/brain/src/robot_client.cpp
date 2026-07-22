@@ -77,6 +77,16 @@ int RobotClient::waveHand(bool doWaveHand)
 
 int RobotClient::setVelocity(double x, double y, double theta)
 {
+    const bool visualOnlyBall =
+        brain->data->ballVisible.load(std::memory_order_acquire) &&
+        !brain->data->ballMotionValid.load(std::memory_order_acquire);
+    if (visualOnlyBall)
+    {
+        x = 0.0;
+        y = 0.0;
+        theta = 0.0;
+    }
+
     brain->log->log("RobotClient/setVelocity_in",
                     format("vx: %.2f  vy: %.2f  vtheta: %.2f", x, y, theta));
 
@@ -115,6 +125,9 @@ int RobotClient::setVelocity(double x, double y, double theta)
     }
     
     _vx = x; _vy = y; _vtheta = theta; // remember last command. Can be approximately used as the current robot's velocity.
+    _activeBodyTurnDirection.store(
+        std::fabs(theta) > 1e-3 ? (theta > 0.0 ? 1 : -1) : 0,
+        std::memory_order_relaxed);
     _lastCmdTime = brain->get_clock()->now();
     if (fabs(_vx) > 1e-3 || fabs(_vy) > 1e-3 || fabs(_vtheta) > 1e-3) _lastNonZeroCmdTime = brain->get_clock()->now();
     brain->log->log("RobotClient/setVelocity_out",

@@ -1,5 +1,6 @@
 #pragma once
 
+#include <atomic>
 #include <string>
 #include <mutex>
 #include <tuple>
@@ -44,16 +45,44 @@ public:
     Pose2D odomToField;      
     Pose2D robotPoseToField; 
 
-    double headPitch; 
-    double headYaw;  
+    std::atomic<double> headPitch{0.0};
+    std::atomic<double> headYaw{0.0};
+    std::atomic<bool> headStateReceived{false};
     Eigen::Matrix4d camToRobot = Eigen::Matrix4d::Identity(); 
 
 
-    bool ballDetected = false;   
-    GameObject ball;              
-    GameObject tmBall;           
-    double robotBallAngleToField; 
+    // Legacy mirror of ballVisible for code outside this package.
+    std::atomic<bool> ballDetected{false};
+    std::atomic<bool> ballVisible{false};
+    std::atomic<bool> ballMotionValid{false};
+    GameObject visualBall{};
+    GameObject motionBall{};
+    // Last valid local or teammate-derived location, retained until timeout.
+    GameObject ball{};
+    GameObject tmBall{};
+    LastBallObservation lastBallObservation{};
+    rclcpp::Time ballMotionReceivedTime;
+    rclcpp::Time ballVisualReceivedTime;
+    mutable std::mutex ballStateMutex;
+    double robotBallAngleToField = 0.0;
     bool lose_ball = false;
+
+    inline BallStateSnapshot getBallStateSnapshot() const
+    {
+        std::lock_guard<std::mutex> lock(ballStateMutex);
+        BallStateSnapshot snapshot;
+        snapshot.visible = ballVisible.load(std::memory_order_acquire);
+        snapshot.motionValid = ballMotionValid.load(std::memory_order_acquire);
+        snapshot.visual = visualBall;
+        snapshot.motion = motionBall;
+        snapshot.remembered = ball;
+        snapshot.teammate = tmBall;
+        snapshot.lastObservation = lastBallObservation;
+        snapshot.motionReceivedTime = ballMotionReceivedTime;
+        snapshot.visualReceivedTime = ballVisualReceivedTime;
+        snapshot.robotBallAngleToField = robotBallAngleToField;
+        return snapshot;
+    }
 
     inline vector<GameObject> getRobots() const {
         std::lock_guard<std::mutex> lock(_robotsMutex);

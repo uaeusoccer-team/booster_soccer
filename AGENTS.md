@@ -238,7 +238,7 @@ sleep 2
 ros2 launch vision launch.py > vision.log 2>&1 &
 sleep 8
 
-timeout 5 ros2 topic echo /booster_soccer/detection --once | grep -E 'label:|confidence:|position_projection|xmin:|ymin:|xmax:|ymax:' || true
+timeout 5 ros2 topic echo /booster_soccer/detection --once | grep -E 'label:|confidence:|position:|position_confidence:|xmin:|ymin:|xmax:|ymax:' || true
 
 ros2 launch brain launch.py \
   tree:=head_track_only.xml \
@@ -305,7 +305,8 @@ Press `s` in that script to stop if supported by the running helper. Otherwise s
 
 - Official `vision` publishes `/booster_soccer/detection`, `/booster_soccer/line_segments`, and `/booster_soccer/ball`.
 - `brain` primarily consumes `/booster_soccer/detection`, not `/booster_soccer/ball`.
-- A ball detection includes `position_projection: [x, y, z]`.
+- A motion-valid ball detection includes canonical `position: [x, y, z]` with positive `position_confidence`; an RGB-only Ball keeps its bounding box but has no usable position.
+- `position_projection` remains only as a temporary compatibility mirror for non-Ball objects while their canonical coordinates are verified on the robot.
 - For the ball, `x` is forward distance, `y` is lateral offset, and `z` is near zero on the ground plane.
 - Depth is available on `/boostercamera/head/depth` and `/boostercamera/head/depth/camera_info`.
 - T1 camera config in this repo uses `/boostercamera/head/rgb`, `/boostercamera/head/rgb/camera_info`, and `/boostercamera/head/depth`.
@@ -331,7 +332,6 @@ Important files:
 ```text
 src/brain/behavior_trees/game.xml
 src/brain/behavior_trees/head_track_only.xml
-src/brain/behavior_trees/head_track_no_search.xml
 src/brain/behavior_trees/subtrees/subtree_cam_find_and_track_ball.xml
 src/brain/behavior_trees/subtrees/subtree_find_ball.xml
 src/brain/behavior_trees/subtrees/subtree_striker_play.xml

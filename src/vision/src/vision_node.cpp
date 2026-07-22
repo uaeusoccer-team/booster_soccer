@@ -1,11 +1,14 @@
 #include "booster_vision/vision_node.h"
 
+#include <algorithm>
+#include <cmath>
 #include <cstdlib>
 #include <functional>
 #include <filesystem>
 #include <iostream>
 #include <sstream>
 #include <fstream>
+#include <vector>
 
 #include <yaml-cpp/yaml.h>
 #include "ament_index_cpp/get_package_share_directory.hpp"
@@ -23,6 +26,27 @@
 #include "booster_vision/img_bridge.h"
 
 namespace booster_vision {
+
+namespace {
+
+double max_sync_skew_ms = 40.0;
+
+bool IsUsablePosition(const std::vector<float> &position) {
+    if (position.size() < 3) return false;
+
+    float squared_norm = 0.0f;
+    for (const float coordinate : position) {
+        if (!std::isfinite(coordinate)) return false;
+        squared_norm += coordinate * coordinate;
+    }
+    return squared_norm > 1e-8f;
+}
+
+std::vector<float> ZeroPosition() {
+    return {0.0f, 0.0f, 0.0f};
+}
+
+} // namespace
 
 VisionNode::VisionNode(const std::string &node_name, const rclcpp::NodeOptions &options) :
     rclcpp::Node(node_name, options) {
@@ -179,6 +203,8 @@ void VisionNode::Init(const std::string &cfg_template_path, const std::string &c
 
     // init data_syncer
     use_depth_ = as_or<bool>(node["use_depth"], false);
+    max_sync_skew_ms = std::max(0.0, as_or<double>(node["max_sync_skew_ms"], 40.0));
+    std::cout << "max_sync_skew_ms: " << max_sync_skew_ms << std::endl;
     data_syncer_ = std::make_shared<DataSyncer>(use_depth_);
     bool save_data_nonstationary = as_or<bool>(node["misc"]["save_data_nonstationary"], true);
     std::string log_root = std::string(std::getenv("HOME")) + "/Workspace/vision_log/" + getTimeString();
@@ -306,11 +332,20 @@ void VisionNode::ProcessData(SyncedDataBlock &synced_data, vision_interface::msg
     double timestamp = synced_data.color_data.timestamp;
     double depth_time_diff = (timestamp - synced_data.depth_data.timestamp) * 1000;
     double pose_time_diff = (timestamp - synced_data.pose_data.timestamp) * 1000;
-    if (use_depth_ && depth_time_diff > 40) {
-        std::cerr << "color depth time diff: " << depth_time_diff << "ms" << std::endl;
+    const bool depth_time_valid = use_depth_ &&
+                                  !synced_data.depth_data.data.empty() &&
+                                  std::fabs(depth_time_diff) <= max_sync_skew_ms;
+    const bool pose_time_valid = std::fabs(pose_time_diff) <= max_sync_skew_ms;
+    const bool ball_sync_valid = depth_time_valid && pose_time_valid;
+    if (use_depth_ && !depth_time_valid) {
+        RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 1000,
+                             "color/depth timestamp skew is %.1f ms; Ball position invalid for this frame",
+                             depth_time_diff);
     }
-    if (pose_time_diff > 40) {
-        std::cerr << "color pose time diff: " << pose_time_diff << " ms" << std::endl;
+    if (!pose_time_valid) {
+        RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 1000,
+                             "color/pose timestamp skew is %.1f ms; Ball position invalid for this frame",
+                             pose_time_diff);
     }
     cv::Mat color = synced_data.color_data.data;
     cv::Mat depth = synced_data.depth_data.data;
@@ -393,17 +428,28 @@ void VisionNode::ProcessData(SyncedDataBlock &synced_data, vision_interface::msg
 
         detection.class_name = detector_->kClassLabels[detection.class_id];
 
+        const bool is_ball = detection.class_name == "Ball";
         auto pose_estimator = get_estimator(detection.class_name);
-        Pose pose_obj_by_color = pose_estimator->EstimateByColor(p_eye2base, detection, color);
-        Pose pose_obj_by_depth = pose_estimator->EstimateByDepth(p_eye2base, detection, color, depth_float);
+        if (is_ball) {
+            const cv::Mat depth_for_estimation = ball_sync_valid ? depth_float : cv::Mat();
+            const Pose pose_obj_by_depth = pose_estimator->EstimateByDepth(
+                p_eye2base, detection, color, depth_for_estimation);
+            const std::vector<float> depth_position = pose_obj_by_depth.getTranslationVec();
+            const bool position_valid = ball_sync_valid && IsUsablePosition(depth_position);
 
-        // filter out incorrect ball detection
-        if (pose_estimator->use_depth_ && detection.class_name == "Ball" && pose_obj_by_depth == Pose()) {
-            std::cout << "filtered out ball detection by depth" << std::endl;
-            continue;
+            // A missing, stale, or unusable depth sample invalidates only the
+            // Ball position. Keep the RGB bbox for visual tracking.
+            detection_obj.position = position_valid ? depth_position : ZeroPosition();
+            detection_obj.position_confidence = position_valid ? 1 : 0;
+        } else {
+            const Pose pose_obj_by_color = pose_estimator->EstimateByColor(p_eye2base, detection, color);
+            const std::vector<float> projected_position = pose_obj_by_color.getTranslationVec();
+            const bool position_valid = IsUsablePosition(projected_position);
+
+            detection_obj.position = position_valid ? projected_position : ZeroPosition();
+            detection_obj.position_projection = detection_obj.position;
+            detection_obj.position_confidence = position_valid ? 1 : 0;
         }
-        detection_obj.position_projection = pose_obj_by_color.getTranslationVec();
-        detection_obj.position = pose_obj_by_depth.getTranslationVec();
 
         auto xyz = p_head2base.getTranslationVec();
         auto rpy = p_head2base.getEulerAnglesVec();
@@ -564,8 +610,10 @@ void VisionNode::ProcessSegmentationData(SyncedDataBlock &synced_data, vision_in
     Pose p_eye2base = p_head2base * p_headprime2head_ * p_eye2head_;
 
     double time_diff = (timestamp - synced_data.pose_data.timestamp) * 1000;
-    if (time_diff > 40) {
-        std::cerr << "seg: color pose time diff: " << time_diff << " ms" << std::endl;
+    if (std::fabs(time_diff) > max_sync_skew_ms) {
+        RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 1000,
+                             "segmentation color/pose timestamp skew is %.1f ms",
+                             time_diff);
     }
     std::cout << "seg: p_eye2base: \n"
               << p_eye2base.toCVMat() << std::endl;
