@@ -451,7 +451,7 @@ now_msec() {
 
 send_agent_command() {
   local command="$1"
-  ros2 topic pub --once /booster_agent/soccer_game_control \
+  timeout 2 ros2 topic pub --once /booster_agent/soccer_game_control \
     std_msgs/msg/String "{data: ${command}}" >/dev/null 2>&1
 }
 
@@ -660,10 +660,10 @@ monitor_brain_log() {
   local total_lines
   local first_line
 
-  [[ -f brain.log ]] || return
+  [[ -f brain.log ]] || return 0
   total_lines="$(wc -l < brain.log | tr -d ' ')"
-  [[ "$total_lines" =~ ^[0-9]+$ ]] || return
-  ((total_lines > MONITOR_LINE)) || return
+  [[ "$total_lines" =~ ^[0-9]+$ ]] || return 0
+  ((total_lines > MONITOR_LINE)) || return 0
 
   first_line=$((MONITOR_LINE + 1))
   while IFS= read -r line; do
@@ -674,7 +674,7 @@ monitor_brain_log() {
 
 expire_readiness() {
   local now
-  [[ "$SHOOT_READY" == "true" ]] || return
+  [[ "$SHOOT_READY" == "true" ]] || return 0
   now="$(now_msec)"
   if ((now - LAST_READY_EVIDENCE_MSEC > READY_DATA_MAX_AGE_MSEC)); then
     reset_readiness
@@ -727,7 +727,7 @@ publish_runtime_command() {
 
 select_manual_mode() {
   local mode="$1"
-  publish_runtime_command "autonomy_${mode}" || return
+  publish_runtime_command "autonomy_${mode}" || return 0
   RUNTIME_SWITCH="manual"
   RUNTIME_MANUAL_MODE="$mode"
   ACTIVE_BEHAVIOR="${mode} pending"
@@ -737,7 +737,7 @@ select_manual_mode() {
 }
 
 select_manual_switch() {
-  publish_runtime_command autonomy_manual || return
+  publish_runtime_command autonomy_manual || return 0
   if [[ "$RUNTIME_SWITCH" == "auto" ]]; then
     RUNTIME_MANUAL_MODE="$RUNTIME_AUTO_PHASE"
   fi
@@ -748,7 +748,7 @@ select_manual_switch() {
 }
 
 select_auto_switch() {
-  publish_runtime_command autonomy_auto || return
+  publish_runtime_command autonomy_auto || return 0
   if [[ "$RUNTIME_MANUAL_MODE" == "chase" || "$RUNTIME_MANUAL_MODE" == "adjust" ]]; then
     RUNTIME_AUTO_PHASE="$RUNTIME_MANUAL_MODE"
   fi
