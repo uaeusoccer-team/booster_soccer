@@ -457,11 +457,10 @@ send_agent_command() {
 }
 
 send_game_stop() {
-  local attempt
-  for attempt in 1 2 3; do
-    send_agent_command autonomy_stop 2 || true
-    send_agent_command stop 2 || true
-    sleep 0.15
+  for _ in 1 2 3; do
+    ros2 topic pub --once /booster_agent/soccer_game_control \
+      std_msgs/msg/String "{data: stop}" >/dev/null 2>&1 || true
+    sleep 0.1
   done
 }
 
