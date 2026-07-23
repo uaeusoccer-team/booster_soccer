@@ -451,15 +451,16 @@ now_msec() {
 
 send_agent_command() {
   local command="$1"
-  timeout 2 ros2 topic pub --once /booster_agent/soccer_game_control \
+  local timeout_seconds="${2:-8}"
+  timeout "$timeout_seconds" ros2 topic pub --once /booster_agent/soccer_game_control \
     std_msgs/msg/String "{data: ${command}}" >/dev/null 2>&1
 }
 
 send_game_stop() {
   local attempt
   for attempt in 1 2 3; do
-    send_agent_command autonomy_stop || true
-    send_agent_command stop || true
+    send_agent_command autonomy_stop 2 || true
+    send_agent_command stop 2 || true
     sleep 0.15
   done
 }
@@ -719,10 +720,19 @@ STATUS
 
 publish_runtime_command() {
   local command="$1"
-  if ! send_agent_command "$command"; then
-    echo "Failed to publish ${command}; keeping the previous selection." >&2
-    return 1
-  fi
+  local attempt
+
+  for attempt in 1 2 3; do
+    if send_agent_command "$command" 8; then
+      return 0
+    fi
+    echo "Publish attempt ${attempt}/3 failed for ${command}; waiting for ROS discovery..." >&2
+    sleep 1
+    check_processes
+  done
+
+  echo "Failed to publish ${command} after 3 attempts; keeping the previous selection." >&2
+  return 1
 }
 
 select_manual_mode() {
@@ -1025,7 +1035,7 @@ BRAIN_PID=$!
 ros2 launch game_controller launch.py > game_controller.log 2>&1 &
 GAME_CONTROLLER_PID=$!
 
-sleep 3
+sleep 5
 check_processes
 
 RUNTIME_SWITCH="$SWITCH_MODE"
