@@ -104,6 +104,16 @@ void BrainTree::initEntry()
     setEntry<bool>("assist_chase", false);
     setEntry<bool>("assist_kick", false);
     setEntry<bool>("go_manual", false);
+    setEntry<string>("autonomy_switch", "manual");
+    setEntry<string>("autonomy_manual_mode", "track");
+    setEntry<string>("autonomy_auto_phase", "chase");
+    setEntry<bool>("autonomy_enabled", true);
+    setEntry<double>("autonomy_command_vx", 0.0);
+    setEntry<double>("autonomy_command_vy", 0.0);
+    setEntry<double>("autonomy_command_theta", 0.0);
+    setEntry<double>("autonomy_adjust_vx", 0.0);
+    setEntry<double>("autonomy_adjust_vy", 0.0);
+    setEntry<double>("autonomy_adjust_theta", 0.0);
 
     setEntry<bool>("we_just_scored", false);
     setEntry<bool>("wait_for_opponent_kickoff", false);
@@ -703,6 +713,14 @@ NodeStatus SimpleChase::tick()
     const double ballRange = brain->data->ball.range;
     if (ballRange <= std::fabs(stopDist))
     {
+        brain->log->log(
+            "SimpleChase/vector",
+            format("range: %.3f ballX: %.3f ballY: %.3f vx: %.3f vy: %.3f source: STOP_DIST",
+                   ballRange,
+                   brain->data->ball.posToRobot.x,
+                   brain->data->ball.posToRobot.y,
+                   vx,
+                   vy));
         return NodeStatus::SUCCESS;
     }
 

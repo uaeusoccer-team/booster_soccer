@@ -2427,6 +2427,76 @@ bool Brain::isFreekickStartPlacing() {
 void Brain::agentCommandCallback(const std_msgs::msg::String::SharedPtr msg) {
     RCLCPP_INFO(get_logger(), "Received agent command: %s", msg->data.c_str());
 
+    if (msg->data == "autonomy_stop") {
+        tree->setEntry<bool>("autonomy_enabled", false);
+        tree->setEntry<double>("autonomy_command_vx", 0.0);
+        tree->setEntry<double>("autonomy_command_vy", 0.0);
+        tree->setEntry<double>("autonomy_command_theta", 0.0);
+        client->setVelocity(0.0, 0.0, 0.0);
+        RCLCPP_INFO(get_logger(), "Autonomy disabled with zero velocity");
+        return;
+    }
+
+    if (msg->data == "autonomy_save_track" ||
+        msg->data == "autonomy_save_chase" ||
+        msg->data == "autonomy_save_adjust") {
+        const string phase = msg->data.substr(string("autonomy_save_").size());
+        tree->setEntry<string>("autonomy_auto_phase", phase);
+        RCLCPP_INFO(get_logger(), "Autonomy saved phase => %s", phase.c_str());
+        return;
+    }
+
+    if (msg->data == "autonomy_auto_track" ||
+        msg->data == "autonomy_auto_chase" ||
+        msg->data == "autonomy_auto_adjust") {
+        const string phase = msg->data.substr(string("autonomy_auto_").size());
+        tree->setEntry<string>("autonomy_auto_phase", phase);
+        tree->setEntry<string>("autonomy_switch", "auto");
+        tree->setEntry<bool>("autonomy_enabled", true);
+        RCLCPP_INFO(get_logger(), "Autonomy switch => auto (phase: %s)", phase.c_str());
+        return;
+    }
+
+    if (msg->data == "autonomy_auto") {
+        const string manual_mode = tree->getEntry<string>("autonomy_manual_mode");
+        if (manual_mode == "chase" || manual_mode == "adjust") {
+            tree->setEntry<string>("autonomy_auto_phase", manual_mode);
+        }
+        tree->setEntry<string>("autonomy_switch", "auto");
+        tree->setEntry<bool>("autonomy_enabled", true);
+        RCLCPP_INFO(
+            get_logger(),
+            "Autonomy switch => auto (phase: %s)",
+            tree->getEntry<string>("autonomy_auto_phase").c_str());
+        return;
+    }
+
+    if (msg->data == "autonomy_manual") {
+        if (tree->getEntry<string>("autonomy_switch") == "auto") {
+            tree->setEntry<string>(
+                "autonomy_manual_mode",
+                tree->getEntry<string>("autonomy_auto_phase"));
+        }
+        tree->setEntry<string>("autonomy_switch", "manual");
+        tree->setEntry<bool>("autonomy_enabled", true);
+        RCLCPP_INFO(
+            get_logger(),
+            "Autonomy switch => manual (mode: %s)",
+            tree->getEntry<string>("autonomy_manual_mode").c_str());
+        return;
+    }
+
+    if (msg->data == "autonomy_track" ||
+        msg->data == "autonomy_chase" ||
+        msg->data == "autonomy_adjust") {
+        const string mode = msg->data.substr(string("autonomy_").size());
+        tree->setEntry<string>("autonomy_manual_mode", mode);
+        tree->setEntry<string>("autonomy_switch", "manual");
+        tree->setEntry<bool>("autonomy_enabled", true);
+        RCLCPP_INFO(get_logger(), "Autonomy manual mode => %s", mode.c_str());
+        return;
+    }
+
     data->timeLastGamecontrolMsg = get_clock()->now();
 
 
