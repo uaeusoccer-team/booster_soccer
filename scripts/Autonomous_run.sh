@@ -721,17 +721,48 @@ STATUS
 publish_runtime_command() {
   local command="$1"
   local attempt
+  local ack_text
+  local first_ack_line
+  local wait_step
+
+  case "$command" in
+    autonomy_save_track) ack_text="Autonomy saved phase => track" ;;
+    autonomy_save_chase) ack_text="Autonomy saved phase => chase" ;;
+    autonomy_save_adjust) ack_text="Autonomy saved phase => adjust" ;;
+    autonomy_auto_track) ack_text="Autonomy switch => auto (phase: track)" ;;
+    autonomy_auto_chase) ack_text="Autonomy switch => auto (phase: chase)" ;;
+    autonomy_auto_adjust) ack_text="Autonomy switch => auto (phase: adjust)" ;;
+    autonomy_auto) ack_text="Autonomy switch => auto (phase:" ;;
+    autonomy_manual) ack_text="Autonomy switch => manual (mode:" ;;
+    autonomy_track) ack_text="Autonomy manual mode => track" ;;
+    autonomy_chase) ack_text="Autonomy manual mode => chase" ;;
+    autonomy_adjust) ack_text="Autonomy manual mode => adjust" ;;
+    *)
+      echo "No acknowledgement rule exists for runtime command ${command}." >&2
+      return 1
+      ;;
+  esac
+
+  first_ack_line=$(( $(wc -l < brain.log) + 1 ))
 
   for attempt in 1 2 3; do
-    if send_agent_command "$command" 8; then
-      return 0
-    fi
-    echo "Publish attempt ${attempt}/3 failed for ${command}; waiting for ROS discovery..." >&2
-    sleep 1
+    send_agent_command "$command" 8 || true
+
+    for wait_step in {1..20}; do
+      if awk -v first="$first_ack_line" -v ack="$ack_text" \
+        'NR >= first && index($0, ack) { found=1; exit } END { exit !found }' \
+        brain.log; then
+        monitor_brain_log
+        return 0
+      fi
+      sleep 0.1
+    done
+
+    echo "No brain acknowledgement for ${command} after attempt ${attempt}/3; retrying..." >&2
     check_processes
   done
 
-  echo "Failed to publish ${command} after 3 attempts; keeping the previous selection." >&2
+  echo "The brain did not acknowledge ${command} after 3 attempts; keeping the previous selection." >&2
   return 1
 }
 
