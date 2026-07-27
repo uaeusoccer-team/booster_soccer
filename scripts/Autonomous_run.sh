@@ -67,6 +67,7 @@ READY_START_MSEC=0
 LAST_READY_EVIDENCE_MSEC=0
 SHOOT_READY="false"
 READY_PROMPTED="false"
+LAST_READINESS_REASON="not evaluated"
 CHASE_STOP_PROMPTED="false"
 MONITOR_LINE=0
 
@@ -469,9 +470,12 @@ controlled_stop() {
 }
 
 reset_readiness() {
+  local reason="${1:-readiness reset without a diagnostic reason}"
+
+  LAST_READINESS_REASON="$reason"
   if [[ "$SHOOT_READY" == "true" ]]; then
     echo
-    echo "Shoot readiness revoked: the ball pose or active behavior changed."
+    echo "Shoot readiness revoked: ${reason}"
   fi
   READY_COUNT=0
   READY_START_MSEC=0
@@ -481,16 +485,21 @@ reset_readiness() {
 }
 
 evaluate_adjust_readiness() {
-  local range_error="$1"
-  local y_error="$2"
-  local theta_error="$3"
-  local vx="$4"
-  local vy="$5"
-  local theta="$6"
-  local source="$7"
+  local ball_range="$1"
+  local range_error="$2"
+  local y_error="$3"
+  local theta_error="$4"
+  local vx="$5"
+  local vy="$6"
+  local theta="$7"
+  local source="$8"
   local now
+  local elapsed
+  local failure_reason
 
-  if awk \
+  failure_reason="$(awk \
+    -v ball_range="$ball_range" \
+    -v max_ball_range="$ADJUST_MAX_BALL_RANGE" \
     -v range_error="$range_error" \
     -v range_tolerance="$ADJUST_RANGE_TOLERANCE" \
     -v y_error="$y_error" \
@@ -502,27 +511,53 @@ evaluate_adjust_readiness() {
     -v theta="$theta" \
     -v source="$source" '
       function abs(v) { return v < 0 ? -v : v }
-      BEGIN {
-        valid_source = source != "NO_DEPTH" && source != "OUT_OF_RANGE"
-        ready = valid_source &&
-                abs(range_error) <= range_tolerance &&
-                abs(y_error) <= y_tolerance &&
-                abs(theta_error) <= theta_tolerance &&
-                abs(vx) <= 0.0005 &&
-                abs(vy) <= 0.0005 &&
-                abs(theta) <= 0.0005
-        exit !ready
+      function add(reason) {
+        if (reasons != "") {
+          reasons = reasons "; "
+        }
+        reasons = reasons reason
       }
-    '; then
+      BEGIN {
+        if (source == "NO_DEPTH") {
+          add("source=NO_DEPTH (no usable body-frame depth)")
+        } else if (source == "OUT_OF_RANGE") {
+          add(sprintf("source=OUT_OF_RANGE: ball_range=%.3f > adjust_max_ball_range=%.3f", ball_range, max_ball_range))
+        }
+        if (abs(range_error) > range_tolerance) {
+          add(sprintf("|range_error|=%.3f > adjust_range_tolerance=%.3f", abs(range_error), range_tolerance))
+        }
+        if (abs(y_error) > y_tolerance) {
+          add(sprintf("|y_error|=%.3f > adjust_y_tolerance=%.3f", abs(y_error), y_tolerance))
+        }
+        if (abs(theta_error) > theta_tolerance) {
+          add(sprintf("|theta_error|=%.3f > adjust_stop_angle=%.3f", abs(theta_error), theta_tolerance))
+        }
+        if (abs(vx) > 0.0005) {
+          add(sprintf("|vx|=%.3f > ready_zero_limit=0.0005", abs(vx)))
+        }
+        if (abs(vy) > 0.0005) {
+          add(sprintf("|vy|=%.3f > ready_zero_limit=0.0005", abs(vy)))
+        }
+        if (abs(theta) > 0.0005) {
+          add(sprintf("|theta|=%.3f > ready_zero_limit=0.0005", abs(theta)))
+        }
+        print reasons
+      }
+    ')"
+
+  if [[ -z "$failure_reason" ]]; then
     now="$(now_msec)"
     if ((READY_COUNT == 0)); then
       READY_START_MSEC="$now"
     fi
     READY_COUNT=$((READY_COUNT + 1))
     LAST_READY_EVIDENCE_MSEC="$now"
+    elapsed=$((now - READY_START_MSEC))
+    LAST_READINESS_REASON="stabilizing: samples=${READY_COUNT}/${READY_SAMPLES}, elapsed=${elapsed}/${READY_MIN_MSEC}ms"
 
-    if ((READY_COUNT >= READY_SAMPLES && now - READY_START_MSEC >= READY_MIN_MSEC)); then
+    if ((READY_COUNT >= READY_SAMPLES && elapsed >= READY_MIN_MSEC)); then
       SHOOT_READY="true"
+      LAST_READINESS_REASON="ready: samples=${READY_COUNT}/${READY_SAMPLES}, elapsed=${elapsed}/${READY_MIN_MSEC}ms"
       if [[ "$READY_PROMPTED" != "true" ]]; then
         READY_PROMPTED="true"
         echo
@@ -534,7 +569,7 @@ evaluate_adjust_readiness() {
       fi
     fi
   else
-    reset_readiness
+    reset_readiness "$failure_reason"
   fi
 }
 
@@ -570,17 +605,17 @@ process_log_line() {
     ACTIVE_BEHAVIOR="search"
     BALL_VISIBLE="false"
     BALL_DEPTH_USABLE="false"
-    reset_readiness
+    reset_readiness "active_behavior=search; ball_visible=false; usable depth is unavailable"
   elif [[ "$line" == *"CamTrackBall/direct_pixel"* ]]; then
     ACTIVE_BEHAVIOR="track"
     BALL_VISIBLE="true"
     BALL_DEPTH_USABLE="false"
-    reset_readiness
+    reset_readiness "active_behavior=track; shooting adjustment is not active"
   elif [[ "$line" == *"SimpleChase/vector"* ]]; then
     ACTIVE_BEHAVIOR="chase"
     BALL_VISIBLE="true"
     BALL_DEPTH_USABLE="true"
-    reset_readiness
+    reset_readiness "active_behavior=chase; shooting adjustment is not active"
     if [[ "$RUNTIME_SWITCH" == "auto" ]]; then
       RUNTIME_AUTO_PHASE="chase"
     fi
@@ -620,6 +655,7 @@ process_log_line() {
       LAST_THETA="${BASH_REMATCH[7]}"
       LAST_ADJUST_SOURCE="${BASH_REMATCH[8]}"
       evaluate_adjust_readiness \
+        "${BASH_REMATCH[1]}" \
         "${BASH_REMATCH[2]}" \
         "${BASH_REMATCH[3]}" \
         "${BASH_REMATCH[4]}" \
@@ -628,7 +664,7 @@ process_log_line() {
         "${BASH_REMATCH[7]}" \
         "${BASH_REMATCH[8]}"
     else
-      reset_readiness
+      reset_readiness "ShootingAdjust/vector diagnostic line could not be parsed"
     fi
   elif [[ "$line" == *"RobotClient/setVelocity_out"* ]]; then
     pattern="vx: (${number_re}).*vy: (${number_re}).*vtheta: (${number_re})"
@@ -658,10 +694,12 @@ monitor_brain_log() {
 
 expire_readiness() {
   local now
+  local age
   [[ "$SHOOT_READY" == "true" ]] || return 0
   now="$(now_msec)"
-  if ((now - LAST_READY_EVIDENCE_MSEC > READY_DATA_MAX_AGE_MSEC)); then
-    reset_readiness
+  age=$((now - LAST_READY_EVIDENCE_MSEC))
+  if ((age > READY_DATA_MAX_AGE_MSEC)); then
+    reset_readiness "freshness_age=${age}ms > ready_data_max_age_msec=${READY_DATA_MAX_AGE_MSEC}ms"
   fi
 }
 
@@ -676,10 +714,14 @@ process_state() {
 
 show_status() {
   local resume_mode
+  local readiness_elapsed=0
   if [[ "$RUNTIME_SWITCH" == "auto" ]]; then
     resume_mode="$RUNTIME_AUTO_PHASE"
   else
     resume_mode="$RUNTIME_MANUAL_MODE"
+  fi
+  if ((READY_COUNT > 0)); then
+    readiness_elapsed=$(( $(now_msec) - READY_START_MSEC ))
   fi
 
   cat <<STATUS
@@ -695,6 +737,8 @@ Autonomous status:
   last adjustment source: ${LAST_ADJUST_SOURCE}
   last velocity: vx=${LAST_VX} vy=${LAST_VY} theta=${LAST_THETA}
   shoot ready: ${SHOOT_READY}
+  readiness progress: samples=${READY_COUNT}/${READY_SAMPLES}, elapsed=${readiness_elapsed}/${READY_MIN_MSEC}ms
+  readiness diagnostic: ${LAST_READINESS_REASON}
   vision: $(process_state "$VISION_PID")
   brain: $(process_state "$BRAIN_PID")
   game controller: $(process_state "$GAME_CONTROLLER_PID")
@@ -756,7 +800,7 @@ select_manual_mode() {
   RUNTIME_MANUAL_MODE="$mode"
   ACTIVE_BEHAVIOR="${mode} pending"
   CHASE_STOP_PROMPTED="false"
-  reset_readiness
+  reset_readiness "operator selected manual mode=${mode}; waiting for adjustment readiness"
   echo "Manual mode selected: ${mode}"
 }
 
@@ -767,7 +811,7 @@ select_manual_switch() {
   fi
   RUNTIME_SWITCH="manual"
   ACTIVE_BEHAVIOR="${RUNTIME_MANUAL_MODE} pending"
-  reset_readiness
+  reset_readiness "operator selected switch=manual; waiting for adjustment readiness"
   echo "Automatic transitions disabled; manual mode: ${RUNTIME_MANUAL_MODE}"
 }
 
@@ -778,7 +822,7 @@ select_auto_switch() {
   fi
   RUNTIME_SWITCH="auto"
   ACTIVE_BEHAVIOR="${RUNTIME_AUTO_PHASE} pending"
-  reset_readiness
+  reset_readiness "operator selected switch=auto; waiting for adjustment readiness"
   echo "Automatic transitions enabled; saved phase: ${RUNTIME_AUTO_PHASE}"
 }
 
@@ -797,6 +841,7 @@ send_shoot() {
 
   if ! shoot_is_fresh; then
     echo "Shoot rejected: adjustment readiness is not currently valid and fresh."
+    echo "Readiness diagnostic: ${LAST_READINESS_REASON}"
     return
   fi
 
