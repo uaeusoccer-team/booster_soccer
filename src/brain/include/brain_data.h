@@ -53,13 +53,22 @@ public:
 
 
     bool ballDetected = false;
+    // A new RGB acquisition must contain usable depth once before tracking is
+    // authorized. The latch remains true across temporary depth loss and is
+    // reset only when the accepted RGB ball disappears completely.
+    std::atomic<bool> ballDepthAcquired{false};
     std::atomic<std::uint64_t> ballTrackingGeneration{0};
-    // Last horizontal direction in which the head was viewing an accepted
-    // ball. This is visual/head-relative search memory, deliberately kept
-    // separate from the projected ground position used for chase motion.
-    // Positive is left, negative is right, and zero means the last image was
-    // centered enough that it did not choose a side.
+    // Last RGB/head observation used to choose the direction and urgency of a
+    // search after the ball leaves the image. This memory is deliberately
+    // independent of the depth position and the robot's velocity-command
+    // history. Positive direction is left and negative direction is right.
     std::atomic<int> lastBallSearchDirection{0};
+    std::atomic<double> lastBallPixelX{0.0};
+    std::atomic<double> lastBallPixelY{0.0};
+    std::atomic<double> lastBallPixelDx{0.0};
+    std::atomic<double> lastBallPixelDy{0.0};
+    std::atomic<double> lastBallObservedHeadYaw{0.0};
+    std::atomic<double> lastBallObservedHeadPitch{0.0};
     std::atomic<std::uint64_t> lastBallSearchGeneration{0};
     GameObject ball{};
     GameObject tmBall{};

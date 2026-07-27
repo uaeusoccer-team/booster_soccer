@@ -12,10 +12,10 @@
         <Sequence name="root">
             <RunOnce><Script code="control_state=3" /></RunOnce>
             <ReactiveSequence _while="control_state==1 || assist_kick || go_manual || assist_chase" >
-                <CamTrackBall _while="assist_chase &amp;&amp; ball_visible"
+                <CamTrackBall _while="assist_chase &amp;&amp; ball_visible &amp;&amp; ball_depth_acquired"
                               stop_angle="0.3"
                               theta="{tracking_theta}" />
-                <CamFindBall _while="assist_chase &amp;&amp; !ball_visible"
+                <CamFindBall _while="assist_chase &amp;&amp; !(ball_visible &amp;&amp; ball_depth_acquired)"
                              theta="{tracking_theta}" />
                 <SimpleChase _while="assist_chase"
                              vx_limit="1.5"

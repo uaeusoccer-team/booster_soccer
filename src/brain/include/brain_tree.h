@@ -130,6 +130,8 @@ public:
             InputPort<double>("stop_angle", 0.1, "Robot-relative ball yaw deadband"),
             InputPort<double>("ball_yaw_gain", 4.0, "Body rotation gain applied to robot-relative ball yaw"),
             InputPort<double>("pitch_turn_gain", 1.0, "Additional body rotation gain per radian of downward head pitch"),
+            InputPort<double>("track_turn_yaw_limit", 0.75, "Observed absolute head yaw that qualifies a later RGB-loss fast turn"),
+            InputPort<double>("loss_turn_pitch_limit", 0.70, "Observed downward head pitch that qualifies a later RGB-loss fast turn"),
             InputPort<double>("head_step_rad", 0.04, "Normal head yaw/pitch step per new vision frame (rad)"),
             InputPort<double>("head_settle_step_rad", 0.02, "Head yaw/pitch step near the pixel deadband (rad)"),
             InputPort<double>("head_deadband_x_px", 35.0, "Horizontal head tracking deadband (px)"),
@@ -154,9 +156,11 @@ public:
     static PortsList providedPorts()
     {
         return {
-            InputPort<double>("yaw_limit", 1.1, "Maximum absolute head yaw used by the ball search"),
+            InputPort<double>("yaw_limit", 1.15, "Maximum absolute head yaw used by the ball search"),
+            InputPort<double>("track_turn_yaw_limit", 0.75, "Last observed absolute head yaw that enables a fast same-direction turn after RGB loss"),
+            InputPort<double>("loss_turn_pitch_limit", 0.70, "Last observed downward head pitch that enables a fast same-direction turn after RGB loss"),
             InputPort<double>("head_search_speed", 0.20, "Head yaw scan speed"),
-            InputPort<double>("body_search_speed", 0.25, "Body yaw speed when continuing an active turn after ball loss"),
+            InputPort<double>("body_search_speed", 0.45, "Exact body yaw speed used for an RGB yaw/pitch-triggered turn after ball loss"),
             InputPort<double>("cmd_interval_msec", 100.0, "Minimum time between head commands"),
             OutputPort<double>("theta")
         };

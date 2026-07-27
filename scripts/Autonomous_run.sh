@@ -19,8 +19,10 @@ STOP_ANGLE="0.10"
 BALL_YAW_GAIN="4.0"
 PITCH_TURN_GAIN="1.0"
 HEAD_SEARCH_SPEED="0.20"
-BODY_SEARCH_SPEED="0.25"
-YAW_LIMIT="1.10"
+BODY_SEARCH_SPEED="0.45"
+TRACK_TURN_YAW_LIMIT="0.75"
+LOSS_TURN_PITCH_LIMIT="0.70"
+SEARCH_YAW_LIMIT="1.15"
 CMD_INTERVAL_MSEC="100"
 HEAD_STEP_RAD="0.04"
 HEAD_SETTLE_STEP_RAD="0.02"
@@ -49,6 +51,8 @@ READY_DATA_MAX_AGE_MSEC="500"
 
 DRY_RUN="false"
 STOPPING="false"
+LEGACY_YAW_LIMIT_USED="false"
+SEARCH_YAW_LIMIT_EXPLICIT="false"
 
 RUNTIME_SWITCH="$SWITCH_MODE"
 RUNTIME_MANUAL_MODE="$START_MODE"
@@ -98,8 +102,11 @@ Tracking and rotation:
   ball_yaw_gain=4.0
   pitch_turn_gain=1.0
   head_search_speed=0.20
-  body_search_speed=0.25
-  yaw_limit=1.10
+  body_search_speed=0.45
+  track_turn_yaw_limit=0.75
+  loss_turn_pitch_limit=0.70
+  search_yaw_limit=1.15
+  yaw_limit=1.15                    # compatibility alias for search_yaw_limit
   cmd_interval_msec=100
   head_step_rad=0.04
   head_settle_step_rad=0.02
@@ -149,10 +156,11 @@ Runtime commands:
   shoot     Immediately send the standalone operator shoot command once.
   stop      Send a controlled stop and exit.
 
-Ball loss is a temporary fallback. RGB-only detections use CamTrackBall with
-zero translation; a missing ball uses CamFindBall. Valid depth restores the
-same selected manual mode or saved automatic phase. In automatic mode, normal
-range rules are then applied.
+Each new RGB acquisition must contain usable depth once before CamTrackBall is
+allowed. After that first depth-confirmed frame, CamTrackBall may continue
+through temporary depth loss with zero translation. A complete RGB loss resets
+the latch and returns to CamFindBall. Valid current depth restores the same
+selected manual mode or saved automatic phase.
 
 Automatic transitions:
   chase -> adjust when ball range <= stop_dist
@@ -171,8 +179,10 @@ Example:
     pitch_turn_gain=1.0 \
     require_play=false \
     head_search_speed=0.15 \
-    body_search_speed=0.20 \
-    yaw_limit=1.10 \
+    body_search_speed=0.45 \
+    track_turn_yaw_limit=0.75 \
+    loss_turn_pitch_limit=0.70 \
+    search_yaw_limit=1.15 \
     cmd_interval_msec=100 \
     head_step_rad=0.04 \
     head_settle_step_rad=0.01 \
@@ -299,7 +309,16 @@ set_value() {
     pitch_turn_gain) PITCH_TURN_GAIN="$value" ;;
     head_search_speed) HEAD_SEARCH_SPEED="$value" ;;
     body_search_speed) BODY_SEARCH_SPEED="$value" ;;
-    yaw_limit) YAW_LIMIT="$value" ;;
+    track_turn_yaw_limit) TRACK_TURN_YAW_LIMIT="$value" ;;
+    loss_turn_pitch_limit) LOSS_TURN_PITCH_LIMIT="$value" ;;
+    search_yaw_limit)
+      SEARCH_YAW_LIMIT="$value"
+      SEARCH_YAW_LIMIT_EXPLICIT="true"
+      ;;
+    yaw_limit)
+      SEARCH_YAW_LIMIT="$value"
+      LEGACY_YAW_LIMIT_USED="true"
+      ;;
     cmd_interval_msec) CMD_INTERVAL_MSEC="$value" ;;
     head_step_rad) HEAD_STEP_RAD="$value" ;;
     head_settle_step_rad) HEAD_SETTLE_STEP_RAD="$value" ;;
@@ -360,6 +379,11 @@ float_le() {
 }
 
 validate_settings() {
+  if [[ "$LEGACY_YAW_LIMIT_USED" == "true" && "$SEARCH_YAW_LIMIT_EXPLICIT" == "true" ]]; then
+    echo "Do not set both yaw_limit and search_yaw_limit; yaw_limit is only a compatibility alias." >&2
+    exit 2
+  fi
+
   float_lt "$STOP_DIST" "$ADJUST_MAX_BALL_RANGE" || {
     echo "Invalid automatic hysteresis: stop_dist (${STOP_DIST}) must be less than adjust_max_ball_range (${ADJUST_MAX_BALL_RANGE})." >&2
     exit 2
@@ -392,7 +416,9 @@ Autonomous run settings:
   pitch_turn_gain=${PITCH_TURN_GAIN}
   head_search_speed=${HEAD_SEARCH_SPEED}
   body_search_speed=${BODY_SEARCH_SPEED}
-  yaw_limit=${YAW_LIMIT}
+  track_turn_yaw_limit=${TRACK_TURN_YAW_LIMIT}
+  loss_turn_pitch_limit=${LOSS_TURN_PITCH_LIMIT}
+  search_yaw_limit=${SEARCH_YAW_LIMIT}
   cmd_interval_msec=${CMD_INTERVAL_MSEC}
   head_step_rad=${HEAD_STEP_RAD}
   head_settle_step_rad=${HEAD_SETTLE_STEP_RAD}
@@ -419,6 +445,11 @@ Autonomous run settings:
   ready_min_msec=${READY_MIN_MSEC}
   ready_data_max_age_msec=${READY_DATA_MAX_AGE_MSEC}
 SETTINGS
+
+  if [[ "$LEGACY_YAW_LIMIT_USED" == "true" ]]; then
+    echo
+    echo "Warning: yaw_limit is deprecated; use search_yaw_limit."
+  fi
 
   if float_lt "$STOP_DIST" "$ADJUST_TARGET_RANGE"; then
     echo
@@ -920,23 +951,27 @@ write_tree() {
       <CamTrackBall stop_angle="${STOP_ANGLE}"
                     ball_yaw_gain="${BALL_YAW_GAIN}"
                     pitch_turn_gain="${PITCH_TURN_GAIN}"
+                    track_turn_yaw_limit="${TRACK_TURN_YAW_LIMIT}"
+                    loss_turn_pitch_limit="${LOSS_TURN_PITCH_LIMIT}"
                     head_step_rad="${HEAD_STEP_RAD}"
                     head_settle_step_rad="${HEAD_SETTLE_STEP_RAD}"
                     head_deadband_x_px="${HEAD_DEADBAND_X_PX}"
                     head_deadband_y_px="${HEAD_DEADBAND_Y_PX}"
                     theta="{tracking_theta}" />
-      <Script code="autonomy_command_vx=0.0; autonomy_command_vy=0.0; autonomy_command_theta=tracking_theta" />
+      <Script code="autonomy_command_vx=0.0; autonomy_command_vy=0.0; autonomy_command_theta=tracking_theta; autonomy_apply_min_theta=true" />
     </Sequence>
   </BehaviorTree>
 
   <BehaviorTree ID="SearchBall">
     <Sequence>
-      <CamFindBall yaw_limit="${YAW_LIMIT}"
+      <CamFindBall yaw_limit="${SEARCH_YAW_LIMIT}"
+                   track_turn_yaw_limit="${TRACK_TURN_YAW_LIMIT}"
+                   loss_turn_pitch_limit="${LOSS_TURN_PITCH_LIMIT}"
                    head_search_speed="${HEAD_SEARCH_SPEED}"
                    body_search_speed="${BODY_SEARCH_SPEED}"
                    cmd_interval_msec="${CMD_INTERVAL_MSEC}"
                    theta="{tracking_theta}" />
-      <Script code="autonomy_command_vx=0.0; autonomy_command_vy=0.0; autonomy_command_theta=tracking_theta" />
+      <Script code="autonomy_command_vx=0.0; autonomy_command_vy=0.0; autonomy_command_theta=tracking_theta; autonomy_apply_min_theta=false" />
     </Sequence>
   </BehaviorTree>
 
@@ -945,6 +980,8 @@ write_tree() {
       <CamTrackBall stop_angle="${STOP_ANGLE}"
                     ball_yaw_gain="${BALL_YAW_GAIN}"
                     pitch_turn_gain="${PITCH_TURN_GAIN}"
+                    track_turn_yaw_limit="${TRACK_TURN_YAW_LIMIT}"
+                    loss_turn_pitch_limit="${LOSS_TURN_PITCH_LIMIT}"
                     head_step_rad="${HEAD_STEP_RAD}"
                     head_settle_step_rad="${HEAD_SETTLE_STEP_RAD}"
                     head_deadband_x_px="${HEAD_DEADBAND_X_PX}"
@@ -956,7 +993,7 @@ write_tree() {
                    y_tolerance="${Y_TOLERANCE}"
                    vx="{chase_vx}"
                    vy="{chase_vy}" />
-      <Script code="autonomy_command_vx=chase_vx; autonomy_command_vy=chase_vy; autonomy_command_theta=tracking_theta" />
+      <Script code="autonomy_command_vx=chase_vx; autonomy_command_vy=chase_vy; autonomy_command_theta=tracking_theta; autonomy_apply_min_theta=true" />
     </Sequence>
   </BehaviorTree>
 
@@ -980,7 +1017,7 @@ write_tree() {
                       vx="{autonomy_adjust_vx}"
                       vy="{autonomy_adjust_vy}"
                       theta="{autonomy_adjust_theta}" />
-      <Script code="autonomy_command_vx=autonomy_adjust_vx; autonomy_command_vy=autonomy_adjust_vy; autonomy_command_theta=autonomy_adjust_theta" />
+      <Script code="autonomy_command_vx=autonomy_adjust_vx; autonomy_command_vy=autonomy_adjust_vy; autonomy_command_theta=autonomy_adjust_theta; autonomy_apply_min_theta=true" />
     </Sequence>
   </BehaviorTree>
 
@@ -1034,14 +1071,15 @@ write_tree() {
             </Sequence>
           </IfThenElse>
           <IfThenElse>
-            <ScriptCondition name="RGB ball visible?" code="ball_visible" />
+            <ScriptCondition name="Depth-confirmed RGB acquisition?" code="ball_visible &amp;&amp; ball_depth_acquired" />
             <SubTree ID="TrackVisible" _autoremap="true" />
             <SubTree ID="SearchBall" _autoremap="true" />
           </IfThenElse>
         </IfThenElse>
         <SetVelocity x="{autonomy_command_vx}"
                      y="{autonomy_command_vy}"
-                     theta="{autonomy_command_theta}" />
+                     theta="{autonomy_command_theta}"
+                     apply_min_theta="{autonomy_apply_min_theta}" />
       </ReactiveSequence>
     </Sequence>
   </BehaviorTree>

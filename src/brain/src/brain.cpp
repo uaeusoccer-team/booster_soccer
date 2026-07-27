@@ -1727,7 +1727,8 @@ vector<GameObject> Brain::getGameObjects(const vision_interface::msg::Detections
 void Brain::detectProcessBalls(const vector<GameObject> &ballObjs)
 {
     static rclcpp::Time lastSeenRealBallTime;
-    const bool wasTrackingBall = data->ballDetected;
+    const bool wasDepthAcquired =
+        data->ballDepthAcquired.load(std::memory_order_acquire);
     double bestConfidence = -1.0;
     bool bestHasDepth = false;
     int indexRealBall = -1;
@@ -1767,11 +1768,20 @@ void Brain::detectProcessBalls(const vector<GameObject> &ballObjs)
 
         data->ball = ballObjs[indexRealBall];
         data->ball.confidence = bestConfidence;
-        if (!wasTrackingBall)
+        if (!wasDepthAcquired && bestHasDepth)
         {
+            data->ballDepthAcquired.store(true, std::memory_order_release);
             data->ballTrackingGeneration.fetch_add(1, std::memory_order_relaxed);
+            log->log(
+                "BallAcquisition",
+                format("Depth-confirmed RGB acquisition accepted; generation: %llu",
+                       static_cast<unsigned long long>(
+                           data->ballTrackingGeneration.load(std::memory_order_relaxed))));
         }
 
+        const bool depthAcquired =
+            data->ballDepthAcquired.load(std::memory_order_acquire);
+        tree->setEntry<bool>("ball_depth_acquired", depthAcquired);
         tree->setEntry<bool>("ball_location_known", bestHasDepth);
         if (bestHasDepth) {
             updateBallOut();
@@ -1783,7 +1793,16 @@ void Brain::detectProcessBalls(const vector<GameObject> &ballObjs)
     else
     { // No ball detected
         data->ballDetected = false;
+        data->ballDepthAcquired.store(false, std::memory_order_release);
         tree->setEntry<bool>("ball_visible", false);
+        tree->setEntry<bool>("ball_location_known", false);
+        tree->setEntry<bool>("ball_depth_acquired", false);
+        if (wasDepthAcquired)
+        {
+            log->log(
+                "BallAcquisition",
+                "Accepted RGB ball lost; depth-confirmed acquisition latch reset");
+        }
         if (lastSeenRealBallTime.seconds() > 0.0)
         {
             double msecs = (now - lastSeenRealBallTime).nanoseconds() / 1e6;

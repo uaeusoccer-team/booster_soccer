@@ -4,7 +4,7 @@
   <BehaviorTree ID="CamFindAndTrackBall">
      <Sequence name="root">
          <IfThenElse>
-             <ScriptCondition        name="Ball visible?" code="ball_visible" />
+             <ScriptCondition        name="Depth-confirmed RGB acquisition?" code="ball_visible &amp;&amp; ball_depth_acquired" />
              <Sequence               name="[Yes] -> Track visible ball" >
                 <CamTrackBall theta="{tracking_theta}" />
              </Sequence>

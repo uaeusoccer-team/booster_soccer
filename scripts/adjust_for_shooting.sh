@@ -253,7 +253,7 @@ cat > "$TREE_PATH" <<XML
       <ReactiveSequence _while="${RUN_CONDITION}" name="shooting adjustment">
         <CheckAndStandUp />
         <IfThenElse>
-          <ScriptCondition name="Ball visible?" code="ball_visible" />
+          <ScriptCondition name="Depth-confirmed RGB acquisition?" code="ball_visible &amp;&amp; ball_depth_acquired" />
           <Sequence name="track and position for shot">
             <ShootingAdjust target_range="${TARGET_RANGE}"
                             target_y_offset="${TARGET_Y_OFFSET}"

@@ -14,13 +14,17 @@ PITCH_TURN_GAIN="1.0"
 REQUIRE_PLAY="false"
 
 HEAD_SEARCH_SPEED="0.20"
-BODY_SEARCH_SPEED="0.25"
-YAW_LIMIT="1.10"
+BODY_SEARCH_SPEED="0.45"
+TRACK_TURN_YAW_LIMIT="0.75"
+LOSS_TURN_PITCH_LIMIT="0.70"
+SEARCH_YAW_LIMIT="1.15"
 CMD_INTERVAL_MSEC="100"
 HEAD_STEP_RAD="0.04"
 HEAD_SETTLE_STEP_RAD="0.02"
 HEAD_DEADBAND_X_PX="35"
 HEAD_DEADBAND_Y_PX="35"
+LEGACY_YAW_LIMIT_USED="false"
+SEARCH_YAW_LIMIT_EXPLICIT="false"
 
 usage() {
   cat <<'USAGE'
@@ -41,8 +45,11 @@ Tracking and rotation settings:
 
 Ball-search settings:
   head_search_speed=0.20          # head-only scan speed
-  body_search_speed=0.25          # used only if loss happens during a turn
-  yaw_limit=1.10                  # head scan endpoint, radians
+  body_search_speed=0.45          # exact fast body turn after qualifying RGB loss
+  track_turn_yaw_limit=0.75       # last head-yaw threshold for a fast loss turn
+  loss_turn_pitch_limit=0.70      # downward head-pitch threshold for a fast loss turn
+  search_yaw_limit=1.15           # full head scan endpoint, radians
+  yaw_limit=1.15                  # compatibility alias for search_yaw_limit
   cmd_interval_msec=100
   head_step_rad=0.04              # normal head yaw/pitch step per vision frame
   head_settle_step_rad=0.02       # step within 20 px of the pixel deadband
@@ -62,11 +69,10 @@ Examples:
 SimpleChase calculates only vx and vy. CamTrackBall/CamFindBall calculate theta.
 SetVelocity publishes the combined vx, vy, and theta once per active tick.
 
-After a ball loss, a stationary robot scans with its head only, first toward
-the last visual head direction, then back and forth between yaw_limit edges.
-If the body was already rotating at loss, it continues that current direction
-at body_search_speed while the head moves toward the same side. Before the
-first observed ball, search holds still.
+Each new RGB acquisition must contain usable depth once before tracking and
+chasing are allowed. After RGB loss, the last RGB/head direction selects the
+search side. If the last head yaw or downward pitch passes its configured
+threshold, the body turns at body_search_speed; otherwise it scans head-only.
 Press s or Ctrl-C to stop the test stack.
 USAGE
 }
@@ -118,7 +124,16 @@ set_value() {
     require_play) REQUIRE_PLAY="$value" ;;
     head_search_speed) HEAD_SEARCH_SPEED="$value" ;;
     body_search_speed) BODY_SEARCH_SPEED="$value" ;;
-    yaw_limit) YAW_LIMIT="$value" ;;
+    track_turn_yaw_limit) TRACK_TURN_YAW_LIMIT="$value" ;;
+    loss_turn_pitch_limit) LOSS_TURN_PITCH_LIMIT="$value" ;;
+    search_yaw_limit)
+      SEARCH_YAW_LIMIT="$value"
+      SEARCH_YAW_LIMIT_EXPLICIT="true"
+      ;;
+    yaw_limit)
+      SEARCH_YAW_LIMIT="$value"
+      LEGACY_YAW_LIMIT_USED="true"
+      ;;
     cmd_interval_msec) CMD_INTERVAL_MSEC="$value" ;;
     head_step_rad) HEAD_STEP_RAD="$value" ;;
     head_settle_step_rad) HEAD_SETTLE_STEP_RAD="$value" ;;
@@ -135,7 +150,7 @@ parse_args() {
         usage
         exit 0
         ;;
-      vx_limit=*|vy_limit=*|stop_dist=*|y_tolerance=*|stop_angle=*|ball_yaw_gain=*|pitch_turn_gain=*|require_play=*|head_search_speed=*|body_search_speed=*|yaw_limit=*|cmd_interval_msec=*|head_step_rad=*|head_settle_step_rad=*|head_deadband_x_px=*|head_deadband_y_px=*)
+      vx_limit=*|vy_limit=*|stop_dist=*|y_tolerance=*|stop_angle=*|ball_yaw_gain=*|pitch_turn_gain=*|require_play=*|head_search_speed=*|body_search_speed=*|track_turn_yaw_limit=*|loss_turn_pitch_limit=*|search_yaw_limit=*|yaw_limit=*|cmd_interval_msec=*|head_step_rad=*|head_settle_step_rad=*|head_deadband_x_px=*|head_deadband_y_px=*)
         set_value "${1%%=*}" "${1#*=}"
         shift
         ;;
@@ -172,6 +187,15 @@ controlled_stop() {
 
 parse_args "$@"
 
+if [[ "$LEGACY_YAW_LIMIT_USED" == "true" && "$SEARCH_YAW_LIMIT_EXPLICIT" == "true" ]]; then
+  echo "Do not set both yaw_limit and search_yaw_limit; yaw_limit is only a compatibility alias." >&2
+  exit 2
+fi
+
+if [[ "$LEGACY_YAW_LIMIT_USED" == "true" ]]; then
+  echo "Warning: yaw_limit is deprecated; use search_yaw_limit." >&2
+fi
+
 cd "$WORKSPACE"
 
 set +u
@@ -197,7 +221,9 @@ echo "  pitch_turn_gain=${PITCH_TURN_GAIN}"
 echo "  require_play=${REQUIRE_PLAY}"
 echo "  head_search_speed=${HEAD_SEARCH_SPEED}"
 echo "  body_search_speed=${BODY_SEARCH_SPEED}"
-echo "  yaw_limit=${YAW_LIMIT}"
+echo "  track_turn_yaw_limit=${TRACK_TURN_YAW_LIMIT}"
+echo "  loss_turn_pitch_limit=${LOSS_TURN_PITCH_LIMIT}"
+echo "  search_yaw_limit=${SEARCH_YAW_LIMIT}"
 echo "  cmd_interval_msec=${CMD_INTERVAL_MSEC}"
 echo "  head_step_rad=${HEAD_STEP_RAD}"
 echo "  head_settle_step_rad=${HEAD_SETTLE_STEP_RAD}"
@@ -231,20 +257,30 @@ cat > "$TREE_PATH" <<XML
       <ReactiveSequence _while="${RUN_CONDITION}" name="track rotate and chase ball">
         <CheckAndStandUp />
         <IfThenElse>
-          <ScriptCondition name="Ball visible?" code="ball_visible" />
-          <CamTrackBall stop_angle="${STOP_ANGLE}"
-                        ball_yaw_gain="${BALL_YAW_GAIN}"
-                        pitch_turn_gain="${PITCH_TURN_GAIN}"
-                        head_step_rad="${HEAD_STEP_RAD}"
-                        head_settle_step_rad="${HEAD_SETTLE_STEP_RAD}"
-                        head_deadband_x_px="${HEAD_DEADBAND_X_PX}"
-                        head_deadband_y_px="${HEAD_DEADBAND_Y_PX}"
-                        theta="{tracking_theta}" />
-          <CamFindBall yaw_limit="${YAW_LIMIT}"
-                       head_search_speed="${HEAD_SEARCH_SPEED}"
-                       body_search_speed="${BODY_SEARCH_SPEED}"
-                       cmd_interval_msec="${CMD_INTERVAL_MSEC}"
-                       theta="{tracking_theta}" />
+          <ScriptCondition name="Depth-confirmed RGB acquisition?" code="ball_visible &amp;&amp; ball_depth_acquired" />
+          <Sequence>
+            <CamTrackBall stop_angle="${STOP_ANGLE}"
+                          ball_yaw_gain="${BALL_YAW_GAIN}"
+                          pitch_turn_gain="${PITCH_TURN_GAIN}"
+                          track_turn_yaw_limit="${TRACK_TURN_YAW_LIMIT}"
+                          loss_turn_pitch_limit="${LOSS_TURN_PITCH_LIMIT}"
+                          head_step_rad="${HEAD_STEP_RAD}"
+                          head_settle_step_rad="${HEAD_SETTLE_STEP_RAD}"
+                          head_deadband_x_px="${HEAD_DEADBAND_X_PX}"
+                          head_deadband_y_px="${HEAD_DEADBAND_Y_PX}"
+                          theta="{tracking_theta}" />
+            <Script code="chase_apply_min_theta=true" />
+          </Sequence>
+          <Sequence>
+            <CamFindBall yaw_limit="${SEARCH_YAW_LIMIT}"
+                         track_turn_yaw_limit="${TRACK_TURN_YAW_LIMIT}"
+                         loss_turn_pitch_limit="${LOSS_TURN_PITCH_LIMIT}"
+                         head_search_speed="${HEAD_SEARCH_SPEED}"
+                         body_search_speed="${BODY_SEARCH_SPEED}"
+                         cmd_interval_msec="${CMD_INTERVAL_MSEC}"
+                         theta="{tracking_theta}" />
+            <Script code="chase_apply_min_theta=false" />
+          </Sequence>
         </IfThenElse>
         <SimpleChase vx_limit="${VX_LIMIT}"
                      vy_limit="${VY_LIMIT}"
@@ -254,7 +290,8 @@ cat > "$TREE_PATH" <<XML
                      vy="{chase_vy}" />
         <SetVelocity x="{chase_vx}"
                      y="{chase_vy}"
-                     theta="{tracking_theta}" />
+                     theta="{tracking_theta}"
+                     apply_min_theta="{chase_apply_min_theta}" />
       </ReactiveSequence>
     </Sequence>
   </BehaviorTree>

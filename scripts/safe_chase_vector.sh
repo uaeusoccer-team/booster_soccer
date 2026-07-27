@@ -311,7 +311,7 @@ cat > "$TREE_PATH" <<XML
       <ReactiveSequence _while="gc_game_state!='END'" name="safe chase behind ball">
         <CheckAndStandUp />
         <IfThenElse>
-          <ScriptCondition name="Ball visible?" code="ball_visible" />
+          <ScriptCondition name="Depth-confirmed RGB acquisition?" code="ball_visible &amp;&amp; ball_depth_acquired" />
           <Sequence name="Track and chase visible ball">
             <CamTrackBall body_turn_speed="${BODY_TURN_SPEED}"
                           head_turn_start_ratio="${HEAD_TURN_START_RATIO}"
