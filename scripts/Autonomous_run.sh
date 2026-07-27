@@ -46,8 +46,6 @@ ADJUST_MAX_BALL_RANGE="1.20"
 READY_SAMPLES="10"
 READY_MIN_MSEC="1000"
 READY_DATA_MAX_AGE_MSEC="500"
-SHOOT_HOST="127.0.0.1"
-SHOOT_PORT="6868"
 
 DRY_RUN="false"
 STOPPING="false"
@@ -133,8 +131,6 @@ Shoot readiness:
   ready_samples=10
   ready_min_msec=1000
   ready_data_max_age_msec=500
-  shoot_host=127.0.0.1
-  shoot_port=6868
 
 Utility:
   --help                               # show this help
@@ -274,7 +270,7 @@ set_value() {
       ROLE="$value"
       return
       ;;
-    team_id|player_id|cmd_interval_msec|head_deadband_x_px|head_deadband_y_px|ready_samples|ready_min_msec|ready_data_max_age_msec|shoot_port)
+    team_id|player_id|cmd_interval_msec|head_deadband_x_px|head_deadband_y_px|ready_samples|ready_min_msec|ready_data_max_age_msec)
       is_positive_integer "$value" ||
         { echo "Invalid positive integer for ${key}: ${value}" >&2; exit 2; }
       ;;
@@ -324,7 +320,6 @@ set_value() {
     ready_samples) READY_SAMPLES="$value" ;;
     ready_min_msec) READY_MIN_MSEC="$value" ;;
     ready_data_max_age_msec) READY_DATA_MAX_AGE_MSEC="$value" ;;
-    shoot_port) SHOOT_PORT="$value" ;;
     *) echo "Unknown setting: ${key}" >&2; exit 2 ;;
   esac
 }
@@ -338,11 +333,6 @@ parse_args() {
         ;;
       --dry-run)
         DRY_RUN="true"
-        shift
-        ;;
-      shoot_host=*)
-        SHOOT_HOST="$(clean_value "${1#*=}")"
-        [[ -n "$SHOOT_HOST" ]] || { echo "shoot_host cannot be empty" >&2; exit 2; }
         shift
         ;;
       *=*)
@@ -377,10 +367,6 @@ validate_settings() {
     exit 2
   }
 
-  ((SHOOT_PORT >= 1 && SHOOT_PORT <= 65535)) || {
-    echo "Invalid shoot_port: ${SHOOT_PORT}; expected 1-65535" >&2
-    exit 2
-  }
 }
 
 print_settings() {
@@ -429,8 +415,6 @@ Autonomous run settings:
   ready_samples=${READY_SAMPLES}
   ready_min_msec=${READY_MIN_MSEC}
   ready_data_max_age_msec=${READY_DATA_MAX_AGE_MSEC}
-  shoot_host=${SHOOT_HOST}
-  shoot_port=${SHOOT_PORT}
 SETTINGS
 
   if float_lt "$STOP_DIST" "$ADJUST_TARGET_RANGE"; then
@@ -825,7 +809,7 @@ send_shoot() {
 
   echo "Sending the operator-approved shoot command once..."
   set +e
-  python3 -c 'import socket,struct,sys; p=b"{\"request\":\"send_to_agent\",\"app_api_level\":130,\"params\":{\"agent_id\":\"com.boosterobotics.default\"},\"agent_req\":{\"event\":\"on_component_click\",\"component_id\":\"shoot\",\"state\":0},\"app_platform\":\"iOS\"}"; print("payload length:",len(p)); s=socket.create_connection((sys.argv[1],int(sys.argv[2])),3); s.sendall(struct.pack("<I",len(p))+p); print("sent"); s.close()' "$SHOOT_HOST" "$SHOOT_PORT"
+  ./scripts/shoot_once.sh
   shoot_result=$?
   set -e
 
