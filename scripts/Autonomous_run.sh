@@ -70,6 +70,7 @@ READY_PROMPTED="false"
 LAST_READINESS_REASON="not evaluated"
 CHASE_STOP_PROMPTED="false"
 MONITOR_LINE=0
+MONITOR_BATCH_LINES=10
 
 VISION_PID=""
 BRAIN_PID=""
@@ -145,7 +146,7 @@ Runtime commands:
   adjust    Select manual ShootingAdjust.
   status    Show selected, active, perception, velocity, and process state.
   help      Show runtime commands.
-  shoot     Shoot only after a fresh READY TO SHOOT state.
+  shoot     Immediately send the standalone operator shoot command once.
   stop      Send a controlled stop and exit.
 
 Ball loss is a temporary fallback. RGB-only detections use CamTrackBall with
@@ -207,8 +208,9 @@ Runtime commands:
   status  help      shoot    stop
 
 Typing track, chase, or adjust selects that manual mode immediately. The exact
-lowercase word "shoot" is accepted only while fresh adjustment readiness is
-true. No automatic event can call the shoot command.
+lowercase word "shoot" immediately runs shoot_once.sh once without stopping or
+restarting the autonomy stack. Readiness is advisory; no automatic event can
+call the shoot command.
 HELP
 }
 
@@ -677,8 +679,10 @@ process_log_line() {
 }
 
 monitor_brain_log() {
+  local max_lines="${1:-$MONITOR_BATCH_LINES}"
   local total_lines
   local first_line
+  local last_line
 
   [[ -f brain.log ]] || return 0
   total_lines="$(wc -l < brain.log | tr -d ' ')"
@@ -686,10 +690,14 @@ monitor_brain_log() {
   ((total_lines > MONITOR_LINE)) || return 0
 
   first_line=$((MONITOR_LINE + 1))
+  last_line="$total_lines"
+  if ((max_lines > 0 && last_line - MONITOR_LINE > max_lines)); then
+    last_line=$((MONITOR_LINE + max_lines))
+  fi
   while IFS= read -r line; do
     process_log_line "$line"
-  done < <(sed -n "${first_line},${total_lines}p" brain.log)
-  MONITOR_LINE="$total_lines"
+  done < <(sed -n "${first_line},${last_line}p" brain.log)
+  MONITOR_LINE="$last_line"
 }
 
 expire_readiness() {
@@ -826,44 +834,21 @@ select_auto_switch() {
   echo "Automatic transitions enabled; saved phase: ${RUNTIME_AUTO_PHASE}"
 }
 
-shoot_is_fresh() {
-  local now
-  monitor_brain_log
-  expire_readiness
-  [[ "$SHOOT_READY" == "true" ]] || return 1
-  [[ "$ACTIVE_BEHAVIOR" == "adjust" ]] || return 1
-  now="$(now_msec)"
-  ((now - LAST_READY_EVIDENCE_MSEC <= READY_DATA_MAX_AGE_MSEC))
-}
-
 send_shoot() {
   local shoot_result
 
-  if ! shoot_is_fresh; then
-    echo "Shoot rejected: adjustment readiness is not currently valid and fresh."
-    echo "Readiness diagnostic: ${LAST_READINESS_REASON}"
-    return
-  fi
-
-  STOPPING="true"
-  trap - ERR HUP INT TERM
-  echo "Fresh readiness confirmed. Stopping this brain's motion publisher..."
-  send_game_stop
-  sleep 0.5
-  ./scripts/stop.sh || true
-
-  echo "Sending the operator-approved shoot command once..."
+  echo "Operator shoot received. Sending the standalone shoot command immediately..."
   set +e
   ./scripts/shoot_once.sh
   shoot_result=$?
   set -e
 
   if ((shoot_result == 0)); then
-    echo "Shoot command sent once. Autonomous_run is exiting."
+    echo "Shoot command sent once. Autonomous_run remains active."
   else
     echo "Shoot command failed with exit code ${shoot_result}; it was not retried." >&2
   fi
-  exit "$shoot_result"
+  return 0
 }
 
 check_processes() {
@@ -887,13 +872,32 @@ handle_runtime_command() {
     auto) select_auto_switch ;;
     manual) select_manual_switch ;;
     track|chase|adjust) select_manual_mode "$command" ;;
-    status) show_status ;;
+    status)
+      monitor_brain_log 0
+      expire_readiness
+      show_status
+      ;;
     help) runtime_help ;;
     shoot) send_shoot ;;
     stop) controlled_stop "operator stop" ;;
     "") ;;
     *) echo "Unknown runtime command: ${command}. Type help for commands." ;;
   esac
+}
+
+runtime_iteration() {
+  local command=""
+
+  check_processes
+
+  if read -r -t 0.05 command; then
+    handle_runtime_command "$command"
+  elif [[ ! -t 0 ]]; then
+    controlled_stop "input closed" 1
+  fi
+
+  monitor_brain_log
+  expire_readiness
 }
 
 write_tree() {
@@ -1123,14 +1127,5 @@ runtime_help
 echo "Diagnostics: tail -f brain.log | grep -E 'CamTrackBall/direct_pixel|CamFindBall/|SimpleChase/vector|ShootingAdjust/vector|RobotClient/setVelocity_out'"
 
 while true; do
-  check_processes
-  monitor_brain_log
-  expire_readiness
-
-  command=""
-  if read -r -t 0.2 command; then
-    handle_runtime_command "$command"
-  elif [[ ! -t 0 ]]; then
-    controlled_stop "input closed" 1
-  fi
+  runtime_iteration
 done
