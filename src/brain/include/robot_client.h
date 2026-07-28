@@ -1,5 +1,6 @@
 #pragma once
 
+#include <atomic>
 #include <iostream>
 #include <string>
 
@@ -39,12 +40,45 @@ public:
      * @param x double, 
      * @param y double, 
      * @param theta double, 
-     * @param applyMinX, applyMinY, applyMinTheta bool 
+     * @param applyMinX, applyMinY, applyMinTheta Whether to raise a small
+     * nonzero command to the configured minimum speed for that axis.
      * 
     * @return int , 0 indicates success
      * 
     */
-    int setVelocity(double x, double y, double theta);
+    int setVelocity(
+        double x,
+        double y,
+        double theta,
+        bool applyMinX = true,
+        bool applyMinY = true,
+        bool applyMinTheta = true);
+
+    /**
+     * @brief Sign of the last non-zero angular velocity actually sent.
+     *
+     * Positive is left, negative is right, and zero means no non-zero turn
+     * has been recorded yet. Zero velocity commands preserve the previous
+     * recorded direction.
+     */
+    int getLastTurnDirection() const
+    {
+        return _lastNonZeroThetaSign.load(std::memory_order_relaxed);
+    }
+
+    /**
+     * @brief Sign of the angular velocity in the command currently active.
+     *
+     * Unlike getLastTurnDirection(), this returns zero as soon as the active
+     * command stops turning. CamFindBall snapshots it at ball loss to decide
+     * whether to continue an ongoing body turn or run a head-only scan.
+     */
+    int getCurrentTurnDirection(double epsilon = 1e-3) const
+    {
+        if (_vtheta > epsilon) return 1;
+        if (_vtheta < -epsilon) return -1;
+        return 0;
+    }
 
     int crabWalk(double angle, double speed);
 
@@ -124,7 +158,10 @@ private:
     int call(booster_interface::msg::BoosterApiReqMsg msg);
     rclcpp::Publisher<booster_msgs::msg::RpcReqMsg>::SharedPtr publisher;
     Brain *brain;
-    double _vx, _vy, _vtheta;
+    double _vx = 0.0;
+    double _vy = 0.0;
+    double _vtheta = 0.0;
     rclcpp::Time _lastCmdTime;
     rclcpp::Time _lastNonZeroCmdTime;
+    std::atomic<int> _lastNonZeroThetaSign{0};
 };

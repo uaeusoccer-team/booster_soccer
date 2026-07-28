@@ -524,7 +524,6 @@ void BrainConfig::calcMapMarkings() {
 void BrainConfig::handle()
 {
 
-
     // fieldType [adult_size, kid_size]
     if (get_field_type() == "adult_size")
     {

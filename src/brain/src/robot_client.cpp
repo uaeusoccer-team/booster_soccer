@@ -75,7 +75,13 @@ int RobotClient::waveHand(bool doWaveHand)
     return call(booster_interface::CreateWaveHandMsg(booster::robot::b1::HandIndex::kRightHand, doWaveHand ? booster::robot::b1::HandAction::kHandOpen : booster::robot::b1::HandAction::kHandClose));
 }
 
-int RobotClient::setVelocity(double x, double y, double theta)
+int RobotClient::setVelocity(
+    double x,
+    double y,
+    double theta,
+    bool applyMinX,
+    bool applyMinY,
+    bool applyMinTheta)
 {
     brain->log->log("RobotClient/setVelocity_in",
                     format("vx: %.2f  vy: %.2f  vtheta: %.2f", x, y, theta));
@@ -83,15 +89,20 @@ int RobotClient::setVelocity(double x, double y, double theta)
     double minx = brain->config->get_min_vx();
     double miny = brain->config->get_min_vy();
     double mintheta =  brain->config->get_min_vtheta();
-    if (fabs(x) < minx && fabs(x) > 1e-5)
+    if (applyMinX && fabs(x) < minx && fabs(x) > 1e-5)
         x = x > 0 ? minx : -minx;
-    if (fabs(y) < miny && fabs(y) > 1e-5)
+    if (applyMinY && fabs(y) < miny && fabs(y) > 1e-5)
         y = y > 0 ? miny : -miny;
-    if (fabs(theta) < mintheta && fabs(theta) > 1e-5)
+    if (applyMinTheta && fabs(theta) < mintheta && fabs(theta) > 1e-5)
         theta = theta > 0 ? mintheta : -mintheta;
     x = cap(x, brain->config->get_vx_limit(), -brain->config->get_vx_limit());
     y = cap(y, brain->config->get_vy_limit(), -brain->config->get_vy_limit());
     theta = cap(theta, brain->config->get_vtheta_limit(), -brain->config->get_vtheta_limit());
+
+    if (fabs(theta) > 1e-3)
+    {
+        _lastNonZeroThetaSign.store(theta > 0.0 ? 1 : -1, std::memory_order_relaxed);
+    }
     
     // log simulated path based on velocity
     vector<Pose2D> path = {{0, 0, 0}}; // Coordinate system is based on the robot's position at 0,0, with the linear velocity direction as theta = 0

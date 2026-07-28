@@ -101,7 +101,9 @@ struct GameObject
     BoundingBox boundingBox;
     Point2D precisePixelPoint;
     double confidence;
+    int positionConfidence = 0;
     Point posToRobot;
+    Point projectionToRobot;
 
     Point posToField;
     double range;

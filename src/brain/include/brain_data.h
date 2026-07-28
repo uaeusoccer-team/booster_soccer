@@ -1,8 +1,10 @@
 #pragma once
 
+#include <atomic>
 #include <string>
 #include <mutex>
 #include <tuple>
+#include <cstdint>
 
 #include <sensor_msgs/msg/image.hpp>
 #include "booster_interface/msg/odometer.hpp"
@@ -44,14 +46,32 @@ public:
     Pose2D odomToField;      
     Pose2D robotPoseToField; 
 
-    double headPitch; 
-    double headYaw;  
+    std::atomic<double> headPitch{0.0};
+    std::atomic<double> headYaw{0.0};
+    std::atomic<bool> headStateReceived{false};
     Eigen::Matrix4d camToRobot = Eigen::Matrix4d::Identity(); 
 
 
-    bool ballDetected = false;   
-    GameObject ball;              
-    GameObject tmBall;           
+    bool ballDetected = false;
+    // A new RGB acquisition must contain usable depth once before tracking is
+    // authorized. The latch remains true across temporary depth loss and is
+    // reset only when the accepted RGB ball disappears completely.
+    std::atomic<bool> ballDepthAcquired{false};
+    std::atomic<std::uint64_t> ballTrackingGeneration{0};
+    // Last RGB/head observation used to choose the direction and urgency of a
+    // search after the ball leaves the image. This memory is deliberately
+    // independent of the depth position and the robot's velocity-command
+    // history. Positive direction is left and negative direction is right.
+    std::atomic<int> lastBallSearchDirection{0};
+    std::atomic<double> lastBallPixelX{0.0};
+    std::atomic<double> lastBallPixelY{0.0};
+    std::atomic<double> lastBallPixelDx{0.0};
+    std::atomic<double> lastBallPixelDy{0.0};
+    std::atomic<double> lastBallObservedHeadYaw{0.0};
+    std::atomic<double> lastBallObservedHeadPitch{0.0};
+    std::atomic<std::uint64_t> lastBallSearchGeneration{0};
+    GameObject ball{};
+    GameObject tmBall{};
     double robotBallAngleToField; 
     bool lose_ball = false;
 

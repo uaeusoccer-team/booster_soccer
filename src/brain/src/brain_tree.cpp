@@ -12,27 +12,6 @@
 #include <fstream>
 #include <ios>
 
-namespace
-{
-void turnTowardRecentlyLostBall(Brain *brain, bool enabled, double maxRecentLostMsec, double turnSpeed, double minYaw)
-{
-    if (!enabled || maxRecentLostMsec <= 0.0 || turnSpeed <= 0.0)
-    {
-        return;
-    }
-
-    const double lostMsec = brain->msecsSince(brain->data->ball.timePoint);
-    const double lastYaw = brain->data->ball.yawToRobot;
-    if (lostMsec >= 0.0 && lostMsec < maxRecentLostMsec && std::fabs(lastYaw) > minYaw)
-    {
-        brain->client->setVelocity(0.0, 0.0, lastYaw > 0.0 ? turnSpeed : -turnSpeed);
-        return;
-    }
-
-    brain->client->setVelocity(0.0, 0.0, 0.0);
-}
-}
-
 /**
  * Here we use a macro definition to reduce the code for RegisterBuilder. The effect of REGISTER_BUILDER(Test) after expansion is
  * factory.registerBuilder<Test>(  \
@@ -52,6 +31,7 @@ void BrainTree::init()
     REGISTER_BUILDER(RobotFindBall)
     REGISTER_BUILDER(Chase)
     REGISTER_BUILDER(SimpleChase)
+    REGISTER_BUILDER(ShootingAdjust)
     REGISTER_BUILDER(Adjust)
     REGISTER_BUILDER(Kick)
     REGISTER_BUILDER(StandStill)
@@ -93,7 +73,9 @@ void BrainTree::init()
 void BrainTree::initEntry()
 {
     setEntry<string>("player_role", brain->config->get_player_role());
+    setEntry<bool>("ball_visible", false);
     setEntry<bool>("ball_location_known", false);
+    setEntry<bool>("ball_depth_acquired", false);
     setEntry<bool>("tm_ball_pos_reliable", false);
     setEntry<bool>("ball_out", false);
     setEntry<bool>("track_ball", true);
@@ -101,6 +83,9 @@ void BrainTree::initEntry()
     setEntry<string>("decision", "");
     setEntry<string>("defend_decision", "chase");
     setEntry<double>("ball_range", 0);
+    setEntry<double>("tracking_theta", 0.0);
+    setEntry<double>("chase_vx", 0.0);
+    setEntry<double>("chase_vy", 0.0);
 
     setEntry<bool>("gamecontroller_isKickOff", true);
     setEntry<string>("gc_game_state", "");
@@ -120,6 +105,16 @@ void BrainTree::initEntry()
     setEntry<bool>("assist_chase", false);
     setEntry<bool>("assist_kick", false);
     setEntry<bool>("go_manual", false);
+    setEntry<string>("autonomy_switch", "manual");
+    setEntry<string>("autonomy_manual_mode", "track");
+    setEntry<string>("autonomy_auto_phase", "chase");
+    setEntry<bool>("autonomy_enabled", true);
+    setEntry<double>("autonomy_command_vx", 0.0);
+    setEntry<double>("autonomy_command_vy", 0.0);
+    setEntry<double>("autonomy_command_theta", 0.0);
+    setEntry<double>("autonomy_adjust_vx", 0.0);
+    setEntry<double>("autonomy_adjust_vy", 0.0);
+    setEntry<double>("autonomy_adjust_theta", 0.0);
 
     setEntry<bool>("we_just_scored", false);
     setEntry<bool>("wait_for_opponent_kickoff", false);
@@ -142,12 +137,22 @@ void BrainTree::tick()
 NodeStatus SetVelocity::tick()
 {
     double x, y, theta;
+    bool applyMinX, applyMinY, applyMinTheta;
     vector<double> targetVec;
     getInput("x", x);
     getInput("y", y);
     getInput("theta", theta);
+    getInput("apply_min_x", applyMinX);
+    getInput("apply_min_y", applyMinY);
+    getInput("apply_min_theta", applyMinTheta);
 
-    auto res = brain->client->setVelocity(x, y, theta);
+    auto res = brain->client->setVelocity(
+        x,
+        y,
+        theta,
+        applyMinX,
+        applyMinY,
+        applyMinTheta);
     return NodeStatus::SUCCESS;
 }
 
@@ -162,87 +167,178 @@ NodeStatus StepOnSpot::tick()
 
 NodeStatus CamTrackBall::tick()
 {
+    double stopAngle = 0.1;
+    double ballYawGain = 4.0;
+    double pitchTurnGain = 1.0;
+    double trackTurnYawLimit = 0.75;
+    double lossTurnPitchLimit = 0.70;
+    double headStep = 0.04;
+    double headSettleStep = 0.02;
+    double headDeadbandX = 35.0;
+    double headDeadbandY = 35.0;
+    getInput("stop_angle", stopAngle);
+    getInput("ball_yaw_gain", ballYawGain);
+    getInput("pitch_turn_gain", pitchTurnGain);
+    getInput("track_turn_yaw_limit", trackTurnYawLimit);
+    getInput("loss_turn_pitch_limit", lossTurnPitchLimit);
+    getInput("head_step_rad", headStep);
+    getInput("head_settle_step_rad", headSettleStep);
+    getInput("head_deadband_x_px", headDeadbandX);
+    getInput("head_deadband_y_px", headDeadbandY);
+
+    stopAngle = std::fabs(stopAngle);
+    ballYawGain = std::max(0.0, ballYawGain);
+    pitchTurnGain = std::max(0.0, pitchTurnGain);
+    trackTurnYawLimit = std::fabs(trackTurnYawLimit);
+    lossTurnPitchLimit = std::fabs(lossTurnPitchLimit);
+    headStep = std::fabs(headStep);
+    headSettleStep = std::fabs(headSettleStep);
+    headDeadbandX = std::fabs(headDeadbandX);
+    headDeadbandY = std::fabs(headDeadbandY);
+
+    if (!brain->data->headStateReceived.load(std::memory_order_acquire))
+    {
+        _hasLastProcessedBallFrame = false;
+        setOutput("theta", 0.0);
+        return NodeStatus::SUCCESS;
+    }
+
+    const double measuredHeadPitch = brain->data->headPitch.load(std::memory_order_relaxed);
+    const double measuredHeadYaw = brain->data->headYaw.load(std::memory_order_relaxed);
+
     const double xCenter = brain->config->cameraImageWidth / 2.0;
     const double yCenter = brain->config->cameraImageHeight / 2.0;
-
     const bool iSeeBall = brain->data->ballDetected;
-
     const bool bboxValid =
         brain->data->ball.boundingBox.xmax > brain->data->ball.boundingBox.xmin &&
         brain->data->ball.boundingBox.ymax > brain->data->ball.boundingBox.ymin;
 
-    // For T1 api_id 2006, do not depend on absolute head angle tracking.
-    // Use image pixel error to create a small virtual target offset.
-    // RobotClient::moveHead() converts this offset into pitch_direction/yaw_direction.
-    double pitch = brain->data->headPitch;
-    double yaw = brain->data->headYaw;
+    double pitch = measuredHeadPitch;
+    double yaw = measuredHeadYaw;
 
     if (!iSeeBall || !bboxValid)
     {
         _hasLastProcessedBallFrame = false;
-        _hasLastCommandedBallCenter = false;
-        // Explicit stop for directional head API.
+        setOutput("theta", 0.0);
         brain->client->moveHead(pitch, yaw);
-        turnTowardRecentlyLostBall(brain, true, 1200.0, 0.25, 0.08);
         return NodeStatus::SUCCESS;
     }
+
+    const bool ballLocationKnown = brain->tree->getEntry<bool>("ball_location_known");
+    const double ballYaw = ballLocationKnown ? brain->data->ball.yawToRobot : 0.0;
+    const double normalPitch = brain->config->get_head_pitch_limit_up();
+    const double pitchDown = std::max(0.0, measuredHeadPitch - normalPitch);
+    const double pitchMultiplier = 1.0 + pitchTurnGain * pitchDown;
+    const double vthetaLimit = std::fabs(brain->config->get_vtheta_limit());
+    double theta = 0.0;
+    const char *thetaSource = ballLocationKnown ? "DEADBAND" : "NO_DEPTH";
+
+    if (ballLocationKnown && std::fabs(ballYaw) > stopAngle)
+    {
+        const double requestedTheta = ballYaw * ballYawGain * pitchMultiplier;
+        theta = cap(requestedTheta, vthetaLimit, -vthetaLimit);
+        thetaSource = "BALL_YAW";
+    }
+
+    setOutput("theta", theta);
 
     const double ballX = mean(brain->data->ball.boundingBox.xmax, brain->data->ball.boundingBox.xmin);
     const double ballY = mean(brain->data->ball.boundingBox.ymax, brain->data->ball.boundingBox.ymin);
     const auto ballTime = brain->data->ball.timePoint;
-
-    const double minBallCenterChangePx = 5.0;
     const bool sameVisionFrame =
         _hasLastProcessedBallFrame &&
         ballTime.nanoseconds() == _lastProcessedBallTime.nanoseconds();
-    const bool ballCenterChanged =
-        !_hasLastCommandedBallCenter ||
-        std::fabs(ballX - _lastCommandedBallX) >= minBallCenterChangePx ||
-        std::fabs(ballY - _lastCommandedBallY) >= minBallCenterChangePx;
 
-    if (sameVisionFrame || !ballCenterChanged)
+    if (sameVisionFrame)
     {
-        _lastProcessedBallTime = ballTime;
-        _hasLastProcessedBallFrame = true;
         return NodeStatus::SUCCESS;
     }
 
     const double dx = ballX - xCenter;  // + means ball is right of image center
     const double dy = ballY - yCenter;  // + means ball is below image center
 
-    const double deadbandX = 35.0;
-    const double deadbandY = 35.0;
+    const double settleZonePx = 20.0;
 
-    // Small virtual angle offset. It only needs to exceed RobotClient::moveHead deadband.
-    const double step = 0.04;
-
-    if (std::fabs(dx) > deadbandX)
+    // Search direction is a visual/head memory, not a reuse of the projected
+    // ground point. A pixel outside centre tells us which way the head was
+    // about to look; a centred pixel uses the head's measured aim. Keeping
+    // this separate prevents a moving-head projection error from deciding a
+    // later stationary head scan.
+    int visualSearchDirection = 0;
+    if (std::fabs(dx) > headDeadbandX)
     {
-        // Existing sign convention from original code:
-        // ball right -> yaw target decreases.
+        visualSearchDirection = dx > 0.0 ? -1 : 1;
+    }
+    else if (std::fabs(measuredHeadYaw) > 0.02)
+    {
+        visualSearchDirection = measuredHeadYaw > 0.0 ? 1 : -1;
+    }
+    const auto ballTrackingGeneration =
+        brain->data->ballTrackingGeneration.load(std::memory_order_relaxed);
+    const auto previousVisualGeneration =
+        brain->data->lastBallSearchGeneration.load(std::memory_order_relaxed);
+    if (previousVisualGeneration != ballTrackingGeneration)
+    {
+        // Never carry a direction from an older acquisition into a newly
+        // observed, centered ball.
+        brain->data->lastBallSearchDirection.store(0, std::memory_order_relaxed);
+    }
+    if (visualSearchDirection != 0)
+    {
+        // Preserve the most recent meaningful RGB/head direction if the last
+        // frame happens to be centered immediately before the ball is lost.
+        brain->data->lastBallSearchDirection.store(
+            visualSearchDirection,
+            std::memory_order_relaxed);
+    }
+    brain->data->lastBallPixelX.store(ballX, std::memory_order_relaxed);
+    brain->data->lastBallPixelY.store(ballY, std::memory_order_relaxed);
+    brain->data->lastBallPixelDx.store(dx, std::memory_order_relaxed);
+    brain->data->lastBallPixelDy.store(dy, std::memory_order_relaxed);
+    brain->data->lastBallObservedHeadYaw.store(measuredHeadYaw, std::memory_order_relaxed);
+    brain->data->lastBallObservedHeadPitch.store(measuredHeadPitch, std::memory_order_relaxed);
+    // Publish the generation last so CamFindBall never treats a partially
+    // updated observation as belonging to the current acquisition.
+    brain->data->lastBallSearchGeneration.store(
+        ballTrackingGeneration,
+        std::memory_order_release);
+
+    if (std::fabs(dx) > headDeadbandX)
+    {
+        const double step = std::fabs(dx) <= headDeadbandX + settleZonePx ? headSettleStep : headStep;
         yaw += (dx > 0.0) ? -step : step;
     }
 
-    if (std::fabs(dy) > deadbandY)
+    if (std::fabs(dy) > headDeadbandY)
     {
-        // Existing sign convention from original code:
-        // ball low -> pitch target increases.
+        const double step = std::fabs(dy) <= headDeadbandY + settleZonePx ? headSettleStep : headStep;
         pitch += (dy > 0.0) ? step : -step;
     }
 
-    // If both errors are inside deadband, pitch/yaw remain current values,
-    // causing RobotClient::moveHead() to publish direction 0,0.
     brain->client->moveHead(pitch, yaw);
     _lastProcessedBallTime = ballTime;
     _hasLastProcessedBallFrame = true;
-    _lastCommandedBallX = ballX;
-    _lastCommandedBallY = ballY;
-    _hasLastCommandedBallCenter = true;
 
     brain->log->log(
         "CamTrackBall/direct_pixel",
-        format("ballX: %.1f ballY: %.1f dx: %.1f dy: %.1f pitch: %.2f yaw: %.2f",
-               ballX, ballY, dx, dy, pitch, yaw));
+        format("ballX: %.1f ballY: %.1f dx: %.1f dy: %.1f headPitch: %.3f headYaw: %.3f depthX: %.3f depthY: %.3f ballYaw: %.3f pitchMultiplier: %.3f theta: %.3f source: %s visualSearchDirection: %d yawLossTrigger: %s pitchLossTrigger: %s trackTurnYawLimit: %.3f lossTurnPitchLimit: %.3f",
+               ballX,
+               ballY,
+               dx,
+               dy,
+               measuredHeadPitch,
+               measuredHeadYaw,
+               brain->data->ball.posToRobot.x,
+               brain->data->ball.posToRobot.y,
+               ballYaw,
+               pitchMultiplier,
+               theta,
+               thetaSource,
+               visualSearchDirection,
+               std::fabs(measuredHeadYaw) >= trackTurnYawLimit ? "true" : "false",
+               measuredHeadPitch >= lossTurnPitchLimit ? "true" : "false",
+               trackTurnYawLimit,
+               lossTurnPitchLimit));
 
     return NodeStatus::SUCCESS;
 }
@@ -250,61 +346,323 @@ NodeStatus CamTrackBall::tick()
 
 CamFindBall::CamFindBall(const string &name, const NodeConfig &config, Brain *_brain) : SyncActionNode(name, config), brain(_brain)
 {
-    _timeSearchStart = brain->get_clock()->now();
     _timeLastCmd = rclcpp::Time(0, 0, RCL_ROS_TIME);
-    _cmdRestartIntervalMSec = 60000;
 }
 
 NodeStatus CamFindBall::tick()
 {
     auto curTime = brain->get_clock()->now();
+    setOutput("theta", 0.0);
 
-    if (brain->data->ballDetected)
+    if (brain->data->ballDetected &&
+        brain->data->ballDepthAcquired.load(std::memory_order_acquire))
     {
-        _timeSearchStart = curTime;
+        _searchInitialized = false;
+        _waitingForObservationLogged = false;
+        _timeLastCmd = rclcpp::Time(0, 0, RCL_ROS_TIME);
         return NodeStatus::SUCCESS;
-    } // Currently, all nodes return Success. Returning Failure would affect the execution of subsequent nodes.
+    }
 
-    double lowPitch, highPitch, yawLimit, sweepMsec, pitchCycleMsec, cmdIntervalMsec;
-    bool turnBodyOnLoss;
-    double lostTurnMsec, lostTurnSpeed, lostTurnMinYaw;
-    getInput("low_pitch", lowPitch);
-    getInput("high_pitch", highPitch);
+    if (!brain->data->headStateReceived.load(std::memory_order_acquire))
+    {
+        _searchInitialized = false;
+        _timeLastCmd = rclcpp::Time(0, 0, RCL_ROS_TIME);
+        return NodeStatus::SUCCESS;
+    }
+
+    const double measuredHeadYaw = brain->data->headYaw.load(std::memory_order_relaxed);
+    const double measuredHeadPitch = brain->data->headPitch.load(std::memory_order_relaxed);
+
+    double yawLimit, trackTurnYawLimit, lossTurnPitchLimit;
+    double headSearchSpeed, bodySearchSpeed, cmdIntervalMsec;
     getInput("yaw_limit", yawLimit);
-    getInput("sweep_msec", sweepMsec);
-    getInput("pitch_cycle_msec", pitchCycleMsec);
+    getInput("track_turn_yaw_limit", trackTurnYawLimit);
+    getInput("loss_turn_pitch_limit", lossTurnPitchLimit);
+    getInput("head_search_speed", headSearchSpeed);
+    getInput("body_search_speed", bodySearchSpeed);
     getInput("cmd_interval_msec", cmdIntervalMsec);
-    getInput("turn_body_on_loss", turnBodyOnLoss);
-    getInput("lost_turn_msec", lostTurnMsec);
-    getInput("lost_turn_speed", lostTurnSpeed);
-    getInput("lost_turn_min_yaw", lostTurnMinYaw);
 
+    yawLimit = std::fabs(yawLimit);
+    trackTurnYawLimit = std::fabs(trackTurnYawLimit);
+    lossTurnPitchLimit = std::fabs(lossTurnPitchLimit);
+    headSearchSpeed = std::fabs(headSearchSpeed);
+    bodySearchSpeed = std::fabs(bodySearchSpeed);
     cmdIntervalMsec = std::max(20.0, cmdIntervalMsec);
-    sweepMsec = std::max(500.0, sweepMsec);
-    pitchCycleMsec = std::max(500.0, pitchCycleMsec);
 
-    auto timeSinceLastCmd = (curTime - _timeLastCmd).nanoseconds() / 1e6;
+    // Only a depth-confirmed RGB acquisition advances this generation.
+    // RGB-only candidates do not stop CamFindBall or create a new episode.
+    const auto ballTrackingGeneration =
+        brain->data->ballTrackingGeneration.load(std::memory_order_relaxed);
+    const bool ballTrackingGenerationChanged =
+        ballTrackingGeneration != _searchBallGeneration;
+
+    // Never let search create startup motion before this stack has accepted a
+    // depth-confirmed ball.
+    if (ballTrackingGeneration == 0)
+    {
+        if (!_waitingForObservationLogged)
+        {
+            brain->log->log(
+                "CamFindBall/wait_observation",
+                "No depth-confirmed ball has been acquired; holding head and body still");
+            _waitingForObservationLogged = true;
+        }
+
+        _searchInitialized = false;
+        _timeLastCmd = rclcpp::Time(0, 0, RCL_ROS_TIME);
+        _searchBallGeneration = ballTrackingGeneration;
+        return NodeStatus::SUCCESS;
+    }
+
+    if (!_searchInitialized || ballTrackingGenerationChanged)
+    {
+        const auto visualSearchGeneration =
+            brain->data->lastBallSearchGeneration.load(std::memory_order_acquire);
+        const bool hasVisualObservation =
+            ballTrackingGeneration != 0 &&
+            visualSearchGeneration == ballTrackingGeneration;
+        const int visualSearchDirection = hasVisualObservation
+            ? brain->data->lastBallSearchDirection.load(std::memory_order_relaxed)
+            : 0;
+        const double lastBallPixelX = hasVisualObservation
+            ? brain->data->lastBallPixelX.load(std::memory_order_relaxed)
+            : 0.0;
+        const double lastBallPixelY = hasVisualObservation
+            ? brain->data->lastBallPixelY.load(std::memory_order_relaxed)
+            : 0.0;
+        const double lastBallPixelDx = hasVisualObservation
+            ? brain->data->lastBallPixelDx.load(std::memory_order_relaxed)
+            : 0.0;
+        const double lastBallPixelDy = hasVisualObservation
+            ? brain->data->lastBallPixelDy.load(std::memory_order_relaxed)
+            : 0.0;
+        const double lastObservedHeadYaw = hasVisualObservation
+            ? brain->data->lastBallObservedHeadYaw.load(std::memory_order_relaxed)
+            : measuredHeadYaw;
+        const double lastObservedHeadPitch = hasVisualObservation
+            ? brain->data->lastBallObservedHeadPitch.load(std::memory_order_relaxed)
+            : measuredHeadPitch;
+        const bool yawTurnTriggered =
+            hasVisualObservation &&
+            std::fabs(lastObservedHeadYaw) >= trackTurnYawLimit;
+        // In this stack, larger positive pitch means the head is looking
+        // farther downward.
+        const bool pitchTurnTriggered =
+            hasVisualObservation &&
+            lastObservedHeadPitch >= lossTurnPitchLimit;
+        const bool fastTurnRequested =
+            visualSearchDirection != 0 &&
+            (yawTurnTriggered || pitchTurnTriggered);
+        const char *directionSource = "";
+
+        if (fastTurnRequested)
+        {
+            _searchMode = SearchMode::CONTINUE_TURN;
+            _searchDirection = visualSearchDirection > 0 ? 1.0 : -1.0;
+            if (yawTurnTriggered && pitchTurnTriggered)
+            {
+                directionSource = "RGB_YAW_AND_PITCH";
+            }
+            else if (yawTurnTriggered)
+            {
+                directionSource = "RGB_YAW_LIMIT";
+            }
+            else
+            {
+                directionSource = "RGB_PITCH_LIMIT";
+            }
+        }
+        else
+        {
+            _searchMode = SearchMode::HEAD_SCAN;
+
+            // Do not start a surprise scan before a ball has ever been seen.
+            // The stationary mode needs a visual observation from this ball
+            // generation, not a stale projected ball position or old turn.
+            if (!hasVisualObservation)
+            {
+                if (!_waitingForObservationLogged)
+                {
+                    brain->log->log(
+                        "CamFindBall/wait_observation",
+                        "No current ball observation; holding head and body still");
+                    _waitingForObservationLogged = true;
+                }
+
+                _searchInitialized = false;
+                _timeLastCmd = rclcpp::Time(0, 0, RCL_ROS_TIME);
+                _searchBallGeneration = ballTrackingGeneration;
+                return NodeStatus::SUCCESS;
+            }
+
+            if (visualSearchDirection != 0)
+            {
+                _searchDirection = visualSearchDirection > 0 ? 1.0 : -1.0;
+                directionSource = "LAST_VISUAL_DIRECTION";
+            }
+            else if (std::fabs(measuredHeadYaw) > 0.02)
+            {
+                // A centred ball still has a useful direction when the head
+                // was already aimed left or right.
+                _searchDirection = measuredHeadYaw > 0.0 ? 1.0 : -1.0;
+                directionSource = "HEAD_AIM";
+            }
+            else
+            {
+                // The last ball was centred with a centred head, so neither
+                // side is better. Alternate only after a real observation.
+                _searchDirection = _alternateScanDirection;
+                _alternateScanDirection *= -1.0;
+                directionSource = "ALTERNATE_CENTERED";
+            }
+        }
+
+        _waitingForObservationLogged = false;
+        _searchYaw = lastObservedHeadYaw;
+        _searchPitch = lastObservedHeadPitch;
+        _searchInitialized = true;
+        _timeLastCmd = rclcpp::Time(0, 0, RCL_ROS_TIME);
+        _searchBallGeneration = ballTrackingGeneration;
+
+        brain->log->log(
+            "CamFindBall/start",
+            format("mode: %s source: %s direction: %.0f visualDirection: %d lastBallX: %.1f lastBallY: %.1f lastDx: %.1f lastDy: %.1f lastHeadYaw: %.3f lastHeadPitch: %.3f yawTriggered: %s pitchTriggered: %s trackTurnYawLimit: %.3f lossTurnPitchLimit: %.3f bodySearchSpeed: %.3f requestedTheta: %.3f searchYawLimit: %.3f ballTrackingGeneration: %llu",
+                   _searchMode == SearchMode::CONTINUE_TURN ? "CONTINUE_TURN" : "HEAD_SCAN",
+                   directionSource,
+                   _searchDirection,
+                   visualSearchDirection,
+                   lastBallPixelX,
+                   lastBallPixelY,
+                   lastBallPixelDx,
+                   lastBallPixelDy,
+                   lastObservedHeadYaw,
+                   lastObservedHeadPitch,
+                   yawTurnTriggered ? "true" : "false",
+                   pitchTurnTriggered ? "true" : "false",
+                   trackTurnYawLimit,
+                   lossTurnPitchLimit,
+                   bodySearchSpeed,
+                   _searchMode == SearchMode::CONTINUE_TURN
+                       ? _searchDirection * bodySearchSpeed
+                       : 0.0,
+                   yawLimit,
+                   static_cast<unsigned long long>(_searchBallGeneration)));
+    }
+
+    double timeSinceLastCmd = 0.0;
+    if (_timeLastCmd.nanoseconds() > 0)
+    {
+        timeSinceLastCmd = (curTime - _timeLastCmd).nanoseconds() / 1e6;
+        if (timeSinceLastCmd < 0.0)
+        {
+            _timeLastCmd = rclcpp::Time(0, 0, RCL_ROS_TIME);
+            timeSinceLastCmd = 0.0;
+        }
+    }
+
+    // A continued body turn begins immediately. A stationary loss never
+    // produces theta; it scans with the head only.
+    double theta = 0.0;
+    if (_searchMode == SearchMode::CONTINUE_TURN)
+    {
+        theta = _searchDirection * bodySearchSpeed;
+    }
+    setOutput("theta", theta);
+
     if (_timeLastCmd.nanoseconds() > 0 && timeSinceLastCmd < cmdIntervalMsec)
     {
         return NodeStatus::SUCCESS;
     }
 
-    auto searchMsec = (curTime - _timeSearchStart).nanoseconds() / 1e6;
-    if (searchMsec < 0.0 || searchMsec > _cmdRestartIntervalMSec)
+    double dtSec = 0.0;
+    if (_timeLastCmd.nanoseconds() > 0 && timeSinceLastCmd > 0.0)
     {
-        _timeSearchStart = curTime;
-        searchMsec = 0.0;
+        dtSec = std::min(timeSinceLastCmd / 1000.0, 0.25);
+    }
+    else
+    {
+        // Start the head scan on the first loss command instead of sending a
+        // no-op command and waiting one whole command interval.
+        dtSec = cmdIntervalMsec / 1000.0;
     }
 
-    const double yawPhase = 2.0 * M_PI * std::fmod(searchMsec, sweepMsec) / sweepMsec;
-    const double pitchPhase = 2.0 * M_PI * std::fmod(searchMsec, pitchCycleMsec) / pitchCycleMsec;
-    const double pitchBlend = 0.5 * (1.0 - std::cos(pitchPhase));
-    const double yaw = yawLimit * std::sin(yawPhase);
-    const double pitch = highPitch + (lowPitch - highPitch) * pitchBlend;
+    auto getEffectiveYawLimit = [this, yawLimit]()
+    {
+        const double hardwareYawLimit = _searchDirection > 0.0
+            ? std::fabs(brain->config->get_head_yaw_limit_left())
+            : std::fabs(brain->config->get_head_yaw_limit_right());
+        return std::min(yawLimit, hardwareYawLimit);
+    };
 
-    brain->client->moveHead(pitch, yaw);
-    turnTowardRecentlyLostBall(brain, turnBodyOnLoss, lostTurnMsec, lostTurnSpeed, lostTurnMinYaw);
-    _timeLastCmd = brain->get_clock()->now();
+    if (headSearchSpeed > 0.0)
+    {
+        constexpr double SCAN_ENDPOINT_TOLERANCE = 0.05;
+        double effectiveYawLimit = getEffectiveYawLimit();
+        double targetYaw = _searchDirection * effectiveYawLimit;
+
+        if (_searchMode == SearchMode::HEAD_SCAN && effectiveYawLimit > 0.0)
+        {
+            const double directedMeasuredYaw = _searchDirection * measuredHeadYaw;
+            const double directedCommandedYaw = _searchDirection * _searchYaw;
+            const bool measuredAtEndpoint =
+                directedMeasuredYaw >= effectiveYawLimit - SCAN_ENDPOINT_TOLERANCE;
+            const bool commandAtEndpoint =
+                directedCommandedYaw >= effectiveYawLimit - 1e-6;
+            const bool endpointCommandSettled =
+                commandAtEndpoint &&
+                _timeLastCmd.nanoseconds() > 0 &&
+                timeSinceLastCmd >= cmdIntervalMsec;
+
+            if (measuredAtEndpoint || endpointCommandSettled)
+            {
+                _searchDirection *= -1.0;
+                _searchYaw = measuredHeadYaw;
+                effectiveYawLimit = getEffectiveYawLimit();
+                targetYaw = _searchDirection * effectiveYawLimit;
+            }
+        }
+
+        if (effectiveYawLimit > 0.0)
+        {
+            const bool keepCurrentOutwardHeadAim =
+                _searchMode == SearchMode::CONTINUE_TURN &&
+                _searchDirection * measuredHeadYaw >= effectiveYawLimit;
+
+            if (keepCurrentOutwardHeadAim)
+            {
+                // A turn-loss may begin while the head is already outside a
+                // smaller configured search cap. Keep looking in the active
+                // turn direction instead of first pulling the head inward.
+                // RobotClient still applies the physical hardware limit.
+                _searchYaw = measuredHeadYaw;
+            }
+            else
+            {
+                _searchYaw += _searchDirection * headSearchSpeed * dtSec;
+                if (_searchDirection > 0.0)
+                {
+                    _searchYaw = std::min(_searchYaw, targetYaw);
+                }
+                else
+                {
+                    _searchYaw = std::max(_searchYaw, targetYaw);
+                }
+            }
+        }
+    }
+
+    brain->client->moveHead(_searchPitch, _searchYaw);
+    _timeLastCmd = curTime;
+
+    brain->log->log(
+        "CamFindBall/search",
+        format("mode: %s pitch: %.3f commandedYaw: %.3f measuredYaw: %.3f direction: %.0f theta: %.3f",
+               _searchMode == SearchMode::CONTINUE_TURN ? "CONTINUE_TURN" : "HEAD_SCAN",
+               _searchPitch,
+               _searchYaw,
+               measuredHeadYaw,
+               _searchDirection,
+               theta));
     return NodeStatus::SUCCESS;
 }
 
@@ -423,36 +781,235 @@ NodeStatus Chase::tick()
 
 NodeStatus SimpleChase::tick()
 {
-    double stopDist, stopAngle, vyLimit, vxLimit;
+    double stopDist, yTolerance, vyLimit, vxLimit;
     getInput("stop_dist", stopDist);
-    getInput("stop_angle", stopAngle);
+    getInput("y_tolerance", yTolerance);
     getInput("vx_limit", vxLimit);
     getInput("vy_limit", vyLimit);
 
-    if (!brain->tree->getEntry<bool>("ball_location_known"))
+    double vx = 0.0;
+    double vy = 0.0;
+    setOutput("vx", vx);
+    setOutput("vy", vy);
+
+    if (!brain->tree->getEntry<bool>("ball_visible") ||
+        !brain->tree->getEntry<bool>("ball_location_known"))
     {
-        brain->client->setVelocity(0, 0, 0);
         return NodeStatus::SUCCESS;
     }
 
-    double vx = brain->data->ball.posToRobot.x;
-    double vy = brain->data->ball.posToRobot.y;
-    double vtheta = brain->data->ball.yawToRobot * 4.0; 
-
-    double linearFactor = 1 / (1 + exp(3 * (brain->data->ball.range * fabs(brain->data->ball.yawToRobot)) - 3)); 
-    vx *= linearFactor;
-    vy *= linearFactor;
-
-    vx = cap(vx, vxLimit, -1.0);    
-    vy = cap(vy, vyLimit, -vyLimit); 
-
-    if (brain->data->ball.range < stopDist)
+    const double ballRange = brain->data->ball.range;
+    if (ballRange <= std::fabs(stopDist))
     {
-        vx = 0;
-        vy = 0;
+        brain->log->log(
+            "SimpleChase/vector",
+            format("range: %.3f ballX: %.3f ballY: %.3f vx: %.3f vy: %.3f source: STOP_DIST",
+                   ballRange,
+                   brain->data->ball.posToRobot.x,
+                   brain->data->ball.posToRobot.y,
+                   vx,
+                   vy));
+        return NodeStatus::SUCCESS;
     }
 
-    brain->client->setVelocity(vx, vy, vtheta);
+    const double absVxLimit = std::fabs(vxLimit);
+    const double absVyLimit = std::fabs(vyLimit);
+    vx = cap(brain->data->ball.posToRobot.x, absVxLimit, -absVxLimit);
+    vy = cap(brain->data->ball.posToRobot.y, absVyLimit, -absVyLimit);
+
+    if (std::fabs(brain->data->ball.posToRobot.y) <= std::fabs(yTolerance))
+    {
+        vy = 0.0;
+    }
+
+    setOutput("vx", vx);
+    setOutput("vy", vy);
+
+    brain->log->log(
+        "SimpleChase/vector",
+        format("range: %.3f ballX: %.3f ballY: %.3f vx: %.3f vy: %.3f source: DEPTH",
+               ballRange,
+               brain->data->ball.posToRobot.x,
+               brain->data->ball.posToRobot.y,
+               vx,
+               vy));
+    return NodeStatus::SUCCESS;
+}
+
+
+NodeStatus ShootingAdjust::tick()
+{
+    double targetRange, targetYOffset, thetaOffset;
+    double rangeTolerance, yTolerance, stopAngle;
+    double rangeGain, yGain, ballYawGain;
+    double vxLimit, vyLimit, vthetaLimit;
+    double turnFirstThreshold, fixedHeadYaw, maxBallRange;
+
+    getInput("target_range", targetRange);
+    getInput("target_y_offset", targetYOffset);
+    getInput("theta_offset", thetaOffset);
+    getInput("range_tolerance", rangeTolerance);
+    getInput("y_tolerance", yTolerance);
+    getInput("stop_angle", stopAngle);
+    getInput("range_gain", rangeGain);
+    getInput("y_gain", yGain);
+    getInput("ball_yaw_gain", ballYawGain);
+    getInput("vx_limit", vxLimit);
+    getInput("vy_limit", vyLimit);
+    getInput("vtheta_limit", vthetaLimit);
+    getInput("turn_first_threshold", turnFirstThreshold);
+    getInput("fixed_head_yaw", fixedHeadYaw);
+    getInput("max_ball_range", maxBallRange);
+
+    rangeTolerance = std::fabs(rangeTolerance);
+    yTolerance = std::fabs(yTolerance);
+    stopAngle = std::fabs(stopAngle);
+    rangeGain = std::max(0.0, rangeGain);
+    yGain = std::max(0.0, yGain);
+    ballYawGain = std::max(0.0, ballYawGain);
+    vxLimit = std::fabs(vxLimit);
+    vyLimit = std::fabs(vyLimit);
+    vthetaLimit = std::fabs(vthetaLimit);
+    turnFirstThreshold = std::fabs(turnFirstThreshold);
+    maxBallRange = std::fabs(maxBallRange);
+
+    double vx = 0.0;
+    double vy = 0.0;
+    double theta = 0.0;
+    setOutput("vx", vx);
+    setOutput("vy", vy);
+    setOutput("theta", theta);
+
+    const bool bboxValid =
+        brain->data->ball.boundingBox.xmax > brain->data->ball.boundingBox.xmin &&
+        brain->data->ball.boundingBox.ymax > brain->data->ball.boundingBox.ymin;
+    const bool visualBallUsable =
+        brain->tree->getEntry<bool>("ball_visible") &&
+        brain->data->ballDetected &&
+        bboxValid;
+    if (!visualBallUsable || !brain->data->headStateReceived.load(std::memory_order_acquire))
+    {
+        return NodeStatus::SUCCESS;
+    }
+
+    const double measuredHeadPitch = brain->data->headPitch.load(std::memory_order_relaxed);
+    const double measuredHeadYaw = brain->data->headYaw.load(std::memory_order_relaxed);
+    const double ballPixelX = mean(
+        brain->data->ball.boundingBox.xmax,
+        brain->data->ball.boundingBox.xmin);
+    const double ballPixelY = mean(
+        brain->data->ball.boundingBox.ymax,
+        brain->data->ball.boundingBox.ymin);
+    const double imageCenterX = brain->config->cameraImageWidth / 2.0;
+    const double imageCenterY = brain->config->cameraImageHeight / 2.0;
+    const double ballPixelDx = ballPixelX - imageCenterX;
+    const double ballPixelDy = ballPixelY - imageCenterY;
+    int visualSearchDirection = 0;
+    if (ballPixelX > imageCenterX)
+    {
+        visualSearchDirection = -1;
+    }
+    else if (ballPixelX < imageCenterX)
+    {
+        visualSearchDirection = 1;
+    }
+    else if (std::fabs(measuredHeadYaw) > 0.0)
+    {
+        visualSearchDirection = measuredHeadYaw > 0.0 ? 1 : -1;
+    }
+
+    const auto ballTrackingGeneration =
+        brain->data->ballTrackingGeneration.load(std::memory_order_relaxed);
+    const auto previousVisualGeneration =
+        brain->data->lastBallSearchGeneration.load(std::memory_order_relaxed);
+    if (previousVisualGeneration != ballTrackingGeneration)
+    {
+        brain->data->lastBallSearchDirection.store(0, std::memory_order_relaxed);
+    }
+    if (visualSearchDirection != 0)
+    {
+        brain->data->lastBallSearchDirection.store(
+            visualSearchDirection,
+            std::memory_order_relaxed);
+    }
+    brain->data->lastBallPixelX.store(ballPixelX, std::memory_order_relaxed);
+    brain->data->lastBallPixelY.store(ballPixelY, std::memory_order_relaxed);
+    brain->data->lastBallPixelDx.store(ballPixelDx, std::memory_order_relaxed);
+    brain->data->lastBallPixelDy.store(ballPixelDy, std::memory_order_relaxed);
+    brain->data->lastBallObservedHeadYaw.store(measuredHeadYaw, std::memory_order_relaxed);
+    brain->data->lastBallObservedHeadPitch.store(measuredHeadPitch, std::memory_order_relaxed);
+    brain->data->lastBallSearchGeneration.store(
+        ballTrackingGeneration,
+        std::memory_order_release);
+
+    const double hardwareYawLimit = fixedHeadYaw >= 0.0
+        ? std::fabs(brain->config->get_head_yaw_limit_left())
+        : std::fabs(brain->config->get_head_yaw_limit_right());
+    const double commandedHeadYaw = cap(fixedHeadYaw, hardwareYawLimit, -hardwareYawLimit);
+    const bool fixedHeadCommandSent = ballTrackingGeneration != _fixedHeadCommandGeneration;
+    if (fixedHeadCommandSent)
+    {
+        brain->client->moveHead(measuredHeadPitch, commandedHeadYaw);
+        _fixedHeadCommandGeneration = ballTrackingGeneration;
+    }
+
+    const double ballX = brain->data->ball.posToRobot.x;
+    const double ballY = brain->data->ball.posToRobot.y;
+    const double ballYaw = brain->data->ball.yawToRobot;
+    const bool ballLocationKnown = brain->tree->getEntry<bool>("ball_location_known");
+    const bool bodyUsable = ballLocationKnown && brain->data->ball.range <= maxBallRange;
+    const double rangeError = bodyUsable ? ballX - targetRange : 0.0;
+    const double yError = bodyUsable ? ballY - targetYOffset : 0.0;
+    const double thetaError = bodyUsable ? toPInPI(ballYaw - thetaOffset) : 0.0;
+
+    if (bodyUsable && std::fabs(rangeError) > rangeTolerance)
+    {
+        vx = cap(rangeError * rangeGain, vxLimit, -vxLimit);
+    }
+    if (bodyUsable && std::fabs(yError) > yTolerance)
+    {
+        vy = cap(yError * yGain, vyLimit, -vyLimit);
+    }
+
+    if (bodyUsable && std::fabs(thetaError) > stopAngle)
+    {
+        theta = thetaError * ballYawGain;
+    }
+
+    const char *thetaSource = !ballLocationKnown
+        ? "NO_DEPTH"
+        : (!bodyUsable ? "OUT_OF_RANGE" : (std::fabs(thetaError) > stopAngle ? "BALL_YAW" : "DEADBAND"));
+
+    if (bodyUsable && turnFirstThreshold > 0.0 && std::fabs(thetaError) > turnFirstThreshold)
+    {
+        vx = 0.0;
+        vy = 0.0;
+    }
+
+    theta = cap(theta, vthetaLimit, -vthetaLimit);
+    setOutput("vx", vx);
+    setOutput("vy", vy);
+    setOutput("theta", theta);
+
+    brain->log->log(
+        "ShootingAdjust/vector",
+        format("ballX: %.3f ballY: %.3f ballRange: %.3f maxBallRange: %.3f ballYaw: %.3f rangeError: %.3f yError: %.3f thetaError: %.3f vx: %.3f vy: %.3f theta: %.3f source: %s measuredHeadYaw: %.3f fixedHeadYaw: %.3f fixedHeadCommandSent: %d visualSearchDirection: %d",
+               ballX,
+               ballY,
+               brain->data->ball.range,
+               maxBallRange,
+               ballYaw,
+               rangeError,
+               yError,
+               thetaError,
+               vx,
+               vy,
+               theta,
+               thetaSource,
+               measuredHeadYaw,
+               commandedHeadYaw,
+               fixedHeadCommandSent,
+               visualSearchDirection));
     return NodeStatus::SUCCESS;
 }
 

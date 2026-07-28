@@ -1,4 +1,5 @@
 #include <iostream>
+#include <cmath>
 #include <string>
 #include <fstream> 
 #include <yaml-cpp/yaml.h>
@@ -58,7 +59,7 @@ Brain::Brain() : rclcpp::Node("brain_node")
     declare_parameter<double>("robot.min_vy", 0.3);
     declare_parameter<double>("robot.min_vtheta", 0.2);
 
-    declare_parameter<double>("strategy.ball_confidence_threshold", 50.0);   
+    declare_parameter<double>("strategy.ball_confidence_threshold", 50.0);
     declare_parameter<double>("strategy.ball_memory_timeout", 3.0);
     declare_parameter<double>("strategy.tm_ball_dist_threshold", 3.0);
     declare_parameter<bool>("strategy.limit_near_ball_speed", true);
@@ -1245,16 +1246,7 @@ void Brain::detectionsCallback(const vision_interface::msg::Detections &msg)
     for (int i = 0; i < gameObjects.size(); i++)
     {
         const auto &obj = gameObjects[i];
-        if (
-            obj.label == "Ball" ||
-            (
-                obj.label == "Person" &&
-                obj.boundingBox.xmin > 700 &&
-                obj.boundingBox.ymin > 350 &&
-                (obj.boundingBox.xmax - obj.boundingBox.xmin) > 80 &&
-                (obj.boundingBox.ymax - obj.boundingBox.ymin) > 120
-            )
-        )
+        if (obj.label == "Ball")
             balls.push_back(obj);
         if (obj.label == "Goalpost")
             goalposts.push_back(obj);
@@ -1345,9 +1337,12 @@ void Brain::odometerCallback(const booster_interface::msg::Odometer &msg)
 
 void Brain::lowStateCallback(const booster_interface::msg::LowState &msg)
 {
-    data->headYaw = msg.motor_state_serial[0].q;
-    data->headPitch = msg.motor_state_serial[1].q;
-    log->debug("head_angles", format("pitch: %.1f, yaw: %.1f", data->headYaw, data->headPitch));
+    const double headYaw = msg.motor_state_serial[0].q;
+    const double headPitch = msg.motor_state_serial[1].q;
+    data->headYaw.store(headYaw, std::memory_order_relaxed);
+    data->headPitch.store(headPitch, std::memory_order_relaxed);
+    data->headStateReceived.store(true, std::memory_order_release);
+    log->debug("head_angles", format("pitch: %.1f, yaw: %.1f", headPitch, headYaw));
 }
 
 void Brain::imageCameraInfoCallback(const sensor_msgs::msg::CameraInfo::SharedPtr msg)
@@ -1675,9 +1670,41 @@ vector<GameObject> Brain::getGameObjects(const vision_interface::msg::Detections
         gObj.boundingBox.ymin = obj.ymin;
         gObj.confidence = obj.confidence;
 
-        // Do not use depth measurement, directly use projection distance
-        gObj.posToRobot.x = obj.position_projection[0];
-        gObj.posToRobot.y = obj.position_projection[1];
+        gObj.projectionToRobot = {0.0, 0.0, 0.0};
+        if (obj.position_projection.size() >= 2 &&
+            std::isfinite(obj.position_projection[0]) &&
+            std::isfinite(obj.position_projection[1])) {
+            gObj.projectionToRobot.x = obj.position_projection[0];
+            gObj.projectionToRobot.y = obj.position_projection[1];
+            if (obj.position_projection.size() >= 3 && std::isfinite(obj.position_projection[2])) {
+                gObj.projectionToRobot.z = obj.position_projection[2];
+            }
+        }
+
+        const bool isBall = obj.label == "Ball";
+        const bool hasValidDepthPosition =
+            isBall &&
+            obj.position_confidence > 0 &&
+            obj.position.size() >= 3 &&
+            std::isfinite(obj.position[0]) &&
+            std::isfinite(obj.position[1]) &&
+            std::isfinite(obj.position[2]) &&
+            norm(obj.position[0], obj.position[1]) > 0.0001;
+
+        gObj.positionConfidence = isBall
+            ? (hasValidDepthPosition ? obj.position_confidence : 0)
+            : obj.position_confidence;
+        if (hasValidDepthPosition) {
+            gObj.posToRobot.x = obj.position[0];
+            gObj.posToRobot.y = obj.position[1];
+            gObj.posToRobot.z = obj.position[2];
+        } else if (isBall) {
+            // A visual-only ball may move the head, but it must not supply body
+            // coordinates through the RGB ground projection.
+            gObj.posToRobot = {0.0, 0.0, 0.0};
+        } else {
+            gObj.posToRobot = gObj.projectionToRobot;
+        }
 
         // Calculate angles
         gObj.range = norm(gObj.posToRobot.x, gObj.posToRobot.y);
@@ -1699,56 +1726,83 @@ vector<GameObject> Brain::getGameObjects(const vision_interface::msg::Detections
 
 void Brain::detectProcessBalls(const vector<GameObject> &ballObjs)
 {
-    static rclcpp::Time lastSeenRealBallTime; 
-    double bestConfidence = 0;
-    int indexRealBall = -1;  // Which ball is considered real, -1 means no ball detected
+    static rclcpp::Time lastSeenRealBallTime;
+    const bool wasDepthAcquired =
+        data->ballDepthAcquired.load(std::memory_order_acquire);
+    double bestConfidence = -1.0;
+    bool bestHasDepth = false;
+    int indexRealBall = -1;
 
-    // Find the most likely real ball
     for (int i = 0; i < ballObjs.size(); i++)
     {
-        auto ballObj = ballObjs[i];
-        auto oldBall = data->ball;
+        const auto &ballObj = ballObjs[i];
 
-        // Prevent misidentifying lights in the sky as balls
-        if (ballObj.posToRobot.x < -0.5 || ballObj.posToRobot.x > 15.0)
+        const bool hasDepth = ballObj.positionConfidence > 0;
+        const double candidateX = hasDepth
+            ? ballObj.posToRobot.x
+            : ballObj.projectionToRobot.x;
+
+        // Prevent misidentifying lights in the sky as balls. Visual-only
+        // candidates use projection for filtering, never for body motion.
+        if (candidateX < -0.5 || candidateX > 15.0)
             continue;
 
-        // If the confidence is too low, consider it a false detection
         if (ballObj.confidence < config->get_ball_confidence_threshold())
             continue;
 
-
-        // Find the ball with the highest confidence among the remaining ones
-        if (ballObj.confidence > bestConfidence)
+        if ((hasDepth && !bestHasDepth) ||
+            (hasDepth == bestHasDepth && ballObj.confidence > bestConfidence))
         {
             bestConfidence = ballObj.confidence;
+            bestHasDepth = hasDepth;
             indexRealBall = i;
         }
     }
 
-    auto now = this->get_clock()->now(); 
+    auto now = this->get_clock()->now();
 
     if (indexRealBall >= 0)
     { // Ball detected
         data->ballDetected = true;
+        tree->setEntry<bool>("ball_visible", true);
 
         data->ball = ballObjs[indexRealBall];
         data->ball.confidence = bestConfidence;
+        if (!wasDepthAcquired && bestHasDepth)
+        {
+            data->ballDepthAcquired.store(true, std::memory_order_release);
+            data->ballTrackingGeneration.fetch_add(1, std::memory_order_relaxed);
+            log->log(
+                "BallAcquisition",
+                format("Depth-confirmed RGB acquisition accepted; generation: %llu",
+                       static_cast<unsigned long long>(
+                           data->ballTrackingGeneration.load(std::memory_order_relaxed))));
+        }
 
-        tree->setEntry<bool>("ball_location_known", true);
-        updateBallOut();
-        
+        const bool depthAcquired =
+            data->ballDepthAcquired.load(std::memory_order_acquire);
+        tree->setEntry<bool>("ball_depth_acquired", depthAcquired);
+        tree->setEntry<bool>("ball_location_known", bestHasDepth);
+        if (bestHasDepth) {
+            updateBallOut();
+        }
+
         lastSeenRealBallTime = now;
         data->lose_ball = false;
     }
     else
     { // No ball detected
         data->ballDetected = false;
-        data->ball.boundingBox.xmin = 0;
-        data->ball.boundingBox.xmax = 0;
-        data->ball.boundingBox.ymin = 0;
-        data->ball.boundingBox.ymax = 0;
-
+        data->ballDepthAcquired.store(false, std::memory_order_release);
+        tree->setEntry<bool>("ball_visible", false);
+        tree->setEntry<bool>("ball_location_known", false);
+        tree->setEntry<bool>("ball_depth_acquired", false);
+        if (wasDepthAcquired)
+        {
+            log->log(
+                "BallAcquisition",
+                "Accepted RGB ball lost; depth-confirmed acquisition latch reset");
+        }
         if (lastSeenRealBallTime.seconds() > 0.0)
         {
             double msecs = (now - lastSeenRealBallTime).nanoseconds() / 1e6;
@@ -2139,8 +2193,9 @@ void Brain::processDepthImage(const cv::Mat &depthFloat, int width, int height, 
         // Clean up old obstacles
         for (int i = 0; i < obs_old.size(); i++) {
            // First, clear old obstacles within the current field of view. Note that the angle is only roughly calculated, and the range is appropriately expanded using an offset.
-            double visionLeft = data->headYaw + config->depthCameraFovX / 2;
-            double visionRight = data->headYaw - config->depthCameraFovX / 2;
+            const double headYaw = data->headYaw.load(std::memory_order_relaxed);
+            double visionLeft = headYaw + config->depthCameraFovX / 2;
+            double visionRight = headYaw - config->depthCameraFovX / 2;
             auto obs = obs_old[i];
             const double offset = 0.20;
             double obsYawLeft = atan2(obs.posToRobot.y - offset, obs.posToRobot.x + offset);
@@ -2390,6 +2445,76 @@ bool Brain::isFreekickStartPlacing() {
 
 void Brain::agentCommandCallback(const std_msgs::msg::String::SharedPtr msg) {
     RCLCPP_INFO(get_logger(), "Received agent command: %s", msg->data.c_str());
+
+    if (msg->data == "autonomy_stop") {
+        tree->setEntry<bool>("autonomy_enabled", false);
+        tree->setEntry<double>("autonomy_command_vx", 0.0);
+        tree->setEntry<double>("autonomy_command_vy", 0.0);
+        tree->setEntry<double>("autonomy_command_theta", 0.0);
+        client->setVelocity(0.0, 0.0, 0.0);
+        RCLCPP_INFO(get_logger(), "Autonomy disabled with zero velocity");
+        return;
+    }
+
+    if (msg->data == "autonomy_save_track" ||
+        msg->data == "autonomy_save_chase" ||
+        msg->data == "autonomy_save_adjust") {
+        const string phase = msg->data.substr(string("autonomy_save_").size());
+        tree->setEntry<string>("autonomy_auto_phase", phase);
+        RCLCPP_INFO(get_logger(), "Autonomy saved phase => %s", phase.c_str());
+        return;
+    }
+
+    if (msg->data == "autonomy_auto_track" ||
+        msg->data == "autonomy_auto_chase" ||
+        msg->data == "autonomy_auto_adjust") {
+        const string phase = msg->data.substr(string("autonomy_auto_").size());
+        tree->setEntry<string>("autonomy_auto_phase", phase);
+        tree->setEntry<string>("autonomy_switch", "auto");
+        tree->setEntry<bool>("autonomy_enabled", true);
+        RCLCPP_INFO(get_logger(), "Autonomy switch => auto (phase: %s)", phase.c_str());
+        return;
+    }
+
+    if (msg->data == "autonomy_auto") {
+        const string manual_mode = tree->getEntry<string>("autonomy_manual_mode");
+        if (manual_mode == "chase" || manual_mode == "adjust") {
+            tree->setEntry<string>("autonomy_auto_phase", manual_mode);
+        }
+        tree->setEntry<string>("autonomy_switch", "auto");
+        tree->setEntry<bool>("autonomy_enabled", true);
+        RCLCPP_INFO(
+            get_logger(),
+            "Autonomy switch => auto (phase: %s)",
+            tree->getEntry<string>("autonomy_auto_phase").c_str());
+        return;
+    }
+
+    if (msg->data == "autonomy_manual") {
+        if (tree->getEntry<string>("autonomy_switch") == "auto") {
+            tree->setEntry<string>(
+                "autonomy_manual_mode",
+                tree->getEntry<string>("autonomy_auto_phase"));
+        }
+        tree->setEntry<string>("autonomy_switch", "manual");
+        tree->setEntry<bool>("autonomy_enabled", true);
+        RCLCPP_INFO(
+            get_logger(),
+            "Autonomy switch => manual (mode: %s)",
+            tree->getEntry<string>("autonomy_manual_mode").c_str());
+        return;
+    }
+
+    if (msg->data == "autonomy_track" ||
+        msg->data == "autonomy_chase" ||
+        msg->data == "autonomy_adjust") {
+        const string mode = msg->data.substr(string("autonomy_").size());
+        tree->setEntry<string>("autonomy_manual_mode", mode);
+        tree->setEntry<string>("autonomy_switch", "manual");
+        tree->setEntry<bool>("autonomy_enabled", true);
+        RCLCPP_INFO(get_logger(), "Autonomy manual mode => %s", mode.c_str());
+        return;
+    }
 
     data->timeLastGamecontrolMsg = get_clock()->now();
 

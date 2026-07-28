@@ -1,5 +1,6 @@
 #include "booster_vision/vision_node.h"
 
+#include <cmath>
 #include <cstdlib>
 #include <functional>
 #include <filesystem>
@@ -23,6 +24,10 @@
 #include "booster_vision/img_bridge.h"
 
 namespace booster_vision {
+
+namespace {
+constexpr double kMaxDepthPoseSkewMs = 40.0;
+}
 
 VisionNode::VisionNode(const std::string &node_name, const rclcpp::NodeOptions &options) :
     rclcpp::Node(node_name, options) {
@@ -306,11 +311,20 @@ void VisionNode::ProcessData(SyncedDataBlock &synced_data, vision_interface::msg
     double timestamp = synced_data.color_data.timestamp;
     double depth_time_diff = (timestamp - synced_data.depth_data.timestamp) * 1000;
     double pose_time_diff = (timestamp - synced_data.pose_data.timestamp) * 1000;
-    if (use_depth_ && depth_time_diff > 40) {
-        std::cerr << "color depth time diff: " << depth_time_diff << "ms" << std::endl;
+    const bool depth_time_valid = !use_depth_ ||
+                                  (!synced_data.depth_data.data.empty() &&
+                                   std::fabs(depth_time_diff) <= kMaxDepthPoseSkewMs);
+    const bool pose_time_valid = std::fabs(pose_time_diff) <= kMaxDepthPoseSkewMs;
+    const bool depth_pose_time_valid = depth_time_valid && pose_time_valid;
+    if (use_depth_ && !depth_time_valid) {
+        RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 1000,
+                             "color/depth timestamp skew is %.1f ms; depth location validation disabled for this frame",
+                             depth_time_diff);
     }
-    if (pose_time_diff > 40) {
-        std::cerr << "color pose time diff: " << pose_time_diff << " ms" << std::endl;
+    if (!pose_time_valid) {
+        RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 1000,
+                             "color/pose timestamp skew is %.1f ms; depth location validation disabled for this frame",
+                             pose_time_diff);
     }
     cv::Mat color = synced_data.color_data.data;
     cv::Mat depth = synced_data.depth_data.data;
@@ -395,15 +409,25 @@ void VisionNode::ProcessData(SyncedDataBlock &synced_data, vision_interface::msg
 
         auto pose_estimator = get_estimator(detection.class_name);
         Pose pose_obj_by_color = pose_estimator->EstimateByColor(p_eye2base, detection, color);
-        Pose pose_obj_by_depth = pose_estimator->EstimateByDepth(p_eye2base, detection, color, depth_float);
+        const cv::Mat depth_for_estimation = depth_pose_time_valid ? depth_float : cv::Mat();
+        Pose pose_obj_by_depth = pose_estimator->EstimateByDepth(p_eye2base, detection, color, depth_for_estimation);
 
-        // filter out incorrect ball detection
-        if (pose_estimator->use_depth_ && detection.class_name == "Ball" && pose_obj_by_depth == Pose()) {
-            std::cout << "filtered out ball detection by depth" << std::endl;
-            continue;
-        }
+        const bool is_ball = detection.class_name == "Ball";
+        const bool ball_location_valid = is_ball &&
+            (!pose_estimator->use_depth_ || (depth_pose_time_valid && pose_obj_by_depth != Pose()));
         detection_obj.position_projection = pose_obj_by_color.getTranslationVec();
-        detection_obj.position = pose_obj_by_depth.getTranslationVec();
+        if (is_ball && pose_estimator->use_depth_) {
+            // Keep the RGB detection for visual tracking even when depth/pose timing
+            // or geometric validation is invalid.  A zero confidence marks the
+            // location as unusable for body motion.
+            detection_obj.position_confidence = ball_location_valid ? 1 : 0;
+            detection_obj.position = ball_location_valid
+                ? pose_obj_by_depth.getTranslationVec()
+                : std::vector<float>{0.0f, 0.0f, 0.0f};
+        } else {
+            detection_obj.position = pose_obj_by_depth.getTranslationVec();
+            detection_obj.position_confidence = ball_location_valid ? 1 : 0;
+        }
 
         auto xyz = p_head2base.getTranslationVec();
         auto rpy = p_head2base.getEulerAnglesVec();

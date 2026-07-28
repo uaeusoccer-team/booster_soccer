@@ -2,11 +2,32 @@
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
+#include <unordered_map>
+#include <utility>
+#include <vector>
 
 #include "booster_vision/base/misc_utils.hpp"
 #include "booster_vision/base/pointcloud_process.h"
 
 namespace booster_vision {
+
+namespace {
+
+struct DepthSample {
+    int u;
+    int v;
+    cv::Point3f point_robot;
+};
+
+float Median(std::vector<float> values) {
+    if (values.empty()) return 0.0f;
+    const auto middle = values.begin() + values.size() / 2;
+    std::nth_element(values.begin(), middle, values.end());
+    return *middle;
+}
+
+} // namespace
 
 cv::Point3f CalculatePositionByIntersection(const Pose &p_eye2base, const cv::Point2f target_uv, const Intrinsics &intr) {
     cv::Point3f normalized_point3d = intr.BackProject(target_uv);
@@ -37,14 +58,16 @@ Pose PoseEstimator::EstimateByDepth(const Pose &p_eye2base, const DetectionRes &
 
 void BallPoseEstimator::Init(const YAML::Node &node) {
     use_depth_ = as_or<bool>(node["use_depth"], false);
-    filter_distance_ = as_or<float>(node["filter_distance"], 1.0);
     check_ball_height_ = as_or<bool>(node["check_ball_height"], false);
     depth_sample_step_ = as_or<int>(node["depth_sample_step"], 4);
     min_depth_points_ = as_or<int>(node["min_depth_points"], 12);
     min_points_above_ground_ = as_or<int>(node["min_points_above_ground"], 3);
     min_height_above_ground_ = as_or<float>(node["min_height_above_ground"], 0.04);
     min_above_ground_ratio_ = as_or<float>(node["min_above_ground_ratio"], 0.05);
-    std::cout << "filter_distance: " << filter_distance_ << std::endl;
+    ground_ring_scale_ = as_or<float>(node["ground_ring_scale"], 1.5);
+    min_ground_points_ = as_or<int>(node["min_ground_points"], 12);
+    max_height_above_ground_ = as_or<float>(node["max_height_above_ground"], 0.35);
+    cluster_neighbor_distance_ = as_or<float>(node["cluster_neighbor_distance"], 0.20);
 }
 
 Pose BallPoseEstimator::EstimateByColor(const Pose &p_eye2base, const DetectionRes &detection, const cv::Mat &rgb) {
@@ -56,15 +79,14 @@ Pose BallPoseEstimator::EstimateByColor(const Pose &p_eye2base, const DetectionR
 }
 
 Pose BallPoseEstimator::EstimateByDepth(const Pose &p_eye2base, const DetectionRes &detection, const cv::Mat &rgb, const cv::Mat &depth) {
-    (void)rgb;
     if (!use_depth_ || depth.empty()) return Pose();
-
-    auto pose = EstimateByColor(p_eye2base, detection, cv::Mat());
-    if (cv::norm(pose.getTranslationVec()) > filter_distance_) return pose;
-    std::cout << "ball distance by color: " << cv::norm(pose.getTranslationVec()) << std::endl;
-
-    if (!check_ball_height_) return pose;
     if (depth.depth() != CV_32F) return Pose();
+    if (!rgb.empty() && rgb.size() != depth.size()) {
+        std::cout << "rejected ball depth: RGB/depth images are not registered: rgb="
+                  << rgb.cols << "x" << rgb.rows
+                  << " depth=" << depth.cols << "x" << depth.rows << std::endl;
+        return Pose();
+    }
 
     const auto bbox = detection.bbox;
     const int x0 = std::max(0, bbox.x);
@@ -74,40 +96,193 @@ Pose BallPoseEstimator::EstimateByDepth(const Pose &p_eye2base, const DetectionR
     if (x1 <= x0 || y1 <= y0) return Pose();
 
     const int step = std::max(1, depth_sample_step_);
+    const int bbox_width = x1 - x0;
+    const int bbox_height = y1 - y0;
+    const float ring_scale = std::max(1.0f, ground_ring_scale_);
+    const int expanded_width = std::max(bbox_width, static_cast<int>(std::ceil(bbox_width * ring_scale)));
+    const int expanded_height = std::max(bbox_height, static_cast<int>(std::ceil(bbox_height * ring_scale)));
+    const int expanded_x0 = std::max(0, x0 - (expanded_width - bbox_width) / 2);
+    const int expanded_y0 = std::max(0, y0 - (expanded_height - bbox_height) / 2);
+    const int expanded_x1 = std::min(depth.cols, expanded_x0 + expanded_width);
+    const int expanded_y1 = std::min(depth.rows, expanded_y0 + expanded_height);
+
+    std::vector<DepthSample> ground_samples;
+    std::vector<DepthSample> object_samples;
+    std::vector<float> ground_heights;
+
+    auto sample = [&](int u, int v, std::vector<DepthSample> &samples) {
+        float depth_value = depth.at<float>(v, u);
+        if (!std::isfinite(depth_value) || depth_value <= 0) return;
+
+        cv::Point3f point_cam = intr_.BackProject(cv::Point2f(u, v), depth_value);
+        cv::Point3f point_robot = p_eye2base * point_cam;
+        if (!std::isfinite(point_robot.x) || !std::isfinite(point_robot.y) ||
+            !std::isfinite(point_robot.z)) {
+            return;
+        }
+        samples.push_back({u, v, point_robot});
+    };
+
+    if (check_ball_height_) {
+        // The expanded ring estimates the floor at this image location. It is
+        // deliberately outside the detection box so the ball cannot raise the
+        // reference itself.
+        for (int v = expanded_y0; v < expanded_y1; v += step) {
+            for (int u = expanded_x0; u < expanded_x1; u += step) {
+                if (u >= x0 && u < x1 && v >= y0 && v < y1) continue;
+                sample(u, v, ground_samples);
+            }
+        }
+
+        if (ground_samples.size() < static_cast<size_t>(std::max(1, min_ground_points_))) {
+            std::cout << "filtered ball detection: insufficient local ground samples: "
+                      << ground_samples.size() << std::endl;
+            return Pose();
+        }
+        ground_heights.reserve(ground_samples.size());
+        for (const auto &sample_point : ground_samples) {
+            ground_heights.push_back(sample_point.point_robot.z);
+        }
+    }
+    const float local_ground_z = check_ball_height_ ? Median(std::move(ground_heights)) : 0.0f;
+
     int valid_points = 0;
     int points_above_ground = 0;
     float max_height = 0.0f;
 
     for (int v = y0; v < y1; v += step) {
         for (int u = x0; u < x1; u += step) {
-            float depth_value = depth.at<float>(v, u);
-            if (!std::isfinite(depth_value) || depth_value <= 0) continue;
+            const size_t sample_count = object_samples.size();
+            sample(u, v, object_samples);
+            if (object_samples.size() == sample_count) continue;
 
-            cv::Point3f point_cam = intr_.BackProject(cv::Point2f(u, v), depth_value);
-            cv::Point3f point_robot = p_eye2base * point_cam;
+            const float height_above_local_ground = object_samples.back().point_robot.z - local_ground_z;
             valid_points++;
-            max_height = std::max(max_height, point_robot.z);
+            max_height = std::max(max_height, height_above_local_ground);
 
-            if (point_robot.z >= min_height_above_ground_) {
+            if (!check_ball_height_ ||
+                (height_above_local_ground >= min_height_above_ground_ &&
+                 (max_height_above_ground_ <= 0.0f || height_above_local_ground <= max_height_above_ground_))) {
                 points_above_ground++;
             }
         }
     }
 
+    std::vector<DepthSample> above_ground_samples;
+    above_ground_samples.reserve(object_samples.size());
+    for (const auto &sample_point : object_samples) {
+        const float height_above_local_ground = sample_point.point_robot.z - local_ground_z;
+        if (!check_ball_height_ ||
+            (height_above_local_ground >= min_height_above_ground_ &&
+             (max_height_above_ground_ <= 0.0f || height_above_local_ground <= max_height_above_ground_))) {
+            above_ground_samples.push_back(sample_point);
+        }
+    }
+
     const float above_ground_ratio = valid_points > 0 ? static_cast<float>(points_above_ground) / valid_points : 0.0f;
     const bool has_enough_depth = valid_points >= min_depth_points_;
-    const bool rises_above_ground = points_above_ground >= min_points_above_ground_ && above_ground_ratio >= min_above_ground_ratio_;
+    const bool rises_above_ground = !check_ball_height_ ||
+                                    (points_above_ground >= min_points_above_ground_ &&
+                                     above_ground_ratio >= min_above_ground_ratio_);
 
     if (!has_enough_depth || !rises_above_ground) {
         std::cout << "filtered flat ball detection by depth height: valid=" << valid_points
                   << " above=" << points_above_ground
                   << " ratio=" << above_ground_ratio
-                  << " max_z=" << max_height
+                  << " local_ground_z=" << local_ground_z
+                  << " max_height=" << max_height
                   << std::endl;
         return Pose();
     }
 
-    return pose;
+    std::vector<bool> visited(above_ground_samples.size(), false);
+    std::unordered_map<int, size_t> sample_index_by_pixel;
+    sample_index_by_pixel.reserve(above_ground_samples.size());
+    for (size_t index = 0; index < above_ground_samples.size(); ++index) {
+        const auto &sample_point = above_ground_samples[index];
+        sample_index_by_pixel[sample_point.v * depth.cols + sample_point.u] = index;
+    }
+
+    std::vector<size_t> best_cluster;
+    float best_center_distance = std::numeric_limits<float>::max();
+    const float center_u = bbox.x + bbox.width / 2.0f;
+    const float center_v = bbox.y + bbox.height / 2.0f;
+    const int pixel_neighbor_distance = step * 2;
+    const float spatial_neighbor_distance = std::max(0.01f, cluster_neighbor_distance_);
+
+    for (size_t start = 0; start < above_ground_samples.size(); ++start) {
+        if (visited[start]) continue;
+
+        std::vector<size_t> cluster;
+        std::vector<size_t> pending = {start};
+        visited[start] = true;
+        while (!pending.empty()) {
+            const size_t current = pending.back();
+            pending.pop_back();
+            cluster.push_back(current);
+
+            const auto &current_sample = above_ground_samples[current];
+            for (int dv = -pixel_neighbor_distance; dv <= pixel_neighbor_distance; dv += step) {
+                for (int du = -pixel_neighbor_distance; du <= pixel_neighbor_distance; du += step) {
+                    if (du == 0 && dv == 0) continue;
+                    const int neighbor_u = current_sample.u + du;
+                    const int neighbor_v = current_sample.v + dv;
+                    if (neighbor_u < x0 || neighbor_u >= x1 || neighbor_v < y0 || neighbor_v >= y1) {
+                        continue;
+                    }
+
+                    const auto neighbor = sample_index_by_pixel.find(neighbor_v * depth.cols + neighbor_u);
+                    if (neighbor == sample_index_by_pixel.end()) continue;
+                    const size_t candidate = neighbor->second;
+                    if (visited[candidate]) continue;
+                    if (cv::norm(current_sample.point_robot - above_ground_samples[candidate].point_robot) >
+                        spatial_neighbor_distance) {
+                        continue;
+                    }
+                    visited[candidate] = true;
+                    pending.push_back(candidate);
+                }
+            }
+        }
+
+        float cluster_center_distance = std::numeric_limits<float>::max();
+        for (const size_t index : cluster) {
+            const float du = above_ground_samples[index].u - center_u;
+            const float dv = above_ground_samples[index].v - center_v;
+            cluster_center_distance = std::min(cluster_center_distance, std::hypot(du, dv));
+        }
+
+        if (cluster.size() >= static_cast<size_t>(std::max(1, min_points_above_ground_)) &&
+            (cluster_center_distance < best_center_distance ||
+             (cluster_center_distance == best_center_distance && cluster.size() > best_cluster.size()))) {
+            best_cluster = std::move(cluster);
+            best_center_distance = cluster_center_distance;
+        }
+    }
+
+    if (best_cluster.size() < static_cast<size_t>(std::max(1, min_points_above_ground_))) {
+        std::cout << "filtered ball detection: no reliable connected depth cluster: "
+                  << best_cluster.size() << std::endl;
+        return Pose();
+    }
+
+    std::vector<float> xs;
+    std::vector<float> ys;
+    std::vector<float> zs;
+    xs.reserve(best_cluster.size());
+    ys.reserve(best_cluster.size());
+    zs.reserve(best_cluster.size());
+    for (const size_t index : best_cluster) {
+        const auto &point = above_ground_samples[index].point_robot;
+        xs.push_back(point.x);
+        ys.push_back(point.y);
+        zs.push_back(point.z);
+    }
+
+    const float x = Median(std::move(xs));
+    const float y = Median(std::move(ys));
+    const float z = Median(std::move(zs));
+    return Pose(x, y, z, 0, 0, 0);
 }
 
 void HumanLikePoseEstimator::Init(const YAML::Node &node) {
