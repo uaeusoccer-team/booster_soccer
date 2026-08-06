@@ -1,3 +1,4 @@
+<<<<<<< Updated upstream
 #!/usr/bin/env python3
 """View the Booster OS app camera stream from a laptop browser.
 
