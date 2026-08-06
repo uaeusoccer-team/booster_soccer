@@ -843,7 +843,9 @@ NodeStatus ShootingAdjust::tick()
     double rangeTolerance, yTolerance, stopAngle;
     double rangeGain, yGain, ballYawGain;
     double vxLimit, vyLimit, vthetaLimit;
-    double turnFirstThreshold, fixedHeadYaw, maxBallRange;
+    double turnFirstThreshold, fixedHeadYaw, maxBallRange, ballMaxAgeMsec;
+    double goalAlignmentGain, goalAlignmentTolerancePx, goalAlignmentHysteresisPx;
+    double goalMinPostSeparationPx, goalMaxAgeMsec, goalBallMaxSkewMsec;
 
     getInput("target_range", targetRange);
     getInput("target_y_offset", targetYOffset);
@@ -860,6 +862,13 @@ NodeStatus ShootingAdjust::tick()
     getInput("turn_first_threshold", turnFirstThreshold);
     getInput("fixed_head_yaw", fixedHeadYaw);
     getInput("max_ball_range", maxBallRange);
+    getInput("ball_max_age_msec", ballMaxAgeMsec);
+    getInput("goal_alignment_gain", goalAlignmentGain);
+    getInput("goal_alignment_tolerance_px", goalAlignmentTolerancePx);
+    getInput("goal_alignment_hysteresis_px", goalAlignmentHysteresisPx);
+    getInput("goal_min_post_separation_px", goalMinPostSeparationPx);
+    getInput("goal_max_age_msec", goalMaxAgeMsec);
+    getInput("goal_ball_max_skew_msec", goalBallMaxSkewMsec);
 
     rangeTolerance = std::fabs(rangeTolerance);
     yTolerance = std::fabs(yTolerance);
@@ -872,6 +881,13 @@ NodeStatus ShootingAdjust::tick()
     vthetaLimit = std::fabs(vthetaLimit);
     turnFirstThreshold = std::fabs(turnFirstThreshold);
     maxBallRange = std::fabs(maxBallRange);
+    ballMaxAgeMsec = std::fabs(ballMaxAgeMsec);
+    goalAlignmentGain = std::max(0.0, goalAlignmentGain);
+    goalAlignmentTolerancePx = std::fabs(goalAlignmentTolerancePx);
+    goalAlignmentHysteresisPx = std::fabs(goalAlignmentHysteresisPx);
+    goalMinPostSeparationPx = std::fabs(goalMinPostSeparationPx);
+    goalMaxAgeMsec = std::fabs(goalMaxAgeMsec);
+    goalBallMaxSkewMsec = std::fabs(goalBallMaxSkewMsec);
 
     double vx = 0.0;
     double vy = 0.0;
@@ -880,26 +896,49 @@ NodeStatus ShootingAdjust::tick()
     setOutput("vy", vy);
     setOutput("theta", theta);
 
+    const auto visionSnapshot = brain->data->getShootingVisionSnapshot();
+    const auto &ball = visionSnapshot.ball;
     const bool bboxValid =
-        brain->data->ball.boundingBox.xmax > brain->data->ball.boundingBox.xmin &&
-        brain->data->ball.boundingBox.ymax > brain->data->ball.boundingBox.ymin;
+        std::isfinite(ball.boundingBox.xmin) &&
+        std::isfinite(ball.boundingBox.xmax) &&
+        std::isfinite(ball.boundingBox.ymin) &&
+        std::isfinite(ball.boundingBox.ymax) &&
+        ball.boundingBox.xmax > ball.boundingBox.xmin &&
+        ball.boundingBox.ymax > ball.boundingBox.ymin;
+    const double ballAgeMsec = brain->msecsSince(ball.timePoint);
     const bool visualBallUsable =
-        brain->tree->getEntry<bool>("ball_visible") &&
-        brain->data->ballDetected &&
-        bboxValid;
+        visionSnapshot.ballDetected && bboxValid &&
+        ballAgeMsec >= 0.0 && ballAgeMsec <= ballMaxAgeMsec;
     if (!visualBallUsable || !brain->data->headStateReceived.load(std::memory_order_acquire))
     {
+        _goalAlignmentDeadband.reset();
+        const auto finiteOrZero = [](double value) {
+            return std::isfinite(value) ? value : 0.0;
+        };
+        const char *unavailableSource = !visionSnapshot.ballDetected || !bboxValid
+            ? "NO_BALL"
+            : (!visualBallUsable ? "STALE_BALL" : "NO_HEAD");
+        brain->log->log(
+            "ShootingAdjust/vector",
+            format("ballX: %.3f ballY: %.3f ballRange: %.3f maxBallRange: %.3f ballYaw: %.3f rangeError: 0.000 yError: 0.000 thetaError: 0.000 goalCount: 0 goalCenterX: 0.000 alignmentErrorPx: 0.000 goalAligned: 0 lateralSource: NO_GOAL vx: 0.000 vy: 0.000 theta: 0.000 source: %s ballAgeMsec: %.1f",
+                   finiteOrZero(ball.posToRobot.x),
+                   finiteOrZero(ball.posToRobot.y),
+                   finiteOrZero(ball.range),
+                   maxBallRange,
+                   finiteOrZero(ball.yawToRobot),
+                   unavailableSource,
+                   finiteOrZero(ballAgeMsec)));
         return NodeStatus::SUCCESS;
     }
 
     const double measuredHeadPitch = brain->data->headPitch.load(std::memory_order_relaxed);
     const double measuredHeadYaw = brain->data->headYaw.load(std::memory_order_relaxed);
     const double ballPixelX = mean(
-        brain->data->ball.boundingBox.xmax,
-        brain->data->ball.boundingBox.xmin);
+        ball.boundingBox.xmax,
+        ball.boundingBox.xmin);
     const double ballPixelY = mean(
-        brain->data->ball.boundingBox.ymax,
-        brain->data->ball.boundingBox.ymin);
+        ball.boundingBox.ymax,
+        ball.boundingBox.ymin);
     const double imageCenterX = brain->config->cameraImageWidth / 2.0;
     const double imageCenterY = brain->config->cameraImageHeight / 2.0;
     const double ballPixelDx = ballPixelX - imageCenterX;
@@ -953,22 +992,107 @@ NodeStatus ShootingAdjust::tick()
         _fixedHeadCommandGeneration = ballTrackingGeneration;
     }
 
-    const double ballX = brain->data->ball.posToRobot.x;
-    const double ballY = brain->data->ball.posToRobot.y;
-    const double ballYaw = brain->data->ball.yawToRobot;
-    const bool ballLocationKnown = brain->tree->getEntry<bool>("ball_location_known");
-    const bool bodyUsable = ballLocationKnown && brain->data->ball.range <= maxBallRange;
+    const double ballX = ball.posToRobot.x;
+    const double ballY = ball.posToRobot.y;
+    const double ballYaw = ball.yawToRobot;
+    const bool ballLocationKnown = ball.positionConfidence > 0;
+    const bool bodyUsable =
+        ballLocationKnown &&
+        std::isfinite(ballX) && std::isfinite(ballY) &&
+        std::isfinite(ballYaw) && std::isfinite(ball.range) &&
+        ball.range >= 0.0 && ball.range <= maxBallRange;
     const double rangeError = bodyUsable ? ballX - targetRange : 0.0;
     const double yError = bodyUsable ? ballY - targetYOffset : 0.0;
     const double thetaError = bodyUsable ? toPInPI(ballYaw - thetaOffset) : 0.0;
 
+    std::vector<shooting_adjust::GoalpostPixelObservation> goalObservations;
+    const auto &goalposts = visionSnapshot.goalposts;
+    goalObservations.reserve(goalposts.size());
+    for (const auto &goalpost : goalposts)
+    {
+        const bool goalBoxValid =
+            std::isfinite(goalpost.boundingBox.xmin) &&
+            std::isfinite(goalpost.boundingBox.xmax) &&
+            std::isfinite(goalpost.boundingBox.ymin) &&
+            std::isfinite(goalpost.boundingBox.ymax) &&
+            goalpost.boundingBox.xmax > goalpost.boundingBox.xmin &&
+            goalpost.boundingBox.ymax > goalpost.boundingBox.ymin;
+        const double goalPixelX = goalBoxValid
+            ? mean(goalpost.boundingBox.xmax, goalpost.boundingBox.xmin)
+            : 0.0;
+
+        bool timestampsUsable =
+            goalpost.timePoint.get_clock_type() == ball.timePoint.get_clock_type();
+        double goalBallSkewMsec = 0.0;
+        if (timestampsUsable)
+        {
+            goalBallSkewMsec = std::fabs(
+                static_cast<double>((goalpost.timePoint - ball.timePoint).nanoseconds()) /
+                1e6);
+        }
+        const double goalAgeMsec = brain->msecsSince(goalpost.timePoint);
+        timestampsUsable = timestampsUsable && goalAgeMsec >= 0.0 &&
+            goalAgeMsec <= goalMaxAgeMsec && goalBallSkewMsec <= goalBallMaxSkewMsec;
+
+        const bool geometryUsable =
+            std::isfinite(goalpost.posToRobot.x) &&
+            std::isfinite(goalpost.posToRobot.y) &&
+            std::isfinite(goalpost.range) &&
+            goalpost.posToRobot.x > ballX && goalpost.range > ball.range;
+
+        shooting_adjust::GoalpostSide side = shooting_adjust::GoalpostSide::Unknown;
+        if (goalpost.name == "OL")
+        {
+            side = shooting_adjust::GoalpostSide::Left;
+        }
+        else if (goalpost.name == "OR")
+        {
+            side = shooting_adjust::GoalpostSide::Right;
+        }
+
+        goalObservations.push_back({
+            side,
+            goalPixelX,
+            goalpost.confidence,
+            goalBoxValid && timestampsUsable && geometryUsable &&
+                side != shooting_adjust::GoalpostSide::Unknown,
+        });
+    }
+
+    const double imageWidth = static_cast<double>(brain->config->cameraImageWidth);
+    const auto goalSelection = shooting_adjust::selectGoalCenter(
+        goalObservations,
+        imageWidth,
+        goalMinPostSeparationPx);
+    const double goalCenterX = goalSelection.valid ? goalSelection.centerX : 0.0;
+    const double alignmentErrorPx = goalSelection.valid ? goalCenterX - ballPixelX : 0.0;
+    const char *lateralSource = goalSelection.valid ? "GOAL_CENTER" : "NO_GOAL";
+
+    _goalAlignmentDeadband.configure(
+        goalAlignmentTolerancePx,
+        goalAlignmentHysteresisPx);
+    if (goalSelection.valid)
+    {
+        const double goalVy = shooting_adjust::lateralVelocityFromPixelError(
+            alignmentErrorPx,
+            imageWidth,
+            goalAlignmentGain * yGain,
+            vyLimit,
+            _goalAlignmentDeadband);
+        if (bodyUsable)
+        {
+            vy = goalVy;
+        }
+    }
+    else
+    {
+        _goalAlignmentDeadband.reset();
+    }
+    const bool goalAligned = goalSelection.valid && _goalAlignmentDeadband.aligned();
+
     if (bodyUsable && std::fabs(rangeError) > rangeTolerance)
     {
         vx = cap(rangeError * rangeGain, vxLimit, -vxLimit);
-    }
-    if (bodyUsable && std::fabs(yError) > yTolerance)
-    {
-        vy = cap(yError * yGain, vyLimit, -vyLimit);
     }
 
     if (bodyUsable && std::fabs(thetaError) > stopAngle)
@@ -983,7 +1107,6 @@ NodeStatus ShootingAdjust::tick()
     if (bodyUsable && turnFirstThreshold > 0.0 && std::fabs(thetaError) > turnFirstThreshold)
     {
         vx = 0.0;
-        vy = 0.0;
     }
 
     theta = cap(theta, vthetaLimit, -vthetaLimit);
@@ -993,15 +1116,20 @@ NodeStatus ShootingAdjust::tick()
 
     brain->log->log(
         "ShootingAdjust/vector",
-        format("ballX: %.3f ballY: %.3f ballRange: %.3f maxBallRange: %.3f ballYaw: %.3f rangeError: %.3f yError: %.3f thetaError: %.3f vx: %.3f vy: %.3f theta: %.3f source: %s measuredHeadYaw: %.3f fixedHeadYaw: %.3f fixedHeadCommandSent: %d visualSearchDirection: %d",
+        format("ballX: %.3f ballY: %.3f ballRange: %.3f maxBallRange: %.3f ballYaw: %.3f rangeError: %.3f yError: %.3f thetaError: %.3f goalCount: %zu goalCenterX: %.3f alignmentErrorPx: %.3f goalAligned: %d lateralSource: %s vx: %.3f vy: %.3f theta: %.3f source: %s measuredHeadYaw: %.3f fixedHeadYaw: %.3f fixedHeadCommandSent: %d visualSearchDirection: %d goalPair: %s goalSeparationPx: %.3f ballAgeMsec: %.1f",
                ballX,
                ballY,
-               brain->data->ball.range,
+               ball.range,
                maxBallRange,
                ballYaw,
                rangeError,
                yError,
                thetaError,
+               goalSelection.eligibleCount,
+               goalCenterX,
+               alignmentErrorPx,
+               goalAligned,
+               lateralSource,
                vx,
                vy,
                theta,
@@ -1009,7 +1137,10 @@ NodeStatus ShootingAdjust::tick()
                measuredHeadYaw,
                commandedHeadYaw,
                fixedHeadCommandSent,
-               visualSearchDirection));
+               visualSearchDirection,
+               goalSelection.valid ? "LABELED" : "NONE",
+               goalSelection.separationPx,
+               ballAgeMsec));
     return NodeStatus::SUCCESS;
 }
 

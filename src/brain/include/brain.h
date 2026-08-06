@@ -39,6 +39,7 @@
 #include <sys/un.h>
 #include <unistd.h>
 #include <stdexcept>
+#include <optional>
 
 #include "brain_config.h"
 #include "brain_data.h"
@@ -253,7 +254,7 @@ private:
     vector<FieldLine> processFieldLines(vector<FieldLine> &fieldLines);
 
     vector<GameObject> getGameObjects(const vision_interface::msg::Detections &msg);
-    void detectProcessBalls(const vector<GameObject> &ballObjs);
+    std::optional<GameObject> detectProcessBalls(const vector<GameObject> &ballObjs);
 
     void detectProcessMarkings(const vector<GameObject> &markingObjs);
 

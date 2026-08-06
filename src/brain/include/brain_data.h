@@ -5,6 +5,7 @@
 #include <mutex>
 #include <tuple>
 #include <cstdint>
+#include <vector>
 
 #include <sensor_msgs/msg/image.hpp>
 #include "booster_interface/msg/odometer.hpp"
@@ -14,6 +15,13 @@
 #include "RoboCupGameControlData.h"
 
 using namespace std;
+
+struct ShootingVisionSnapshot
+{
+    bool ballDetected = false;
+    GameObject ball{};
+    vector<GameObject> goalposts{};
+};
 
 /**
  * `BrainData` stores runtime (dynamic) data used by `Brain` during decision-making.
@@ -92,6 +100,20 @@ public:
     inline void setGoalposts(const vector<GameObject>& newVec) {
         std::lock_guard<std::mutex> lock(_goalpostsMutex);
         _goalposts = newVec;
+    }
+
+    inline ShootingVisionSnapshot getShootingVisionSnapshot() const {
+        std::lock_guard<std::mutex> lock(_shootingVisionMutex);
+        return _shootingVision;
+    }
+    inline void setShootingVisionSnapshot(
+        bool detected,
+        const GameObject& ballObservation,
+        const vector<GameObject>& goalpostObservations) {
+        std::lock_guard<std::mutex> lock(_shootingVisionMutex);
+        _shootingVision.ballDetected = detected;
+        _shootingVision.ball = ballObservation;
+        _shootingVision.goalposts = goalpostObservations;
     }
 
 
@@ -194,6 +216,9 @@ private:
 
     vector<GameObject> _goalposts = {}; 
     mutable std::mutex _goalpostsMutex;
+
+    ShootingVisionSnapshot _shootingVision{};
+    mutable std::mutex _shootingVisionMutex;
 
     vector<GameObject> _markings = {};                             
     mutable std::mutex _markingsMutex;
