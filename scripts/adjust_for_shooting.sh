@@ -11,6 +11,13 @@ Y_TOLERANCE="0.05"
 STOP_ANGLE="0.10"
 RANGE_GAIN="1.0"
 Y_GAIN="1.0"
+GOAL_ALIGNMENT_GAIN="1.0"
+GOAL_ALIGNMENT_TOLERANCE_PX="35"
+GOAL_ALIGNMENT_HYSTERESIS_PX="15"
+GOAL_MIN_POST_SEPARATION_PX="40"
+GOAL_MAX_AGE_MSEC="300"
+GOAL_BALL_MAX_SKEW_MSEC="100"
+BALL_MAX_AGE_MSEC="300"
 BALL_YAW_GAIN="4.0"
 VX_LIMIT="0.40"
 VY_LIMIT="0.40"
@@ -40,6 +47,13 @@ Desired shooting pose:
 Robot motion:
   range_gain=1.0
   y_gain=1.0
+  goal_alignment_gain=1.0          # lateral image-error gain
+  goal_alignment_tolerance_px=35  # enter the aligned state inside this error
+  goal_alignment_hysteresis_px=15 # leave aligned after this extra error
+  goal_min_post_separation_px=40   # reject implausibly close goalposts
+  goal_max_age_msec=300            # reject stale goal observations
+  goal_ball_max_skew_msec=100      # maximum goal/ball timestamp difference
+  ball_max_age_msec=300            # stale ball disables vx, vy, and theta
   ball_yaw_gain=4.0
   vx_limit=0.40                   # m/s
   vy_limit=0.40                   # m/s
@@ -63,6 +77,18 @@ Examples:
 Positive target_y_offset is positive robot Y (normally robot-left). Positive
 theta_offset is counter-clockwise/left ball yaw. The node uses errors:
 ballX-target_range, ballY-target_y_offset, and ballYaw-theta_offset.
+
+Lateral adjustment uses the midpoint of one valid OL+OR opponent-goal pair and
+the ball's horizontal image position. If the goal midpoint is left of the ball,
+the robot strafes right; if it is right of the ball, the robot strafes left.
+The goal deadband and hysteresis prevent side-to-side chatter. Body theta still
+follows the ball yaw at the same time so the robot continues facing the ball.
+Missing, ambiguous, unlabeled, stale, poorly separated, or time-skewed
+goalposts disable lateral motion.
+A ball observation older than ball_max_age_msec disables all body motion,
+including rotation, until a fresh ball observation arrives.
+OL/OR identity comes from the brain's current field pose, so confirm that the
+robot's localization and opponent-goal direction are correct before this test.
 
 Body theta is the offset-adjusted ball yaw, capped by vtheta_limit and zero
 inside stop_angle. On each ball acquisition, the node commands fixed_head_yaw
@@ -106,6 +132,10 @@ is_nonnegative_number() {
   [[ "$1" =~ ^([0-9]+([.][0-9]+)?|[.][0-9]+)$ ]]
 }
 
+is_positive_integer() {
+  [[ "$1" =~ ^[1-9][0-9]*$ ]]
+}
+
 set_value() {
   local key="$1"
   local value
@@ -118,6 +148,12 @@ set_value() {
     target_y_offset|theta_offset|fixed_head_yaw)
       if ! is_signed_number "$value"; then
         echo "Invalid signed numeric value for ${key}: ${value}" >&2
+        exit 2
+      fi
+      ;;
+    goal_max_age_msec|goal_ball_max_skew_msec|ball_max_age_msec)
+      if ! is_positive_integer "$value"; then
+        echo "Invalid positive integer for ${key}: ${value}" >&2
         exit 2
       fi
       ;;
@@ -138,6 +174,13 @@ set_value() {
     stop_angle) STOP_ANGLE="$value" ;;
     range_gain) RANGE_GAIN="$value" ;;
     y_gain) Y_GAIN="$value" ;;
+    goal_alignment_gain) GOAL_ALIGNMENT_GAIN="$value" ;;
+    goal_alignment_tolerance_px) GOAL_ALIGNMENT_TOLERANCE_PX="$value" ;;
+    goal_alignment_hysteresis_px) GOAL_ALIGNMENT_HYSTERESIS_PX="$value" ;;
+    goal_min_post_separation_px) GOAL_MIN_POST_SEPARATION_PX="$value" ;;
+    goal_max_age_msec) GOAL_MAX_AGE_MSEC="$value" ;;
+    goal_ball_max_skew_msec) GOAL_BALL_MAX_SKEW_MSEC="$value" ;;
+    ball_max_age_msec) BALL_MAX_AGE_MSEC="$value" ;;
     ball_yaw_gain) BALL_YAW_GAIN="$value" ;;
     vx_limit) VX_LIMIT="$value" ;;
     vy_limit) VY_LIMIT="$value" ;;
@@ -157,7 +200,7 @@ parse_args() {
         usage
         exit 0
         ;;
-      target_range=*|target_y_offset=*|theta_offset=*|range_tolerance=*|y_tolerance=*|stop_angle=*|range_gain=*|y_gain=*|ball_yaw_gain=*|vx_limit=*|vy_limit=*|vtheta_limit=*|turn_first_threshold=*|fixed_head_yaw=*|max_ball_range=*|require_play=*)
+      target_range=*|target_y_offset=*|theta_offset=*|range_tolerance=*|y_tolerance=*|stop_angle=*|range_gain=*|y_gain=*|goal_alignment_gain=*|goal_alignment_tolerance_px=*|goal_alignment_hysteresis_px=*|goal_min_post_separation_px=*|goal_max_age_msec=*|goal_ball_max_skew_msec=*|ball_max_age_msec=*|ball_yaw_gain=*|vx_limit=*|vy_limit=*|vtheta_limit=*|turn_first_threshold=*|fixed_head_yaw=*|max_ball_range=*|require_play=*)
         set_value "${1%%=*}" "${1#*=}"
         shift
         ;;
@@ -217,6 +260,13 @@ echo "  y_tolerance=${Y_TOLERANCE}"
 echo "  stop_angle=${STOP_ANGLE}"
 echo "  range_gain=${RANGE_GAIN}"
 echo "  y_gain=${Y_GAIN}"
+echo "  goal_alignment_gain=${GOAL_ALIGNMENT_GAIN}"
+echo "  goal_alignment_tolerance_px=${GOAL_ALIGNMENT_TOLERANCE_PX}"
+echo "  goal_alignment_hysteresis_px=${GOAL_ALIGNMENT_HYSTERESIS_PX}"
+echo "  goal_min_post_separation_px=${GOAL_MIN_POST_SEPARATION_PX}"
+echo "  goal_max_age_msec=${GOAL_MAX_AGE_MSEC}"
+echo "  goal_ball_max_skew_msec=${GOAL_BALL_MAX_SKEW_MSEC}"
+echo "  ball_max_age_msec=${BALL_MAX_AGE_MSEC}"
 echo "  ball_yaw_gain=${BALL_YAW_GAIN}"
 echo "  vx_limit=${VX_LIMIT}"
 echo "  vy_limit=${VY_LIMIT}"
@@ -263,6 +313,13 @@ cat > "$TREE_PATH" <<XML
                             stop_angle="${STOP_ANGLE}"
                             range_gain="${RANGE_GAIN}"
                             y_gain="${Y_GAIN}"
+                            goal_alignment_gain="${GOAL_ALIGNMENT_GAIN}"
+                            goal_alignment_tolerance_px="${GOAL_ALIGNMENT_TOLERANCE_PX}"
+                            goal_alignment_hysteresis_px="${GOAL_ALIGNMENT_HYSTERESIS_PX}"
+                            goal_min_post_separation_px="${GOAL_MIN_POST_SEPARATION_PX}"
+                            goal_max_age_msec="${GOAL_MAX_AGE_MSEC}"
+                            goal_ball_max_skew_msec="${GOAL_BALL_MAX_SKEW_MSEC}"
+                            ball_max_age_msec="${BALL_MAX_AGE_MSEC}"
                             ball_yaw_gain="${BALL_YAW_GAIN}"
                             vx_limit="${VX_LIMIT}"
                             vy_limit="${VY_LIMIT}"
@@ -273,7 +330,10 @@ cat > "$TREE_PATH" <<XML
                             vx="{shoot_vx}"
                             vy="{shoot_vy}"
                             theta="{shoot_theta}" />
-            <SetVelocity x="{shoot_vx}" y="{shoot_vy}" theta="{shoot_theta}" />
+            <SetVelocity x="{shoot_vx}"
+                         y="{shoot_vy}"
+                         theta="{shoot_theta}"
+                         apply_min_y="true" />
           </Sequence>
           <SetVelocity x="0" y="0" theta="0" />
         </IfThenElse>

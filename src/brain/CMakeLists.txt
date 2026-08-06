@@ -84,6 +84,12 @@ install(DIRECTORY behavior_trees
   DESTINATION share/${PROJECT_NAME})
 
 if(BUILD_TESTING)
+  add_executable(shooting_adjust_utils_test test/shooting_adjust_utils_test.cpp)
+  target_include_directories(shooting_adjust_utils_test PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/include)
+  target_compile_features(shooting_adjust_utils_test PRIVATE cxx_std_17)
+  add_test(NAME shooting_adjust_utils_test COMMAND shooting_adjust_utils_test)
+
   find_package(ament_lint_auto REQUIRED)
   # the following line skips the linter which checks for copyrights
   # comment the line when a copyright and license is added to all source files
