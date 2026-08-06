@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <cstdint>
 
+#include "shooting_adjust_utils.h"
 #include "types.h"
 
 class Brain;
@@ -745,20 +746,27 @@ public:
     {
         return {
             InputPort<double>("target_range", 0.40, "Desired forward ball position in the robot frame (m)"),
-            InputPort<double>("target_y_offset", 0.0, "Desired lateral ball position in the robot frame (m)"),
+            InputPort<double>("target_y_offset", 0.0, "Desired lateral ball position reported for shooting-readiness checks (m)"),
             InputPort<double>("theta_offset", 0.0, "Desired robot-relative ball yaw (rad)"),
             InputPort<double>("range_tolerance", 0.06, "Forward position deadband (m)"),
-            InputPort<double>("y_tolerance", 0.05, "Lateral position deadband (m)"),
+            InputPort<double>("y_tolerance", 0.05, "Lateral ball-position tolerance reported for shooting readiness (m)"),
             InputPort<double>("stop_angle", 0.10, "Yaw deadband around theta_offset (rad)"),
             InputPort<double>("range_gain", 1.0, "Forward position gain"),
-            InputPort<double>("y_gain", 1.0, "Lateral position gain"),
+            InputPort<double>("y_gain", 1.0, "Base lateral gain multiplied by goal_alignment_gain"),
             InputPort<double>("ball_yaw_gain", 4.0, "Yaw gain outside the deadband"),
             InputPort<double>("vx_limit", 0.4, "Forward speed limit (m/s)"),
             InputPort<double>("vy_limit", 0.4, "Lateral speed limit (m/s)"),
             InputPort<double>("vtheta_limit", 0.8, "Body yaw speed limit (rad/s)"),
-            InputPort<double>("turn_first_threshold", 0.50, "Stop translation while yaw error exceeds this angle (rad); zero disables it"),
+            InputPort<double>("turn_first_threshold", 0.50, "Stop forward motion while yaw error exceeds this angle; lateral goal alignment continues (rad, zero disables)"),
             InputPort<double>("fixed_head_yaw", 0.0, "Head yaw commanded once whenever the ball is acquired (rad)"),
             InputPort<double>("max_ball_range", 1.20, "Maximum depth range that enables shooting-adjustment body motion (m)"),
+            InputPort<double>("ball_max_age_msec", 300.0, "Maximum age of the ball observation used for any body motion"),
+            InputPort<double>("goal_alignment_gain", 1.0, "Lateral speed gain for normalized goal-center/ball pixel error"),
+            InputPort<double>("goal_alignment_tolerance_px", 35.0, "Stop lateral alignment inside this horizontal pixel error"),
+            InputPort<double>("goal_alignment_hysteresis_px", 15.0, "Additional pixel error required before restarting lateral alignment"),
+            InputPort<double>("goal_min_post_separation_px", 40.0, "Minimum horizontal separation between the two goalposts used as a goal-center target"),
+            InputPort<double>("goal_max_age_msec", 300.0, "Maximum age of a goalpost observation used for lateral alignment"),
+            InputPort<double>("goal_ball_max_skew_msec", 100.0, "Maximum timestamp skew between ball and goalpost observations"),
             OutputPort<double>("vx"),
             OutputPort<double>("vy"),
             OutputPort<double>("theta")
@@ -770,6 +778,7 @@ public:
 private:
     Brain *brain;
     std::uint64_t _fixedHeadCommandGeneration = 0;
+    shooting_adjust::AlignmentDeadband _goalAlignmentDeadband;
 };
 
 class CalibrateOdom : public SyncActionNode

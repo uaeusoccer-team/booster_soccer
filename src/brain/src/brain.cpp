@@ -1265,13 +1265,21 @@ void Brain::detectionsCallback(const vision_interface::msg::Detections &msg)
     }
 
     // Process the grouped objects separately
-    detectProcessBalls(balls);
+    const auto shootingBall = detectProcessBalls(balls);
     detectProcessGoalposts(goalposts);
     detectProcessMarkings(markings);
     detectProcessRobots(robots);
 
     // Handle and record vision information
     detectProcessVisionBox(msg);
+
+    // Shooting adjustment consumes one coherent ball/goalpost snapshot from
+    // this detection callback instead of copying the shared ball memory that
+    // the independent brain-tick thread can update concurrently.
+    data->setShootingVisionSnapshot(
+        shootingBall.has_value(),
+        shootingBall.value_or(GameObject{}),
+        data->getGoalposts());
 
 }
 
@@ -1724,7 +1732,7 @@ vector<GameObject> Brain::getGameObjects(const vision_interface::msg::Detections
     return res;
 }
 
-void Brain::detectProcessBalls(const vector<GameObject> &ballObjs)
+std::optional<GameObject> Brain::detectProcessBalls(const vector<GameObject> &ballObjs)
 {
     static rclcpp::Time lastSeenRealBallTime;
     const bool wasDepthAcquired =
@@ -1760,14 +1768,17 @@ void Brain::detectProcessBalls(const vector<GameObject> &ballObjs)
     }
 
     auto now = this->get_clock()->now();
+    std::optional<GameObject> shootingBall;
 
     if (indexRealBall >= 0)
     { // Ball detected
         data->ballDetected = true;
         tree->setEntry<bool>("ball_visible", true);
 
-        data->ball = ballObjs[indexRealBall];
-        data->ball.confidence = bestConfidence;
+        GameObject selectedBall = ballObjs[indexRealBall];
+        selectedBall.confidence = bestConfidence;
+        shootingBall = selectedBall;
+        data->ball = selectedBall;
         if (!wasDepthAcquired && bestHasDepth)
         {
             data->ballDepthAcquired.store(true, std::memory_order_release);
@@ -1816,6 +1827,7 @@ void Brain::detectProcessBalls(const vector<GameObject> &ballObjs)
 
     // Calculate the vector from the robot to the ball in the field coordinate system
     data->robotBallAngleToField = atan2(data->ball.posToField.y - data->robotPoseToField.y, data->ball.posToField.x - data->robotPoseToField.x);
+    return shootingBall;
 }
 
 void Brain::detectProcessMarkings(const vector<GameObject> &markingObjs)

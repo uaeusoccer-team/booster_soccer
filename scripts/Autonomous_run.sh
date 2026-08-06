@@ -37,6 +37,13 @@ ADJUST_Y_TOLERANCE="0.05"
 ADJUST_STOP_ANGLE="0.10"
 ADJUST_RANGE_GAIN="1.0"
 ADJUST_Y_GAIN="1.0"
+ADJUST_GOAL_ALIGNMENT_GAIN="1.0"
+ADJUST_GOAL_ALIGNMENT_TOLERANCE_PX="35"
+ADJUST_GOAL_ALIGNMENT_HYSTERESIS_PX="15"
+ADJUST_GOAL_MIN_POST_SEPARATION_PX="40"
+ADJUST_GOAL_MAX_AGE_MSEC="300"
+ADJUST_GOAL_BALL_MAX_SKEW_MSEC="100"
+ADJUST_BALL_MAX_AGE_MSEC="300"
 ADJUST_BALL_YAW_GAIN="4.0"
 ADJUST_VX_LIMIT="0.40"
 ADJUST_VY_LIMIT="0.40"
@@ -65,6 +72,11 @@ LAST_VX="0.0"
 LAST_VY="0.0"
 LAST_THETA="0.0"
 LAST_ADJUST_SOURCE="none"
+LAST_GOAL_COUNT="unknown"
+LAST_GOAL_CENTER_X="unknown"
+LAST_ALIGNMENT_ERROR_PX="unknown"
+LAST_GOAL_ALIGNED="unknown"
+LAST_LATERAL_SOURCE="none"
 
 READY_COUNT=0
 READY_START_MSEC=0
@@ -128,6 +140,13 @@ Shooting adjustment:
   adjust_stop_angle=0.10
   adjust_range_gain=1.0
   adjust_y_gain=1.0
+  adjust_goal_alignment_gain=1.0
+  adjust_goal_alignment_tolerance_px=35
+  adjust_goal_alignment_hysteresis_px=15
+  adjust_goal_min_post_separation_px=40
+  adjust_goal_max_age_msec=300
+  adjust_goal_ball_max_skew_msec=100
+  adjust_ball_max_age_msec=300
   adjust_ball_yaw_gain=4.0
   adjust_vx_limit=0.40
   adjust_vy_limit=0.40
@@ -166,6 +185,15 @@ Automatic transitions:
   chase -> adjust when ball range <= stop_dist
   adjust -> chase when ball range > adjust_max_ball_range
 
+During adjustment, vy aligns the midpoint of one fresh OL+OR opponent-goal
+pair with the ball's horizontal image position while theta continues to face
+the ball. A goal midpoint left of the ball commands a right strafe; a midpoint
+right of the ball commands a left strafe. Missing, ambiguous, unlabeled, or
+unsynchronized goalposts stop vy.
+A stale ball observation disables all adjustment motion: vx, vy, and theta.
+OL/OR identity comes from the brain's current field pose; verify localization
+and the opponent-goal direction before enabling body motion.
+
 Example:
   ./scripts/Autonomous_run.sh \
     switch=auto \
@@ -196,6 +224,13 @@ Example:
     adjust_stop_angle=0.10 \
     adjust_range_gain=1.0 \
     adjust_y_gain=1.0 \
+    adjust_goal_alignment_gain=1.0 \
+    adjust_goal_alignment_tolerance_px=35 \
+    adjust_goal_alignment_hysteresis_px=15 \
+    adjust_goal_min_post_separation_px=40 \
+    adjust_goal_max_age_msec=300 \
+    adjust_goal_ball_max_skew_msec=100 \
+    adjust_ball_max_age_msec=300 \
     adjust_ball_yaw_gain=4.0 \
     adjust_vx_limit=0.40 \
     adjust_vy_limit=0.40 \
@@ -283,7 +318,7 @@ set_value() {
       ROLE="$value"
       return
       ;;
-    team_id|player_id|cmd_interval_msec|head_deadband_x_px|head_deadband_y_px|ready_samples|ready_min_msec|ready_data_max_age_msec)
+    team_id|player_id|cmd_interval_msec|head_deadband_x_px|head_deadband_y_px|adjust_goal_max_age_msec|adjust_goal_ball_max_skew_msec|adjust_ball_max_age_msec|ready_samples|ready_min_msec|ready_data_max_age_msec)
       is_positive_integer "$value" ||
         { echo "Invalid positive integer for ${key}: ${value}" >&2; exit 2; }
       ;;
@@ -332,6 +367,13 @@ set_value() {
     adjust_stop_angle) ADJUST_STOP_ANGLE="$value" ;;
     adjust_range_gain) ADJUST_RANGE_GAIN="$value" ;;
     adjust_y_gain) ADJUST_Y_GAIN="$value" ;;
+    adjust_goal_alignment_gain) ADJUST_GOAL_ALIGNMENT_GAIN="$value" ;;
+    adjust_goal_alignment_tolerance_px) ADJUST_GOAL_ALIGNMENT_TOLERANCE_PX="$value" ;;
+    adjust_goal_alignment_hysteresis_px) ADJUST_GOAL_ALIGNMENT_HYSTERESIS_PX="$value" ;;
+    adjust_goal_min_post_separation_px) ADJUST_GOAL_MIN_POST_SEPARATION_PX="$value" ;;
+    adjust_goal_max_age_msec) ADJUST_GOAL_MAX_AGE_MSEC="$value" ;;
+    adjust_goal_ball_max_skew_msec) ADJUST_GOAL_BALL_MAX_SKEW_MSEC="$value" ;;
+    adjust_ball_max_age_msec) ADJUST_BALL_MAX_AGE_MSEC="$value" ;;
     adjust_ball_yaw_gain) ADJUST_BALL_YAW_GAIN="$value" ;;
     adjust_vx_limit) ADJUST_VX_LIMIT="$value" ;;
     adjust_vy_limit) ADJUST_VY_LIMIT="$value" ;;
@@ -433,6 +475,13 @@ Autonomous run settings:
   adjust_stop_angle=${ADJUST_STOP_ANGLE}
   adjust_range_gain=${ADJUST_RANGE_GAIN}
   adjust_y_gain=${ADJUST_Y_GAIN}
+  adjust_goal_alignment_gain=${ADJUST_GOAL_ALIGNMENT_GAIN}
+  adjust_goal_alignment_tolerance_px=${ADJUST_GOAL_ALIGNMENT_TOLERANCE_PX}
+  adjust_goal_alignment_hysteresis_px=${ADJUST_GOAL_ALIGNMENT_HYSTERESIS_PX}
+  adjust_goal_min_post_separation_px=${ADJUST_GOAL_MIN_POST_SEPARATION_PX}
+  adjust_goal_max_age_msec=${ADJUST_GOAL_MAX_AGE_MSEC}
+  adjust_goal_ball_max_skew_msec=${ADJUST_GOAL_BALL_MAX_SKEW_MSEC}
+  adjust_ball_max_age_msec=${ADJUST_BALL_MAX_AGE_MSEC}
   adjust_ball_yaw_gain=${ADJUST_BALL_YAW_GAIN}
   adjust_vx_limit=${ADJUST_VX_LIMIT}
   adjust_vy_limit=${ADJUST_VY_LIMIT}
@@ -522,10 +571,15 @@ evaluate_adjust_readiness() {
   local range_error="$2"
   local y_error="$3"
   local theta_error="$4"
-  local vx="$5"
-  local vy="$6"
-  local theta="$7"
-  local source="$8"
+  local goal_count="$5"
+  local goal_center_x="$6"
+  local alignment_error_px="$7"
+  local goal_aligned="$8"
+  local lateral_source="$9"
+  local vx="${10}"
+  local vy="${11}"
+  local theta="${12}"
+  local source="${13}"
   local now
   local elapsed
   local failure_reason
@@ -539,6 +593,11 @@ evaluate_adjust_readiness() {
     -v y_tolerance="$ADJUST_Y_TOLERANCE" \
     -v theta_error="$theta_error" \
     -v theta_tolerance="$ADJUST_STOP_ANGLE" \
+    -v goal_count="$goal_count" \
+    -v goal_center_x="$goal_center_x" \
+    -v alignment_error_px="$alignment_error_px" \
+    -v goal_aligned="$goal_aligned" \
+    -v lateral_source="$lateral_source" \
     -v vx="$vx" \
     -v vy="$vy" \
     -v theta="$theta" \
@@ -551,10 +610,22 @@ evaluate_adjust_readiness() {
         reasons = reasons reason
       }
       BEGIN {
-        if (source == "NO_DEPTH") {
+        if (source == "NO_BALL") {
+          add("source=NO_BALL (no current visual ball observation)")
+        } else if (source == "NO_HEAD") {
+          add("source=NO_HEAD (head-state feedback is unavailable)")
+        } else if (source == "NO_DEPTH") {
           add("source=NO_DEPTH (no usable body-frame depth)")
+        } else if (source == "STALE_BALL") {
+          add("source=STALE_BALL (ball observation is too old; all adjustment motion is disabled)")
         } else if (source == "OUT_OF_RANGE") {
           add(sprintf("source=OUT_OF_RANGE: ball_range=%.3f > adjust_max_ball_range=%.3f", ball_range, max_ball_range))
+        }
+        if (lateral_source == "NO_GOAL") {
+          add(sprintf("lateralSource=NO_GOAL: goalCount=%d; no fresh synchronized two-post goal", goal_count))
+        }
+        if (goal_aligned != 1) {
+          add(sprintf("goalAligned=%d: goalCenterX=%.1f alignmentErrorPx=%.1f", goal_aligned, goal_center_x, alignment_error_px))
         }
         if (abs(range_error) > range_tolerance) {
           add(sprintf("|range_error|=%.3f > adjust_range_tolerance=%.3f", abs(range_error), range_tolerance))
@@ -680,13 +751,27 @@ process_log_line() {
       RUNTIME_AUTO_PHASE="adjust"
     fi
 
-    pattern="ballRange: (${number_re}).*rangeError: (${number_re}).*yError: (${number_re}).*thetaError: (${number_re}).*vx: (${number_re}).*vy: (${number_re}).*theta: (${number_re}).*source: ([A-Z_]+)"
+    pattern="ballRange: (${number_re}).*rangeError: (${number_re}).*yError: (${number_re}).*thetaError: (${number_re}).*goalCount: (${number_re}).*goalCenterX: (${number_re}).*alignmentErrorPx: (${number_re}).*goalAligned: (0|1).*lateralSource: (GOAL_CENTER|NO_GOAL).*vx: (${number_re}).*vy: (${number_re}).*theta: (${number_re}).*source: ([A-Z_]+)"
     if [[ "$line" =~ $pattern ]]; then
       LAST_BALL_RANGE="${BASH_REMATCH[1]}"
-      LAST_VX="${BASH_REMATCH[5]}"
-      LAST_VY="${BASH_REMATCH[6]}"
-      LAST_THETA="${BASH_REMATCH[7]}"
-      LAST_ADJUST_SOURCE="${BASH_REMATCH[8]}"
+      LAST_GOAL_COUNT="${BASH_REMATCH[5]}"
+      LAST_GOAL_CENTER_X="${BASH_REMATCH[6]}"
+      LAST_ALIGNMENT_ERROR_PX="${BASH_REMATCH[7]}"
+      LAST_GOAL_ALIGNED="${BASH_REMATCH[8]}"
+      LAST_LATERAL_SOURCE="${BASH_REMATCH[9]}"
+      LAST_VX="${BASH_REMATCH[10]}"
+      LAST_VY="${BASH_REMATCH[11]}"
+      LAST_THETA="${BASH_REMATCH[12]}"
+      LAST_ADJUST_SOURCE="${BASH_REMATCH[13]}"
+      case "$LAST_ADJUST_SOURCE" in
+        NO_BALL|STALE_BALL)
+          BALL_VISIBLE="false"
+          BALL_DEPTH_USABLE="false"
+          ;;
+        NO_DEPTH)
+          BALL_DEPTH_USABLE="false"
+          ;;
+      esac
       evaluate_adjust_readiness \
         "${BASH_REMATCH[1]}" \
         "${BASH_REMATCH[2]}" \
@@ -695,7 +780,12 @@ process_log_line() {
         "${BASH_REMATCH[5]}" \
         "${BASH_REMATCH[6]}" \
         "${BASH_REMATCH[7]}" \
-        "${BASH_REMATCH[8]}"
+        "${BASH_REMATCH[8]}" \
+        "${BASH_REMATCH[9]}" \
+        "${BASH_REMATCH[10]}" \
+        "${BASH_REMATCH[11]}" \
+        "${BASH_REMATCH[12]}" \
+        "${BASH_REMATCH[13]}"
     else
       reset_readiness "ShootingAdjust/vector diagnostic line could not be parsed"
     fi
@@ -774,6 +864,11 @@ Autonomous status:
   depth usable: ${BALL_DEPTH_USABLE}
   last ball range: ${LAST_BALL_RANGE}
   last adjustment source: ${LAST_ADJUST_SOURCE}
+  last goal count: ${LAST_GOAL_COUNT}
+  last goal center x: ${LAST_GOAL_CENTER_X}
+  last alignment error px: ${LAST_ALIGNMENT_ERROR_PX}
+  last goal aligned: ${LAST_GOAL_ALIGNED}
+  last lateral source: ${LAST_LATERAL_SOURCE}
   last velocity: vx=${LAST_VX} vy=${LAST_VY} theta=${LAST_THETA}
   shoot ready: ${SHOOT_READY}
   readiness progress: samples=${READY_COUNT}/${READY_SAMPLES}, elapsed=${readiness_elapsed}/${READY_MIN_MSEC}ms
@@ -1007,6 +1102,13 @@ write_tree() {
                       stop_angle="${ADJUST_STOP_ANGLE}"
                       range_gain="${ADJUST_RANGE_GAIN}"
                       y_gain="${ADJUST_Y_GAIN}"
+                      goal_alignment_gain="${ADJUST_GOAL_ALIGNMENT_GAIN}"
+                      goal_alignment_tolerance_px="${ADJUST_GOAL_ALIGNMENT_TOLERANCE_PX}"
+                      goal_alignment_hysteresis_px="${ADJUST_GOAL_ALIGNMENT_HYSTERESIS_PX}"
+                      goal_min_post_separation_px="${ADJUST_GOAL_MIN_POST_SEPARATION_PX}"
+                      goal_max_age_msec="${ADJUST_GOAL_MAX_AGE_MSEC}"
+                      goal_ball_max_skew_msec="${ADJUST_GOAL_BALL_MAX_SKEW_MSEC}"
+                      ball_max_age_msec="${ADJUST_BALL_MAX_AGE_MSEC}"
                       ball_yaw_gain="${ADJUST_BALL_YAW_GAIN}"
                       vx_limit="${ADJUST_VX_LIMIT}"
                       vy_limit="${ADJUST_VY_LIMIT}"
@@ -1079,6 +1181,7 @@ write_tree() {
         <SetVelocity x="{autonomy_command_vx}"
                      y="{autonomy_command_vy}"
                      theta="{autonomy_command_theta}"
+                     apply_min_y="true"
                      apply_min_theta="{autonomy_apply_min_theta}" />
       </ReactiveSequence>
     </Sequence>
