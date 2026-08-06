@@ -331,9 +331,17 @@ cat > "$TREE_PATH" <<XML
             <Script code="chase_vx=0.0; chase_vy=0.0" />
           </Sequence>
         </IfThenElse>
-        <SetVelocity x="{chase_vx}"
-                     y="{chase_vy}"
-                     theta="{tracking_theta}" />
+        <ObstacleVelocityFilter desired_x="{chase_vx}"
+                                desired_y="{chase_vy}"
+                                desired_theta="{tracking_theta}"
+                                allow_detour="true"
+                                x="{safe_chase_vx}"
+                                y="{safe_chase_vy}"
+                                theta="{safe_chase_theta}"
+                                limited="{chase_obstacle_limited}" />
+        <SetVelocity x="{safe_chase_vx}"
+                     y="{safe_chase_vy}"
+                     theta="{safe_chase_theta}" />
       </ReactiveSequence>
     </Sequence>
   </BehaviorTree>
@@ -343,6 +351,7 @@ XML
 echo "Wrote ${TREE_PATH}"
 echo "Starting vision..."
 ros2 launch vision launch.py > vision.log 2>&1 &
+ros2 launch obstacle_perception launch.py > obstacle_perception.log 2>&1 &
 sleep 8
 
 wait_for_ball

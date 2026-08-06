@@ -24,6 +24,7 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/SegmentationResult.msg"
   "msg/ImageHeadPosition.msg"
   "msg/Ball.msg"
+  "msg/ObstacleState.msg"
   DEPENDENCIES std_msgs builtin_interfaces geometry_msgs sensor_msgs
 )
 

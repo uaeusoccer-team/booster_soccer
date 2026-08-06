@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Run the passive depth obstacle monitor on the robot.
+# Run the packaged depth obstacle monitor on the robot.
 #
 # This script only reads ROS topics and prints obstacle status. It does not
 # start walking, kicking, chasing, or any behavior tree.
@@ -20,4 +20,6 @@ set -u
 export FASTRTPS_DEFAULT_PROFILES_FILE="${FASTRTPS_DEFAULT_PROFILES_FILE:-/opt/booster/BoosterRos2/fastdds_profile.xml}"
 export FASTDDS_DEFAULT_PROFILES_FILE="${FASTDDS_DEFAULT_PROFILES_FILE:-/opt/booster/BoosterRos2/fastdds_profile.xml}"
 
-python3 scripts/depth_obstacle_monitor.py "$@"
+ros2 run obstacle_perception depth_obstacle_node --ros-args \
+  -p publish_point_cloud:=true \
+  "$@"

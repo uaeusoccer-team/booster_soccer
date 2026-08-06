@@ -327,12 +327,21 @@ cat > "$TREE_PATH" <<XML
                             turn_first_threshold="${TURN_FIRST_THRESHOLD}"
                             fixed_head_yaw="${FIXED_HEAD_YAW}"
                             max_ball_range="${MAX_BALL_RANGE}"
-                            vx="{shoot_vx}"
-                            vy="{shoot_vy}"
-                            theta="{shoot_theta}" />
-            <SetVelocity x="{shoot_vx}"
-                         y="{shoot_vy}"
-                         theta="{shoot_theta}"
+                             vx="{shoot_vx}"
+                             vy="{shoot_vy}"
+                             theta="{shoot_theta}" />
+            <ObstacleVelocityFilter desired_x="{shoot_vx}"
+                                    desired_y="{shoot_vy}"
+                                    desired_theta="{shoot_theta}"
+                                    allow_detour="false"
+                                    safe_distance="0.80"
+                                    x="{safe_shoot_vx}"
+                                    y="{safe_shoot_vy}"
+                                    theta="{safe_shoot_theta}"
+                                    limited="{shoot_obstacle_limited}" />
+            <SetVelocity x="{safe_shoot_vx}"
+                         y="{safe_shoot_vy}"
+                         theta="{safe_shoot_theta}"
                          apply_min_y="true" />
           </Sequence>
           <SetVelocity x="0" y="0" theta="0" />
@@ -344,8 +353,9 @@ cat > "$TREE_PATH" <<XML
 XML
 
 echo "Wrote ${TREE_PATH}"
-echo "Starting vision, shooting-adjustment brain, and GameController receiver..."
+echo "Starting vision, obstacle perception, shooting-adjustment brain, and GameController receiver..."
 ros2 launch vision launch.py > vision.log 2>&1 &
+ros2 launch obstacle_perception launch.py > obstacle_perception.log 2>&1 &
 ros2 launch brain launch.py \
   tree:=adjust_for_shooting.xml \
   role:=striker \

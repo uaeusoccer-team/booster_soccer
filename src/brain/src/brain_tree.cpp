@@ -31,6 +31,7 @@ void BrainTree::init()
     REGISTER_BUILDER(RobotFindBall)
     REGISTER_BUILDER(Chase)
     REGISTER_BUILDER(SimpleChase)
+    REGISTER_BUILDER(ObstacleVelocityFilter)
     REGISTER_BUILDER(ShootingAdjust)
     REGISTER_BUILDER(Adjust)
     REGISTER_BUILDER(Kick)
@@ -86,6 +87,9 @@ void BrainTree::initEntry()
     setEntry<double>("tracking_theta", 0.0);
     setEntry<double>("chase_vx", 0.0);
     setEntry<double>("chase_vy", 0.0);
+    setEntry<bool>("obstacle_state_valid", false);
+    setEntry<bool>("obstacle_blocked", true);
+    setEntry<double>("obstacle_nearest_distance", 0.0);
 
     setEntry<bool>("gamecontroller_isKickOff", true);
     setEntry<string>("gc_game_state", "");
@@ -833,6 +837,99 @@ NodeStatus SimpleChase::tick()
                brain->data->ball.posToRobot.y,
                vx,
                vy));
+    return NodeStatus::SUCCESS;
+}
+
+
+NodeStatus ObstacleVelocityFilter::tick()
+{
+    double desiredX, desiredY, desiredTheta, safeDistance, hardStopDistance;
+    bool allowDetour, stopOnStale;
+    getInput("desired_x", desiredX);
+    getInput("desired_y", desiredY);
+    getInput("desired_theta", desiredTheta);
+    getInput("allow_detour", allowDetour);
+    getInput("stop_on_stale", stopOnStale);
+    getInput("safe_distance", safeDistance);
+    getInput("hard_stop_distance", hardStopDistance);
+
+    if (safeDistance < 0.0) {
+        safeDistance = brain->config->get_obstacle_filter_safe_distance();
+    }
+    if (hardStopDistance < 0.0) {
+        hardStopDistance = brain->config->get_obstacle_hard_stop_distance();
+    }
+    safeDistance = std::max(safeDistance, hardStopDistance + 0.05);
+
+    double filteredX = desiredX;
+    double filteredY = desiredY;
+    const double filteredTheta = desiredTheta;
+    bool limited = false;
+
+    const double speed = norm(desiredX, desiredY);
+    if (brain->config->get_enable_obstacle_avoidance() && speed > 1.0e-5) {
+        const double targetDirection = std::atan2(desiredY, desiredX);
+        const bool fresh = brain->hasFreshObstacleState();
+        const bool observed = fresh && brain->isObstacleDirectionObserved(targetDirection);
+
+        if ((!fresh || !observed) && stopOnStale) {
+            filteredX = 0.0;
+            filteredY = 0.0;
+            limited = true;
+            brain->log->log(
+                "ObstacleVelocityFilter",
+                fresh ? "STOP_UNOBSERVED_DIRECTION" : "STOP_STALE_STATE");
+        } else if (fresh && observed) {
+            const double clearance = brain->distToObstacle(targetDirection);
+            if (clearance <= hardStopDistance) {
+                filteredX = 0.0;
+                filteredY = 0.0;
+                limited = true;
+                brain->log->log(
+                    "ObstacleVelocityFilter",
+                    format("STOP clearance: %.3f direction: %.3f", clearance, targetDirection));
+            } else if (clearance < safeDistance) {
+                const double scale = cap(
+                    (clearance - hardStopDistance) / (safeDistance - hardStopDistance),
+                    1.0,
+                    0.0);
+                double filteredDirection = targetDirection;
+
+                if (allowDetour) {
+                    const auto detourDirection = brain->findObstacleFreeDirection(
+                        targetDirection,
+                        safeDistance,
+                        brain->config->get_obstacle_max_detour_angle());
+                    if (detourDirection.has_value()) {
+                        filteredDirection = detourDirection.value();
+                    } else {
+                        filteredX = 0.0;
+                        filteredY = 0.0;
+                    }
+                }
+
+                if (std::fabs(filteredX) > 1.0e-5 || std::fabs(filteredY) > 1.0e-5) {
+                    const double filteredSpeed = speed * std::max(0.15, scale);
+                    filteredX = filteredSpeed * std::cos(filteredDirection);
+                    filteredY = filteredSpeed * std::sin(filteredDirection);
+                }
+                limited = true;
+                brain->log->log(
+                    "ObstacleVelocityFilter",
+                    format(
+                        "LIMIT clearance: %.3f target: %.3f output: %.3f scale: %.2f",
+                        clearance,
+                        targetDirection,
+                        filteredDirection,
+                        scale));
+            }
+        }
+    }
+
+    setOutput("x", filteredX);
+    setOutput("y", filteredY);
+    setOutput("theta", filteredTheta);
+    setOutput("limited", limited);
     return NodeStatus::SUCCESS;
 }
 

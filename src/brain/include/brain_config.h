@@ -96,6 +96,13 @@ public:
     double get_collision_threshold();
     double get_safe_distance();
     double get_avoid_secs();
+    bool get_use_external_obstacle_state();
+    string get_obstacle_state_topic();
+    double get_obstacle_state_timeout_msecs();
+    bool get_obstacle_stop_on_stale();
+    double get_obstacle_hard_stop_distance();
+    double get_obstacle_filter_safe_distance();
+    double get_obstacle_max_detour_angle();
 
 
     int get_retry_max_count();

@@ -288,9 +288,17 @@ cat > "$TREE_PATH" <<XML
                      y_tolerance="${Y_TOLERANCE}"
                      vx="{chase_vx}"
                      vy="{chase_vy}" />
-        <SetVelocity x="{chase_vx}"
-                     y="{chase_vy}"
-                     theta="{tracking_theta}"
+        <ObstacleVelocityFilter desired_x="{chase_vx}"
+                                desired_y="{chase_vy}"
+                                desired_theta="{tracking_theta}"
+                                allow_detour="true"
+                                x="{safe_chase_vx}"
+                                y="{safe_chase_vy}"
+                                theta="{safe_chase_theta}"
+                                limited="{chase_obstacle_limited}" />
+        <SetVelocity x="{safe_chase_vx}"
+                     y="{safe_chase_vy}"
+                     theta="{safe_chase_theta}"
                      apply_min_theta="{chase_apply_min_theta}" />
       </ReactiveSequence>
     </Sequence>
@@ -299,8 +307,9 @@ cat > "$TREE_PATH" <<XML
 XML
 
 echo "Wrote ${TREE_PATH}"
-echo "Starting vision, vector chase, and GameController receiver..."
+echo "Starting vision, obstacle perception, vector chase, and GameController receiver..."
 ros2 launch vision launch.py > vision.log 2>&1 &
+ros2 launch obstacle_perception launch.py > obstacle_perception.log 2>&1 &
 ros2 launch brain launch.py \
   tree:=chase_ball_vector.xml \
   role:=striker \

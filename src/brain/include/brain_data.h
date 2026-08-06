@@ -23,6 +23,18 @@ struct ShootingVisionSnapshot
     vector<GameObject> goalposts{};
 };
 
+struct ObstacleStateSnapshot
+{
+    bool received = false;
+    bool valid = false;
+    bool blocked = true;
+    double nearestDistance = 0.0;
+    rclcpp::Time receivedAt{};
+    vector<double> directions{};
+    vector<double> clearances{};
+    vector<bool> observed{};
+};
+
 /**
  * `BrainData` stores runtime (dynamic) data used by `Brain` during decision-making.
  * This is separate from `BrainConfig` which holds static configuration.
@@ -145,6 +157,16 @@ public:
         _obstacles = newVec;
     }
 
+    inline ObstacleStateSnapshot getObstacleState() const {
+        std::lock_guard<std::mutex> lock(_obstacleStateMutex);
+        return _obstacleState;
+    }
+
+    inline void setObstacleState(const ObstacleStateSnapshot& state) {
+        std::lock_guard<std::mutex> lock(_obstacleStateMutex);
+        _obstacleState = state;
+    }
+
 
     double kickDir = 0.; 
     string kickType = "shoot"; 
@@ -228,5 +250,8 @@ private:
 
     vector<GameObject> _obstacles = {};
     mutable std::mutex _obstaclesMutex;
+
+    ObstacleStateSnapshot _obstacleState{};
+    mutable std::mutex _obstacleStateMutex;
 
 };

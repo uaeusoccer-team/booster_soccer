@@ -4,12 +4,14 @@
 The latest RoboCup rules do not allow unicast communication between robots and impose limits on the data size of communication packets during matches. This part of the rules has not yet been addressed in the current open‑source code. If robot communication is required in the competition, the implementation in brain_communication.cpp needs to be modified to comply with the rules.
 
 ## introduction
-The Booster RoboCup demo allows the robot to make autonomous decisions to kick the ball and complete the full RoboCup match. It includes three programs: vision, brain, and game_controller.
+The Booster RoboCup demo allows the robot to make autonomous decisions to kick the ball and complete the full RoboCup match. Its runtime programs are vision, obstacle_perception, brain, and game_controller.
 
 -   vision
     -   The vision recognition program, based on Yolo-v8, detects objects such as robots, soccer balls, and the field, and calculates their positions in the robot's coordinate system using geometric relationships.
 -   brain
     -   The decision-making program reads visual data and GameController game control data, integrates all available information, makes judgments, and controls the robot to perform corresponding actions, completing the match process.
+-   obstacle_perception
+    -   Converts head-camera depth into a robot-relative obstacle clearance scan. It never commands motion; the brain behavior tree filters velocity using its output.
 -   game_controller
     -   Reads the game control data packets broadcast by the referee machine on the local area network, converts them into ROS2 topic messages, and makes them available for the brain to use.
 
@@ -87,6 +89,8 @@ Then run build_no_cuda.sh.
 ```
 
 ## Run
+
+Depth-obstacle architecture and passive verification are documented in `docs/obstacle_avoidance.md`.
 ### Run on the virtual robot
 #### src/brain/config/config.yaml or src/brain/config/config_local.yaml
 1. set vision.image_camera_info_topic, vision.depth_image_topic, vision.depth_camera_info_topic to corresponding image topic
@@ -102,4 +106,3 @@ Then run build_no_cuda.sh.
 ```bash
 ./scripts/start.sh
 ```
-

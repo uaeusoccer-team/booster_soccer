@@ -89,6 +89,7 @@ MONITOR_LINE=0
 MONITOR_BATCH_LINES=10
 
 VISION_PID=""
+OBSTACLE_PERCEPTION_PID=""
 BRAIN_PID=""
 GAME_CONTROLLER_PID=""
 
@@ -874,6 +875,7 @@ Autonomous status:
   readiness progress: samples=${READY_COUNT}/${READY_SAMPLES}, elapsed=${readiness_elapsed}/${READY_MIN_MSEC}ms
   readiness diagnostic: ${LAST_READINESS_REASON}
   vision: $(process_state "$VISION_PID")
+  obstacle perception: $(process_state "$OBSTACLE_PERCEPTION_PID")
   brain: $(process_state "$BRAIN_PID")
   game controller: $(process_state "$GAME_CONTROLLER_PID")
 STATUS
@@ -984,6 +986,9 @@ check_processes() {
   if ! kill -0 "$VISION_PID" 2>/dev/null; then
     controlled_stop "vision process exited unexpectedly" 1
   fi
+  if ! kill -0 "$OBSTACLE_PERCEPTION_PID" 2>/dev/null; then
+    controlled_stop "obstacle perception process exited unexpectedly" 1
+  fi
   if ! kill -0 "$GAME_CONTROLLER_PID" 2>/dev/null; then
     controlled_stop "GameController receiver exited unexpectedly" 1
   fi
@@ -1088,7 +1093,15 @@ write_tree() {
                    y_tolerance="${Y_TOLERANCE}"
                    vx="{chase_vx}"
                    vy="{chase_vy}" />
-      <Script code="autonomy_command_vx=chase_vx; autonomy_command_vy=chase_vy; autonomy_command_theta=tracking_theta; autonomy_apply_min_theta=true" />
+      <ObstacleVelocityFilter desired_x="{chase_vx}"
+                              desired_y="{chase_vy}"
+                              desired_theta="{tracking_theta}"
+                              allow_detour="true"
+                              x="{safe_chase_vx}"
+                              y="{safe_chase_vy}"
+                              theta="{safe_chase_theta}"
+                              limited="{chase_obstacle_limited}" />
+      <Script code="autonomy_command_vx=safe_chase_vx; autonomy_command_vy=safe_chase_vy; autonomy_command_theta=safe_chase_theta; autonomy_apply_min_theta=true" />
     </Sequence>
   </BehaviorTree>
 
@@ -1119,7 +1132,16 @@ write_tree() {
                       vx="{autonomy_adjust_vx}"
                       vy="{autonomy_adjust_vy}"
                       theta="{autonomy_adjust_theta}" />
-      <Script code="autonomy_command_vx=autonomy_adjust_vx; autonomy_command_vy=autonomy_adjust_vy; autonomy_command_theta=autonomy_adjust_theta; autonomy_apply_min_theta=true" />
+      <ObstacleVelocityFilter desired_x="{autonomy_adjust_vx}"
+                              desired_y="{autonomy_adjust_vy}"
+                              desired_theta="{autonomy_adjust_theta}"
+                              allow_detour="false"
+                              safe_distance="0.80"
+                              x="{safe_adjust_vx}"
+                              y="{safe_adjust_vy}"
+                              theta="{safe_adjust_theta}"
+                              limited="{adjust_obstacle_limited}" />
+      <Script code="autonomy_command_vx=safe_adjust_vx; autonomy_command_vy=safe_adjust_vy; autonomy_command_theta=safe_adjust_theta; autonomy_apply_min_theta=true" />
     </Sequence>
   </BehaviorTree>
 
@@ -1224,9 +1246,11 @@ TREE_PATH="${BRAIN_SHARE}/behavior_trees/autonomous_run.xml"
 write_tree "$TREE_PATH"
 echo "Wrote ${TREE_PATH}"
 
-echo "Starting vision, holistic brain tree, and GameController receiver..."
+echo "Starting vision, obstacle perception, holistic brain tree, and GameController receiver..."
 ros2 launch vision launch.py > vision.log 2>&1 &
 VISION_PID=$!
+ros2 launch obstacle_perception launch.py > obstacle_perception.log 2>&1 &
+OBSTACLE_PERCEPTION_PID=$!
 ros2 launch brain launch.py \
   tree:=autonomous_run.xml \
   role:="$ROLE" \
@@ -1265,7 +1289,7 @@ else
 fi
 echo "Selected switch=${RUNTIME_SWITCH}, start_mode=${START_MODE}."
 runtime_help
-echo "Diagnostics: tail -f brain.log | grep -E 'CamTrackBall/direct_pixel|CamFindBall/|SimpleChase/vector|ShootingAdjust/vector|RobotClient/setVelocity_out'"
+echo "Diagnostics: tail -f brain.log | grep -E 'CamTrackBall/direct_pixel|CamFindBall/|SimpleChase/vector|ShootingAdjust/vector|ObstacleVelocityFilter|obstacle_guard|RobotClient/setVelocity_out'"
 
 while true; do
   runtime_iteration

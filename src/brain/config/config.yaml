@@ -34,18 +34,29 @@ brain_node:
         ball_control_cost_threshold: 20.0
 
     obstacle_avoidance:
+      enable: true
+      use_external_state: true
+      state_topic: "/booster_soccer/obstacle_state"
+      state_timeout_msecs: 500.0
+      stop_on_stale: true
+      hard_stop_distance: 0.45
+      filter_safe_distance: 1.20
+      max_detour_angle: 1.20
+
+      # Legacy in-process depth settings. They are used only when
+      # use_external_state is explicitly set false.
       depth_sample_step: 16
-      obstacle_min_height: 0.45
+      obstacle_min_height: 0.15
       grid_size: 0.2
       max_x: 3.0
       max_y: 5.0
       exclusion_x: 0.4
       exclusion_y: 0.5
-      ball_exclusion_radius: 0.0
+      ball_exclusion_radius: 0.35
       ball_exclusion_height: 0.3
-      occupancy_threshold: 2000.0
+      occupancy_threshold: 5.0
       collision_threshold: 0.3
-      safe_distance: 2.0
+      safe_distance: 1.2
       avoid_secs: 3.0
       enable_freekick_avoid: false
       freekick_start_placing_safe_distance: 0.1
@@ -54,7 +65,7 @@ brain_node:
       avoid_during_kick: false
       kick_ao_safe_dist: 3.0
       avoid_during_chase: true
-      chase_ao_safe_dist: 3.5
+      chase_ao_safe_dist: 1.2
 
     RLVisionKick:
       enableAutoVisualKick: false

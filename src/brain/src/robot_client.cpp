@@ -86,6 +86,34 @@ int RobotClient::setVelocity(
     brain->log->log("RobotClient/setVelocity_in",
                     format("vx: %.2f  vy: %.2f  vtheta: %.2f", x, y, theta));
 
+    // Final translational safety guard. Directional steering belongs to the
+    // behavior tree; this layer only prevents a stale/unobserved/too-close
+    // command from reaching locomotion.
+    if (
+        brain->config->get_enable_obstacle_avoidance()
+        && brain->config->get_use_external_obstacle_state()
+        && norm(x, y) > 1.0e-5
+    ) {
+        const double direction = std::atan2(y, x);
+        const bool fresh = brain->hasFreshObstacleState();
+        const bool observed = fresh && brain->isObstacleDirectionObserved(direction);
+        const bool unavailable = !fresh || !observed;
+        const bool mustStopUnavailable =
+            unavailable && brain->config->get_obstacle_stop_on_stale();
+        const bool hardStop =
+            fresh
+            && observed
+            && brain->distToObstacle(direction)
+                <= brain->config->get_obstacle_hard_stop_distance();
+        if (mustStopUnavailable || hardStop) {
+            brain->log->log(
+                "RobotClient/obstacle_guard",
+                mustStopUnavailable ? "STOP_UNAVAILABLE" : "STOP_HARD_CLEARANCE");
+            x = 0.0;
+            y = 0.0;
+        }
+    }
+
     double minx = brain->config->get_min_vx();
     double miny = brain->config->get_min_vy();
     double mintheta =  brain->config->get_min_vtheta();

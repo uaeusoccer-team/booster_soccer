@@ -731,6 +731,36 @@ private:
 };
 
 
+class ObstacleVelocityFilter : public SyncActionNode
+{
+public:
+    ObstacleVelocityFilter(const string &name, const NodeConfig &config, Brain *_brain)
+        : SyncActionNode(name, config), brain(_brain) {}
+
+    static PortsList providedPorts()
+    {
+        return {
+            InputPort<double>("desired_x", 0.0, "Unfiltered robot-forward velocity"),
+            InputPort<double>("desired_y", 0.0, "Unfiltered robot-left velocity"),
+            InputPort<double>("desired_theta", 0.0, "Unfiltered yaw velocity"),
+            InputPort<bool>("allow_detour", true, "Steer around obstacles instead of only slowing/stopping"),
+            InputPort<bool>("stop_on_stale", true, "Stop translation when obstacle perception is stale"),
+            InputPort<double>("safe_distance", -1.0, "Begin filtering inside this clearance; negative uses config"),
+            InputPort<double>("hard_stop_distance", -1.0, "Stop inside this clearance; negative uses config"),
+            OutputPort<double>("x"),
+            OutputPort<double>("y"),
+            OutputPort<double>("theta"),
+            OutputPort<bool>("limited")
+        };
+    }
+
+    NodeStatus tick() override;
+
+private:
+    Brain *brain;
+};
+
+
 /**
  * @brief Fine robot-relative positioning for a shooting pose.
  *

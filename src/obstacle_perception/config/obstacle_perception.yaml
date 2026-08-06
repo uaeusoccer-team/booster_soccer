@@ -1,0 +1,39 @@
+depth_obstacle_node:
+  ros__parameters:
+    depth_topic: "/boostercamera/head/depth"
+    camera_info_topic: "/boostercamera/head/depth/camera_info"
+    detection_topic: "/booster_soccer/detection"
+    head_pose_topic: "/head_pose"
+    obstacle_state_topic: "/booster_soccer/obstacle_state"
+
+    # Process at a bounded rate so depth perception cannot starve the brain.
+    processing_rate_hz: 12.0
+    sample_step: 8
+    min_depth: 0.15
+    max_depth: 3.0
+
+    map_min_x: 0.10
+    map_max_x: 3.0
+    map_half_width: 2.5
+    self_exclusion_x: 0.35
+    self_exclusion_y: 0.45
+    obstacle_min_height: 0.12
+    obstacle_max_height: 2.0
+
+    scan_min_angle: -1.20
+    scan_max_angle: 1.20
+    scan_samples: 17
+    corridor_half_width: 0.28
+    minimum_obstacle_points: 8
+    clearance_quantile: 0.10
+    blocked_distance: 1.20
+
+    ball_min_confidence: 30.0
+    ball_max_age_sec: 0.75
+    ball_exclusion_x: 0.35
+    ball_exclusion_y: 0.30
+    ball_exclusion_height: 0.40
+    head_pose_timeout_sec: 0.75
+
+    publish_point_cloud: false
+    point_cloud_topic: "/booster_soccer/local_obstacle_points"

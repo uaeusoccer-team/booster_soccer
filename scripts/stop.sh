@@ -1,6 +1,8 @@
 #!/bin/bash
 echo ["STOP VISION"]
 pkill -9 vision_node
+echo ["STOP OBSTACLE PERCEPTION"]
+pkill -9 -f obstacle_perception || true
 echo ["stop detection_converter"]
 pkill -9 -f detection_converter_node.py
 echo ["STOP BRAIN"]

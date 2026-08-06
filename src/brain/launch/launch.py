@@ -59,6 +59,7 @@ def handle_configuration(context, *args, **kwargs):
     sim = context.perform_substitution(LaunchConfiguration('sim'))
     if sim in ['true', 'True', '1']:
         config['use_sim_time'] = True
+        config['obstacle_avoidance.use_external_state'] = False
 
 
     disableCom = context.perform_substitution(LaunchConfiguration('disable_com'))

@@ -17,6 +17,47 @@ using std::placeholders::_1;
 
 #define SUB_STATE_QUEUE_SIZE 1
 
+namespace
+{
+std::optional<size_t> nearestObstacleDirectionIndex(
+    const ObstacleStateSnapshot &state,
+    double angle)
+{
+    if (state.directions.empty()) {
+        return std::nullopt;
+    }
+
+    size_t bestIndex = 0;
+    double bestError = std::numeric_limits<double>::infinity();
+    for (size_t i = 0; i < state.directions.size(); ++i) {
+        const double error = std::fabs(toPInPI(state.directions[i] - angle));
+        if (error < bestError) {
+            bestError = error;
+            bestIndex = i;
+        }
+    }
+
+    // Edge samples must not represent every direction outside the camera FOV.
+    // Treat each sample as the center of one angular bin.
+    double binHalfWidth = 0.1;
+    if (state.directions.size() > 1) {
+        const size_t neighbor = bestIndex == 0 ? 1 : bestIndex - 1;
+        binHalfWidth = 0.5 * std::fabs(toPInPI(
+            state.directions[bestIndex] - state.directions[neighbor]));
+        if (bestIndex + 1 < state.directions.size()) {
+            binHalfWidth = std::max(
+                binHalfWidth,
+                0.5 * std::fabs(toPInPI(
+                    state.directions[bestIndex + 1] - state.directions[bestIndex])));
+        }
+    }
+    if (bestError > binHalfWidth + 1.0e-6) {
+        return std::nullopt;
+    }
+    return bestIndex;
+}
+}
+
 Brain::Brain() : rclcpp::Node("brain_node")
 {
     // Initialize TF broadcaster
@@ -91,6 +132,7 @@ Brain::Brain() : rclcpp::Node("brain_node")
     declare_parameter<bool>("strategy.cooperation.enable_role_switch", true);
     declare_parameter<double>("strategy.cooperation.ball_control_cost_threshold", 10.0);
 
+    declare_parameter<bool>("obstacle_avoidance.enable", false);
     declare_parameter<int>("obstacle_avoidance.depth_sample_step", 16);
     declare_parameter<double>("obstacle_avoidance.obstacle_min_height", 0.15);
     declare_parameter<double>("obstacle_avoidance.grid_size", 0.2);
@@ -112,6 +154,13 @@ Brain::Brain() : rclcpp::Node("brain_node")
     declare_parameter<double>("obstacle_avoidance.chase_ao_safe_dist", 2.0);
     declare_parameter<bool>("obstacle_avoidance.avoid_during_kick", false);
     declare_parameter<double>("obstacle_avoidance.kick_ao_safe_dist", 1.0);
+    declare_parameter<bool>("obstacle_avoidance.use_external_state", true);
+    declare_parameter<string>("obstacle_avoidance.state_topic", "/booster_soccer/obstacle_state");
+    declare_parameter<double>("obstacle_avoidance.state_timeout_msecs", 500.0);
+    declare_parameter<bool>("obstacle_avoidance.stop_on_stale", true);
+    declare_parameter<double>("obstacle_avoidance.hard_stop_distance", 0.45);
+    declare_parameter<double>("obstacle_avoidance.filter_safe_distance", 1.2);
+    declare_parameter<double>("obstacle_avoidance.max_detour_angle", 1.2);
     
     declare_parameter<bool>("RLVisionKick.enableAutoVisualKick", true);
     declare_parameter<double>("RLVisionKick.autoVisualKickEnableDistMin", 0.5);
@@ -188,6 +237,10 @@ void Brain::init()
         topic_suffix = "/" + config->get_robot_name();
     }
     detectionsSubscription = create_subscription<vision_interface::msg::Detections>("/booster_soccer/detection" + topic_suffix, SUB_STATE_QUEUE_SIZE, bind(&Brain::detectionsCallback, this, _1));
+    obstacleStateSubscription = create_subscription<vision_interface::msg::ObstacleState>(
+        config->get_obstacle_state_topic() + topic_suffix,
+        SUB_STATE_QUEUE_SIZE,
+        bind(&Brain::obstacleStateCallback, this, _1));
     subFieldLine = create_subscription<vision_interface::msg::LineSegments>("/booster_soccer/line_segments" + topic_suffix, SUB_STATE_QUEUE_SIZE, bind(&Brain::fieldLineCallback, this, _1));
     odometerSubscription = create_subscription<booster_interface::msg::Odometer>("/odometer_state" + topic_suffix,  SUB_STATE_QUEUE_SIZE, bind(&Brain::odometerCallback, this, _1));
     lowStateSubscription = create_subscription<booster_interface::msg::LowState>("/low_state" + topic_suffix, SUB_STATE_QUEUE_SIZE, bind(&Brain::lowStateCallback, this, _1));
@@ -197,8 +250,10 @@ void Brain::init()
     imageCameraInfoSubscription = create_subscription<sensor_msgs::msg::CameraInfo>(
         config->get_image_camera_info_topic(), SUB_STATE_QUEUE_SIZE, bind(&Brain::imageCameraInfoCallback, this, _1));
 
-    depthCameraInfoSubscription = create_subscription<sensor_msgs::msg::CameraInfo>(
-        config->get_depth_camera_info_topic(), SUB_STATE_QUEUE_SIZE, bind(&Brain::depthCameraInfoCallback, this, _1));
+    if (!config->get_use_external_obstacle_state()) {
+        depthCameraInfoSubscription = create_subscription<sensor_msgs::msg::CameraInfo>(
+            config->get_depth_camera_info_topic(), SUB_STATE_QUEUE_SIZE, bind(&Brain::depthCameraInfoCallback, this, _1));
+    }
 
     // create publisher for field dimensions
     pubFieldDimensions = create_publisher<std_msgs::msg::Float64MultiArray>("/booster_soccer/field_dimensions" + topic_suffix, rclcpp::QoS(1).transient_local());
@@ -209,14 +264,22 @@ void Brain::init()
     pubTeammatesPoses = create_publisher<std_msgs::msg::Float64MultiArray>("/booster_soccer/teammates_poses" + topic_suffix, 10);
     pubKickBall = create_publisher<brain::msg::Kick>("/kick_ball", 10);
 
-    // subscribe to depth image topic
-    string depthTopic = config->get_depth_image_topic();
-    if (depthTopic.find("compressed") != std::string::npos) {
-        compressedDepthImageSubscription = create_subscription<sensor_msgs::msg::CompressedImage>(
-            depthTopic, SUB_STATE_QUEUE_SIZE, bind(&Brain::compressedDepthImageCallback, this, _1));
+    // The external node owns depth projection. Keep the legacy in-process path
+    // available as an explicit fallback, but never run both implementations.
+    if (!config->get_use_external_obstacle_state()) {
+        string depthTopic = config->get_depth_image_topic();
+        if (depthTopic.find("compressed") != std::string::npos) {
+            compressedDepthImageSubscription = create_subscription<sensor_msgs::msg::CompressedImage>(
+                depthTopic, SUB_STATE_QUEUE_SIZE, bind(&Brain::compressedDepthImageCallback, this, _1));
+        } else {
+            depthImageSubscription = create_subscription<sensor_msgs::msg::Image>(
+                depthTopic, SUB_STATE_QUEUE_SIZE, bind(&Brain::depthImageCallback, this, _1));
+        }
     } else {
-        depthImageSubscription = create_subscription<sensor_msgs::msg::Image>(
-            depthTopic, SUB_STATE_QUEUE_SIZE, bind(&Brain::depthImageCallback, this, _1));
+        RCLCPP_INFO(
+            get_logger(),
+            "Using external obstacle perception on %s; in-process depth grid disabled",
+            config->get_obstacle_state_topic().c_str());
     }
 
 
@@ -288,6 +351,25 @@ void Brain::loadConfig()
         for (int j = 0; j < 4; ++j) {
             config->camToHead(i, j) = extrin[i][j].as<double>();
         }
+    }
+    auto depthRotation = config->camToHead.block<3, 3>(0, 0);
+    const double determinant = depthRotation.determinant();
+    const double orthogonalityError =
+        (depthRotation.transpose() * depthRotation - Eigen::Matrix3d::Identity()).norm();
+    if (determinant < 0.5 || orthogonalityError > 0.1) {
+        Eigen::Vector3d cameraRight = depthRotation.col(0).normalized();
+        Eigen::Vector3d cameraDown = depthRotation.col(1);
+        cameraDown = (cameraDown - cameraRight * cameraRight.dot(cameraDown)).normalized();
+        const Eigen::Vector3d cameraForward = cameraRight.cross(cameraDown).normalized();
+        config->camToHead.block<3, 1>(0, 0) = cameraRight;
+        config->camToHead.block<3, 1>(0, 1) = cameraDown;
+        config->camToHead.block<3, 1>(0, 2) = cameraForward;
+        RCLCPP_WARN(
+            get_logger(),
+            "Repaired non-rigid camera extrinsic for legacy obstacle depth "
+            "(det=%.3f, orthogonality_error=%.3f)",
+            determinant,
+            orthogonalityError);
     }
     string str_cam2head = "camToHead: \n";
     for (int i = 0; i < 4; ++i) {
@@ -610,7 +692,9 @@ void Brain::updateMemory()
 {
     updateBallMemory();
     updateRobotMemory();
-    updateObstacleMemory();
+    if (!config->get_use_external_obstacle_state()) {
+        updateObstacleMemory();
+    }
     updateKickoffMemory();
 }
 
@@ -1281,6 +1365,44 @@ void Brain::detectionsCallback(const vision_interface::msg::Detections &msg)
         shootingBall.value_or(GameObject{}),
         data->getGoalposts());
 
+}
+
+void Brain::obstacleStateCallback(const vision_interface::msg::ObstacleState &msg)
+{
+    ObstacleStateSnapshot snapshot;
+    snapshot.received = true;
+    snapshot.receivedAt = get_clock()->now();
+    snapshot.blocked = msg.blocked;
+    snapshot.nearestDistance = msg.nearest_distance;
+
+    const size_t sampleCount = msg.directions.size();
+    snapshot.valid = msg.valid
+        && sampleCount > 0
+        && msg.clearances.size() == sampleCount
+        && msg.point_counts.size() == sampleCount
+        && msg.observed.size() == sampleCount;
+
+    if (snapshot.valid) {
+        snapshot.directions.reserve(sampleCount);
+        snapshot.clearances.reserve(sampleCount);
+        snapshot.observed.reserve(sampleCount);
+        for (size_t i = 0; i < sampleCount; ++i) {
+            if (!std::isfinite(msg.directions[i]) || !std::isfinite(msg.clearances[i])) {
+                snapshot.valid = false;
+                break;
+            }
+            snapshot.directions.push_back(msg.directions[i]);
+            snapshot.clearances.push_back(std::max(0.0f, msg.clearances[i]));
+            snapshot.observed.push_back(msg.observed[i]);
+        }
+    }
+
+    data->setObstacleState(snapshot);
+    tree->setEntry<bool>("obstacle_state_valid", snapshot.valid);
+    tree->setEntry<bool>("obstacle_blocked", snapshot.valid ? snapshot.blocked : true);
+    tree->setEntry<double>(
+        "obstacle_nearest_distance",
+        snapshot.valid ? snapshot.nearestDistance : 0.0);
 }
 
 void Brain::updateLinePosToField(FieldLine& line) {
@@ -2240,6 +2362,23 @@ void Brain::processDepthImage(const cv::Mat &depthFloat, int width, int height, 
 }
 
 double Brain::distToObstacle(double angle) {
+    if (config->get_use_external_obstacle_state()) {
+        const auto state = data->getObstacleState();
+        if (!hasFreshObstacleState()) {
+            return config->get_obstacle_stop_on_stale()
+                ? 0.0
+                : std::numeric_limits<double>::infinity();
+        }
+
+        const auto bestIndex = nearestObstacleDirectionIndex(state, angle);
+        if (!bestIndex.has_value()
+            || bestIndex.value() >= state.observed.size()
+            || !state.observed[bestIndex.value()]) {
+            return 0.0;
+        }
+        return state.clearances[bestIndex.value()];
+    }
+
     auto obs = data->getObstacles();
     double minDist = 1e9;
     double obstacleThreshold = config->get_occupancy_threshold();
@@ -2262,6 +2401,58 @@ double Brain::distToObstacle(double angle) {
         }
     }
     return minDist;
+}
+
+bool Brain::hasFreshObstacleState() const {
+    const auto state = data->getObstacleState();
+    if (!state.received || !state.valid || state.directions.empty()) {
+        return false;
+    }
+    const double ageMsecs =
+        (get_clock()->now() - state.receivedAt).nanoseconds() / 1.0e6;
+    return ageMsecs >= 0.0
+        && ageMsecs <= config->get_obstacle_state_timeout_msecs();
+}
+
+bool Brain::isObstacleDirectionObserved(double angle) const {
+    if (!hasFreshObstacleState()) {
+        return false;
+    }
+    const auto state = data->getObstacleState();
+    const auto bestIndex = nearestObstacleDirectionIndex(state, angle);
+    return bestIndex.has_value()
+        && bestIndex.value() < state.observed.size()
+        && state.observed[bestIndex.value()];
+}
+
+std::optional<double> Brain::findObstacleFreeDirection(
+    double desiredAngle,
+    double requiredClearance,
+    double maxDetour) const
+{
+    if (!hasFreshObstacleState()) {
+        return std::nullopt;
+    }
+    const auto state = data->getObstacleState();
+    std::optional<double> bestDirection;
+    double bestError = std::numeric_limits<double>::infinity();
+    double bestClearance = 0.0;
+    for (size_t i = 0; i < state.directions.size(); ++i) {
+        if (!state.observed[i] || state.clearances[i] < requiredClearance) {
+            continue;
+        }
+        const double error = std::fabs(toPInPI(state.directions[i] - desiredAngle));
+        if (error > maxDetour) {
+            continue;
+        }
+        if (error < bestError || (std::fabs(error - bestError) < 1.0e-6
+                                  && state.clearances[i] > bestClearance)) {
+            bestDirection = state.directions[i];
+            bestError = error;
+            bestClearance = state.clearances[i];
+        }
+    }
+    return bestDirection;
 }
 
 vector<double> Brain::findSafeDirections(double startAngle, double safeDist, double step) {

@@ -20,6 +20,7 @@
 #include <vision_interface/msg/line_segments.hpp>
 #include <vision_interface/msg/cal_param.hpp>
 #include <vision_interface/msg/segmentation_result.hpp>
+#include <vision_interface/msg/obstacle_state.hpp>
 #include <game_controller_interface/msg/game_control_data.hpp>
 #include "brain/msg/kick.hpp"
 #include <booster/robot/b1/b1_api_const.hpp>
@@ -177,6 +178,8 @@ public:
 
     void detectionsCallback(const vision_interface::msg::Detections &msg);
 
+    void obstacleStateCallback(const vision_interface::msg::ObstacleState &msg);
+
     void fieldLineCallback(const vision_interface::msg::LineSegments &msg);
 
     void imageCameraInfoCallback(const sensor_msgs::msg::CameraInfo::SharedPtr msg);
@@ -213,6 +216,15 @@ public:
     vector<double> findSafeDirections(double startAngle, double safeDist, double step=deg2rad(10));
 
     double calcAvoidDir(double startAngle, double safeDist);
+
+    bool hasFreshObstacleState() const;
+
+    bool isObstacleDirectionObserved(double angle) const;
+
+    std::optional<double> findObstacleFreeDirection(
+        double desiredAngle,
+        double requiredClearance,
+        double maxDetour) const;
 
 
     /**
@@ -272,6 +284,7 @@ private:
     rclcpp::Subscription<sensor_msgs::msg::Joy>::SharedPtr joySubscription;
     rclcpp::Subscription<game_controller_interface::msg::GameControlData>::SharedPtr gameControlSubscription;
     rclcpp::Subscription<vision_interface::msg::Detections>::SharedPtr detectionsSubscription;
+    rclcpp::Subscription<vision_interface::msg::ObstacleState>::SharedPtr obstacleStateSubscription;
     rclcpp::Subscription<vision_interface::msg::LineSegments>::SharedPtr subFieldLine;
     rclcpp::Subscription<booster_interface::msg::Odometer>::SharedPtr odometerSubscription;
     rclcpp::Subscription<booster_interface::msg::LowState>::SharedPtr lowStateSubscription;

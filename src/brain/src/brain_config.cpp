@@ -258,6 +258,40 @@ double BrainConfig::get_chase_ao_safe_dist() {
     return static_cast<rclcpp::Node*>(brain)->get_parameter_or("obstacle_avoidance.chase_ao_safe_dist", 2.0);
 }
 
+bool BrainConfig::get_use_external_obstacle_state() {
+    return static_cast<rclcpp::Node*>(brain)->get_parameter_or("obstacle_avoidance.use_external_state", true);
+}
+
+string BrainConfig::get_obstacle_state_topic() {
+    return static_cast<rclcpp::Node*>(brain)->get_parameter_or(
+        "obstacle_avoidance.state_topic", string("/booster_soccer/obstacle_state"));
+}
+
+double BrainConfig::get_obstacle_state_timeout_msecs() {
+    return static_cast<rclcpp::Node*>(brain)->get_parameter_or(
+        "obstacle_avoidance.state_timeout_msecs", 500.0);
+}
+
+bool BrainConfig::get_obstacle_stop_on_stale() {
+    return static_cast<rclcpp::Node*>(brain)->get_parameter_or(
+        "obstacle_avoidance.stop_on_stale", true);
+}
+
+double BrainConfig::get_obstacle_hard_stop_distance() {
+    return static_cast<rclcpp::Node*>(brain)->get_parameter_or(
+        "obstacle_avoidance.hard_stop_distance", 0.45);
+}
+
+double BrainConfig::get_obstacle_filter_safe_distance() {
+    return static_cast<rclcpp::Node*>(brain)->get_parameter_or(
+        "obstacle_avoidance.filter_safe_distance", 1.2);
+}
+
+double BrainConfig::get_obstacle_max_detour_angle() {
+    return static_cast<rclcpp::Node*>(brain)->get_parameter_or(
+        "obstacle_avoidance.max_detour_angle", 1.2);
+}
+
 double BrainConfig::get_collision_threshold() {
     return static_cast<rclcpp::Node*>(brain)->get_parameter_or("obstacle_avoidance.collision_threshold", 0.2);
 }
