@@ -5,6 +5,8 @@
 #include <mutex>
 #include <tuple>
 #include <cstdint>
+#include <limits>
+#include <vector>
 
 #include <sensor_msgs/msg/image.hpp>
 #include "booster_interface/msg/odometer.hpp"
@@ -14,6 +16,83 @@
 #include "RoboCupGameControlData.h"
 
 using namespace std;
+
+/**
+ * A connected obstacle extracted from one valid depth frame. Coordinates and
+ * velocities are expressed in the robot/base frame.
+ */
+struct ObstacleComponent
+{
+    int id = 0;
+    double x = 0.0;
+    double y = 0.0;
+    double vx = 0.0;
+    double vy = 0.0;
+    double radius = 0.0;
+    double min_x = 0.0;
+    double max_x = 0.0;
+    double min_y = 0.0;
+    double max_y = 0.0;
+    double nearest_distance = std::numeric_limits<double>::infinity();
+    double bearing = 0.0;
+    double confidence = 0.0;
+    int occupied_cell_count = 0;
+    int sample_count = 0;
+    string label = "Obstacle";
+    rclcpp::Time last_seen_at;
+    bool carried = false;
+};
+
+/**
+ * Directional depth coverage. `observed == false` means the direction is
+ * unknown and must not be assumed clear. `free_range` is the measured clear
+ * range along the bin centre, capped by the configured depth-map range.
+ */
+struct ObstacleAngularCoverage
+{
+    double angle = 0.0;
+    bool observed = false;
+    double free_range = 0.0;
+    // Origin of this ray in the snapshot's robot frame. Retaining individual
+    // origins lets short-lived head-scan coverage survive robot motion without
+    // pretending every ray was observed from the newest camera viewpoint.
+    double origin_x = 0.0;
+    double origin_y = 0.0;
+    rclcpp::Time observed_at;
+};
+
+/**
+ * Immutable-by-convention copy of the latest valid obstacle map. `stamp` is
+ * the sensor stamp; `received_at` is the local ROS receive time used for
+ * freshness checks. A valid sensor stamp is checked as well, so a publisher
+ * repeating a frozen frame cannot accidentally authorize motion.
+ */
+struct ObstacleSnapshot
+{
+    bool ready = false;
+    rclcpp::Time stamp;
+    rclcpp::Time received_at;
+    Pose2D robot_pose_to_odom;
+    vector<GameObject> obstacles;
+    vector<ObstacleComponent> components;
+    vector<ObstacleAngularCoverage> coverage;
+};
+
+/** Fresh, depth-confirmed visual ball used only to mask the physical ball. */
+struct BallDepthObservation
+{
+    bool visible = false;
+    bool depth_confirmed = false;
+    Point position_to_robot{0.0, 0.0, 0.0};
+    BoundingBox bounding_box{0.0, 0.0, 0.0, 0.0};
+    int image_width = 0;
+    int image_height = 0;
+    // Odom pose paired with this detection receive time. Occlusion recovery
+    // must not anchor a delayed robot-frame ball sample using a later pose.
+    Pose2D robot_pose_to_odom;
+    rclcpp::Time stamp;
+    rclcpp::Time received_at;
+};
 
 /**
  * `BrainData` stores runtime (dynamic) data used by `Brain` during decision-making.
@@ -52,7 +131,11 @@ public:
     Eigen::Matrix4d camToRobot = Eigen::Matrix4d::Identity(); 
 
 
-    bool ballDetected = false;
+    // Detection callbacks and behavior-tree ticks may run on different
+    // executor threads in downstream deployments. Keep this visibility flag
+    // atomic; the full ball observation is published through the mutexed
+    // BallDepthObservation snapshot below.
+    std::atomic<bool> ballDetected{false};
     // A new RGB acquisition must contain usable depth once before tracking is
     // authorized. The latch remains true across temporary depth loss and is
     // reset only when the accepted RGB ball disappears completely.
@@ -82,6 +165,15 @@ public:
     inline void setRobots(const vector<GameObject>& newVec) {
         std::lock_guard<std::mutex> lock(_robotsMutex);
         _robots = newVec;
+    }
+
+    inline vector<GameObject> getSemanticObstacles() const {
+        std::lock_guard<std::mutex> lock(_semanticObstaclesMutex);
+        return _semanticObstacles;
+    }
+    inline void setSemanticObstacles(const vector<GameObject>& newVec) {
+        std::lock_guard<std::mutex> lock(_semanticObstaclesMutex);
+        _semanticObstacles = newVec;
     }
 
 
@@ -122,6 +214,27 @@ public:
         std::lock_guard<std::mutex> lock(_obstaclesMutex);
         _obstacles = newVec;
     }
+
+    ObstacleSnapshot getObstacleSnapshot() const;
+    void setObstacleSnapshot(const ObstacleSnapshot &snapshot);
+    double obstacleSnapshotAgeMsecs(const rclcpp::Time &now) const;
+
+    Pose2D getRobotPoseToOdom() const;
+    void setRobotPoseToOdom(const Pose2D &pose);
+
+    // Called only after a complete, valid depth snapshot is published.
+    void markDepthFrameReceived(const rclcpp::Time &stamp, const rclcpp::Time &receivedAt);
+    rclcpp::Time getLastDepthReceiveTime() const;
+    rclcpp::Time getLastDepthSensorStamp() const;
+    double depthAgeMsecs(const rclcpp::Time &now) const;
+
+    void markDetectionFrameReceived(const rclcpp::Time &stamp, const rclcpp::Time &receivedAt);
+    rclcpp::Time getLastDetectionReceiveTime() const;
+    rclcpp::Time getLastDetectionSensorStamp() const;
+    double detectionAgeMsecs(const rclcpp::Time &now) const;
+
+    BallDepthObservation getBallDepthObservation() const;
+    void setBallDepthObservation(const BallDepthObservation &observation);
 
 
     double kickDir = 0.; 
@@ -189,8 +302,11 @@ public:
     Pose2D field2robot(const Pose2D &poseToField);
 
 private:
-    vector<GameObject> _robots = {}; 
+    vector<GameObject> _robots = {};
     mutable std::mutex _robotsMutex;
+
+    vector<GameObject> _semanticObstacles = {};
+    mutable std::mutex _semanticObstaclesMutex;
 
     vector<GameObject> _goalposts = {}; 
     mutable std::mutex _goalpostsMutex;
@@ -203,5 +319,21 @@ private:
 
     vector<GameObject> _obstacles = {};
     mutable std::mutex _obstaclesMutex;
+
+    ObstacleSnapshot _obstacleSnapshot;
+    mutable std::mutex _obstacleSnapshotMutex;
+
+    mutable std::mutex _robotPoseToOdomMutex;
+
+    rclcpp::Time _lastDepthReceiveTime;
+    rclcpp::Time _lastDepthSensorStamp;
+    mutable std::mutex _depthFreshnessMutex;
+
+    rclcpp::Time _lastDetectionReceiveTime;
+    rclcpp::Time _lastDetectionSensorStamp;
+    mutable std::mutex _detectionFreshnessMutex;
+
+    BallDepthObservation _ballDepthObservation;
+    mutable std::mutex _ballDepthObservationMutex;
 
 };

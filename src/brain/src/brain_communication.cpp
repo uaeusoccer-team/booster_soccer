@@ -385,7 +385,8 @@ void BrainCommunication::unicastCommunication() {
 
         msg.isAlive = brain->data->tmImAlive;
         msg.isLead = brain->data->tmImLead;
-        msg.ballDetected = brain->data->ballDetected;
+        msg.ballDetected =
+            brain->data->ballDetected.load(std::memory_order_acquire);
         msg.ballLocationKnown = brain->tree->getEntry<bool>("ball_location_known");
         msg.ballConfidence = brain->data->ball.confidence;
         msg.ballRange = brain->data->ball.range;

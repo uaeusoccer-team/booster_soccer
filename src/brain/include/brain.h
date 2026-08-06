@@ -39,6 +39,8 @@
 #include <sys/un.h>
 #include <unistd.h>
 #include <stdexcept>
+#include <deque>
+#include <mutex>
 
 #include "brain_config.h"
 #include "brain_data.h"
@@ -186,7 +188,12 @@ public:
 
     void compressedDepthImageCallback(const sensor_msgs::msg::CompressedImage::SharedPtr msg);
 
-    void processDepthImage(const cv::Mat &depthFloat, int width, int height, const std_msgs::msg::Header &header);
+    void processDepthImage(
+        const cv::Mat &depthFloat,
+        int width,
+        int height,
+        const std_msgs::msg::Header &header,
+        const rclcpp::Time &receivedAt);
 
     void odometerCallback(const booster_interface::msg::Odometer &msg);
 
@@ -220,6 +227,21 @@ public:
     void agentCommandCallback(const std_msgs::msg::String::SharedPtr msg);
 
 private:
+    struct HeadPoseSample {
+        rclcpp::Time receivedAt;
+        Eigen::Matrix4d camToRobot = Eigen::Matrix4d::Identity();
+    };
+
+    bool selectDepthHeadPose(
+        const rclcpp::Time &depthReceivedAt,
+        Eigen::Matrix4d &camToRobot) const;
+
+    // main.cpp intentionally runs behavior-tree ticks separately from ROS
+    // callbacks. Serialize detection publication with the active behavior-tree
+    // tick; the avoidance path uses separate mutexed perception snapshots.
+    // Legacy communication fields keep their pre-existing threading model.
+    mutable std::mutex detectionTickMutex_;
+
     void loadConfig();
 
     void updateBallMemory();
@@ -253,7 +275,9 @@ private:
     vector<FieldLine> processFieldLines(vector<FieldLine> &fieldLines);
 
     vector<GameObject> getGameObjects(const vision_interface::msg::Detections &msg);
-    void detectProcessBalls(const vector<GameObject> &ballObjs);
+    void detectProcessBalls(
+        const vector<GameObject> &ballObjs,
+        const rclcpp::Time &receivedAt);
 
     void detectProcessMarkings(const vector<GameObject> &markingObjs);
 
@@ -299,4 +323,10 @@ private:
     std::shared_ptr<rclcpp::ParameterEventHandler> param_subscriber_;
     std::shared_ptr<rclcpp::ParameterCallbackHandle> team_id_handle_;
     std::shared_ptr<rclcpp::ParameterCallbackHandle> player_role_handle_;
+
+    mutable std::mutex headPoseBufferMutex_;
+    std::deque<HeadPoseSample> headPoseBuffer_;
+    mutable std::mutex depthCameraInfoMutex_;
+    std::mutex depthProcessingMutex_;
+    int nextObstacleComponentId_ = 1;
 };

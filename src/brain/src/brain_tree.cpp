@@ -1,6 +1,7 @@
 #include <cmath>
 #include <cstdlib>
 #include "brain_tree.h"
+#include "obstacle_avoidance_node.h"
 #include "locator.h"
 #include "brain.h"
 #include "utils/math.h"
@@ -32,6 +33,7 @@ void BrainTree::init()
     REGISTER_BUILDER(Chase)
     REGISTER_BUILDER(SimpleChase)
     REGISTER_BUILDER(ShootingAdjust)
+    REGISTER_BUILDER(ObstacleAvoidance)
     REGISTER_BUILDER(Adjust)
     REGISTER_BUILDER(Kick)
     REGISTER_BUILDER(StandStill)
@@ -86,6 +88,7 @@ void BrainTree::initEntry()
     setEntry<double>("tracking_theta", 0.0);
     setEntry<double>("chase_vx", 0.0);
     setEntry<double>("chase_vy", 0.0);
+    setEntry<string>("autonomy_obstacle_ball_state", "LOST");
 
     setEntry<bool>("gamecontroller_isKickOff", true);
     setEntry<string>("gc_game_state", "");
@@ -208,7 +211,8 @@ NodeStatus CamTrackBall::tick()
 
     const double xCenter = brain->config->cameraImageWidth / 2.0;
     const double yCenter = brain->config->cameraImageHeight / 2.0;
-    const bool iSeeBall = brain->data->ballDetected;
+    const bool iSeeBall =
+        brain->data->ballDetected.load(std::memory_order_acquire);
     const bool bboxValid =
         brain->data->ball.boundingBox.xmax > brain->data->ball.boundingBox.xmin &&
         brain->data->ball.boundingBox.ymax > brain->data->ball.boundingBox.ymin;
@@ -354,7 +358,7 @@ NodeStatus CamFindBall::tick()
     auto curTime = brain->get_clock()->now();
     setOutput("theta", 0.0);
 
-    if (brain->data->ballDetected &&
+    if (brain->data->ballDetected.load(std::memory_order_acquire) &&
         brain->data->ballDepthAcquired.load(std::memory_order_acquire))
     {
         _searchInitialized = false;
@@ -885,7 +889,7 @@ NodeStatus ShootingAdjust::tick()
         brain->data->ball.boundingBox.ymax > brain->data->ball.boundingBox.ymin;
     const bool visualBallUsable =
         brain->tree->getEntry<bool>("ball_visible") &&
-        brain->data->ballDetected &&
+        brain->data->ballDetected.load(std::memory_order_acquire) &&
         bboxValid;
     if (!visualBallUsable || !brain->data->headStateReceived.load(std::memory_order_acquire))
     {
@@ -1457,7 +1461,7 @@ NodeStatus StrikerDecide::tick() {
             (angleGoodForKick && !brain->data->isFreekickKickingOff) 
             || reachedKickDir
         )
-        && brain->data->ballDetected
+        && brain->data->ballDetected.load(std::memory_order_acquire)
         && fabs(brain->data->ball.yawToRobot) < M_PI / 2.
         && !avoidKick
         && ball.range < 1.5
@@ -1639,7 +1643,8 @@ NodeStatus Kick::onRunning()
     if (
         enableAbort 
         && (
-            (brain->data->ballDetected && ballRange - _minRange > MOVE_RANGE_THRESHOLD) 
+            (brain->data->ballDetected.load(std::memory_order_acquire) &&
+             ballRange - _minRange > MOVE_RANGE_THRESHOLD)
             || brain->msecsSince(brain->data->ball.timePoint) > BALL_LOST_THRESHOLD 
         )
     ) {
@@ -1672,7 +1677,7 @@ NodeStatus Kick::onRunning()
     }
 
 
-    if (brain->data->ballDetected) { 
+    if (brain->data->ballDetected.load(std::memory_order_acquire)) {
         double angle = brain->data->ball.yawToRobot;
         double speed = getInput<double>("speed_limit").value();
         _speed += 0.1; 
@@ -1750,7 +1755,9 @@ NodeStatus RLVisionKick::onRunning()
     double minMsecKick = getInput<double>("min_msec_kick").value();
     
     // Check if ball is too far or cost is too high
-    bool ballTooFar = brain->data->ballDetected && brain->data->ball.range > 5.0;
+    bool ballTooFar =
+        brain->data->ballDetected.load(std::memory_order_acquire) &&
+        brain->data->ball.range > 5.0;
     bool shouldExit = (((ballTooFar || brain->data->tmMyCost > 8.0) && (elapsed > minMsecKick)) || brain->data->lose_ball || brain->tree->getEntry<bool>("ball_out"));
     
     if (shouldExit) {
@@ -1849,7 +1856,7 @@ void StandStill::onHalted()
 
 NodeStatus RobotFindBall::onStart()
 {
-    if (brain->data->ballDetected)
+    if (brain->data->ballDetected.load(std::memory_order_acquire))
     {
         brain->client->setVelocity(0, 0, 0);
         return NodeStatus::SUCCESS;
@@ -1861,7 +1868,7 @@ NodeStatus RobotFindBall::onStart()
 
 NodeStatus RobotFindBall::onRunning()
 {
-    if (brain->data->ballDetected)
+    if (brain->data->ballDetected.load(std::memory_order_acquire))
     {
         brain->client->setVelocity(0, 0, 0);
         return NodeStatus::SUCCESS;
@@ -1905,7 +1912,7 @@ NodeStatus CamFastScan::onRunning()
 NodeStatus TurnOnSpot::onStart()
 {
     _timeStart = brain->get_clock()->now();
-    _lastAngle = brain->data->robotPoseToOdom.theta;
+    _lastAngle = brain->data->getRobotPoseToOdom().theta;
     _cumAngle = 0.0;
 
     bool towardsBall = false;
@@ -1922,7 +1929,7 @@ NodeStatus TurnOnSpot::onStart()
 
 NodeStatus TurnOnSpot::onRunning()
 {
-    double curAngle = brain->data->robotPoseToOdom.theta;
+    double curAngle = brain->data->getRobotPoseToOdom().theta;
     double deltaAngle = toPInPI(curAngle - _lastAngle);
     _lastAngle = curAngle;
     _cumAngle += deltaAngle;

@@ -34,23 +34,33 @@ brain_node:
         ball_control_cost_threshold: 20.0
 
     obstacle_avoidance:
-      depth_sample_step: 16
-      obstacle_min_height: 0.45
-      grid_size: 0.2
+      enable: true
+      depth_sample_step: 8
+      obstacle_min_height: 0.12
+      obstacle_max_height: 2.0
+      grid_size: 0.1
       max_x: 3.0
       max_y: 5.0
-      exclusion_x: 0.4
-      exclusion_y: 0.5
-      ball_exclusion_radius: 0.0
+      # Small self-return core only. Keep this well below object_stop so the
+      # 0.15-0.50 m emergency envelope remains observable; calibrate in DAMP.
+      exclusion_x: 0.12
+      exclusion_y: 0.18
+      ball_exclusion_radius: 0.2
       ball_exclusion_height: 0.3
-      occupancy_threshold: 2000.0
-      collision_threshold: 0.3
+      occupancy_threshold: 3.0
+      collision_threshold: 0.4
       safe_distance: 2.0
       avoid_secs: 3.0
       enable_freekick_avoid: false
       freekick_start_placing_safe_distance: 0.1
       freekick_start_placing_avoid_secs: 2.5
-      obstacle_memory_msecs: 500.0
+      obstacle_memory_msecs: 300.0
+      avoid_distance: 1.4
+      stop_distance: 0.5
+      depth_stale_msecs: 300.0
+      detection_stale_msecs: 300.0
+      head_pose_tolerance_msecs: 40.0
+      angular_resolution_degrees: 5.0
       avoid_during_kick: false
       kick_ao_safe_dist: 3.0
       avoid_during_chase: true

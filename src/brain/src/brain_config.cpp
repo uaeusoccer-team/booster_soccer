@@ -187,11 +187,15 @@ bool BrainConfig::get_enable_com() {
 
 
 int BrainConfig::get_depth_sample_step() {
-    return static_cast<rclcpp::Node*>(brain)->get_parameter_or("obstacle_avoidance.depth_sample_step", 16);
+    return static_cast<rclcpp::Node*>(brain)->get_parameter_or("obstacle_avoidance.depth_sample_step", 8);
 }
 
 double BrainConfig::get_obstacle_min_height() {
-    return static_cast<rclcpp::Node*>(brain)->get_parameter_or("obstacle_avoidance.obstacle_min_height", 0.05);
+    return static_cast<rclcpp::Node*>(brain)->get_parameter_or("obstacle_avoidance.obstacle_min_height", 0.12);
+}
+
+double BrainConfig::get_obstacle_max_height() {
+    return static_cast<rclcpp::Node*>(brain)->get_parameter_or("obstacle_avoidance.obstacle_max_height", 2.0);
 }
 
 double BrainConfig::get_grid_size() {
@@ -199,27 +203,27 @@ double BrainConfig::get_grid_size() {
 }
 
 double BrainConfig::get_max_x() {
-    return static_cast<rclcpp::Node*>(brain)->get_parameter_or("obstacle_avoidance.max_x", 6.0);
+    return static_cast<rclcpp::Node*>(brain)->get_parameter_or("obstacle_avoidance.max_x", 3.0);
 }
 
 double BrainConfig::get_max_y() {
-    return static_cast<rclcpp::Node*>(brain)->get_parameter_or("obstacle_avoidance.max_y", 4.0);
+    return static_cast<rclcpp::Node*>(brain)->get_parameter_or("obstacle_avoidance.max_y", 5.0);
 }
 
 double BrainConfig::get_exclusion_x() {
-    return static_cast<rclcpp::Node*>(brain)->get_parameter_or("obstacle_avoidance.exclusion_x", 0.5);
+    return static_cast<rclcpp::Node*>(brain)->get_parameter_or("obstacle_avoidance.exclusion_x", 0.12);
 }
 
 double BrainConfig::get_exclusion_y() {
-    return static_cast<rclcpp::Node*>(brain)->get_parameter_or("obstacle_avoidance.exclusion_y", 0.5);
+    return static_cast<rclcpp::Node*>(brain)->get_parameter_or("obstacle_avoidance.exclusion_y", 0.18);
 }
 
 double BrainConfig::get_ball_exclusion_radius() {
-    return static_cast<rclcpp::Node*>(brain)->get_parameter_or("obstacle_avoidance.ball_exclusion_radius", 0.3);
+    return static_cast<rclcpp::Node*>(brain)->get_parameter_or("obstacle_avoidance.ball_exclusion_radius", 0.2);
 }
 
 double BrainConfig::get_ball_exclusion_height() {
-    return static_cast<rclcpp::Node*>(brain)->get_parameter_or("obstacle_avoidance.ball_exclusion_height", 0.5);
+    return static_cast<rclcpp::Node*>(brain)->get_parameter_or("obstacle_avoidance.ball_exclusion_height", 0.3);
 }
 
 double BrainConfig::get_occupancy_threshold() {
@@ -227,7 +231,7 @@ double BrainConfig::get_occupancy_threshold() {
 }
 
 bool BrainConfig::get_enable_obstacle_avoidance() {
-    return static_cast<rclcpp::Node*>(brain)->get_parameter_or("obstacle_avoidance.enable", false);
+    return static_cast<rclcpp::Node*>(brain)->get_parameter_or("obstacle_avoidance.enable", true);
 }
 
 double BrainConfig::get_freekick_start_placing_safe_distance() {
@@ -239,7 +243,31 @@ double BrainConfig::get_freekick_start_placing_avoid_secs() {
 }
 
 double BrainConfig::get_obstacle_memory_msecs() {
-    return static_cast<rclcpp::Node*>(brain)->get_parameter_or("obstacle_avoidance.obstacle_memory_msecs", 500.0);
+    return static_cast<rclcpp::Node*>(brain)->get_parameter_or("obstacle_avoidance.obstacle_memory_msecs", 300.0);
+}
+
+double BrainConfig::get_obstacle_avoid_distance() {
+    return static_cast<rclcpp::Node*>(brain)->get_parameter_or("obstacle_avoidance.avoid_distance", 1.4);
+}
+
+double BrainConfig::get_obstacle_stop_distance() {
+    return static_cast<rclcpp::Node*>(brain)->get_parameter_or("obstacle_avoidance.stop_distance", 0.5);
+}
+
+double BrainConfig::get_depth_stale_msecs() {
+    return static_cast<rclcpp::Node*>(brain)->get_parameter_or("obstacle_avoidance.depth_stale_msecs", 300.0);
+}
+
+double BrainConfig::get_detection_stale_msecs() {
+    return static_cast<rclcpp::Node*>(brain)->get_parameter_or("obstacle_avoidance.detection_stale_msecs", 300.0);
+}
+
+double BrainConfig::get_head_pose_tolerance_msecs() {
+    return static_cast<rclcpp::Node*>(brain)->get_parameter_or("obstacle_avoidance.head_pose_tolerance_msecs", 40.0);
+}
+
+double BrainConfig::get_obstacle_angular_resolution_degrees() {
+    return static_cast<rclcpp::Node*>(brain)->get_parameter_or("obstacle_avoidance.angular_resolution_degrees", 5.0);
 }
 
 bool BrainConfig::get_avoid_during_kick() {
@@ -259,7 +287,7 @@ double BrainConfig::get_chase_ao_safe_dist() {
 }
 
 double BrainConfig::get_collision_threshold() {
-    return static_cast<rclcpp::Node*>(brain)->get_parameter_or("obstacle_avoidance.collision_threshold", 0.2);
+    return static_cast<rclcpp::Node*>(brain)->get_parameter_or("obstacle_avoidance.collision_threshold", 0.4);
 }
 
 double BrainConfig::get_safe_distance() {

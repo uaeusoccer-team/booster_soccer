@@ -10,6 +10,10 @@ ROLE="striker"
 TEAM_ID="5"
 PLAYER_ID="1"
 
+OBJECT_AVOIDANCE="true"
+OBJECT_AVOID_DISTANCE="1.40"
+OBJECT_STOP="0.50"
+
 VX_LIMIT="0.60"
 VY_LIMIT="0.20"
 STOP_DIST="1.00"
@@ -48,11 +52,14 @@ ADJUST_MAX_BALL_RANGE="1.20"
 READY_SAMPLES="10"
 READY_MIN_MSEC="1000"
 READY_DATA_MAX_AGE_MSEC="500"
+SHOOT_PATH_CLEAR_MIN_MSEC="500"
 
 DRY_RUN="false"
 STOPPING="false"
 LEGACY_YAW_LIMIT_USED="false"
 SEARCH_YAW_LIMIT_EXPLICIT="false"
+LEGACY_OBJECT_AVOIDNCE_USED="false"
+OBJECT_STOP_DISTANCE_ALIAS_USED="false"
 
 RUNTIME_SWITCH="$SWITCH_MODE"
 RUNTIME_MANUAL_MODE="$START_MODE"
@@ -66,6 +73,18 @@ LAST_VY="0.0"
 LAST_THETA="0.0"
 LAST_ADJUST_SOURCE="none"
 
+OBSTACLE_STATE="WAITING_FOR_DEPTH"
+OBSTACLE_MODE="unknown"
+NEAREST_OBSTACLE="unknown"
+OBSTACLE_SIDE="none"
+OBSTACLE_DEPTH_AGE_MSEC="unknown"
+OBSTACLE_BALL_STATE="unknown"
+EXPECTED_BALL_X="unknown"
+EXPECTED_BALL_Y="unknown"
+SHOOT_PATH_CLEAR="unknown"
+SHOOT_PATH_CLEAR_SINCE_MSEC=0
+SHOOT_BLOCKED_PROMPTED="false"
+
 READY_COUNT=0
 READY_START_MSEC=0
 LAST_READY_EVIDENCE_MSEC=0
@@ -74,7 +93,9 @@ READY_PROMPTED="false"
 LAST_READINESS_REASON="not evaluated"
 CHASE_STOP_PROMPTED="false"
 MONITOR_LINE=0
-MONITOR_BATCH_LINES=10
+# Drain every pending line each loop. A fixed small batch falls behind the
+# 100 Hz brain diagnostics and can leave shooting-path readiness stale.
+MONITOR_BATCH_LINES=0
 
 VISION_PID=""
 BRAIN_PID=""
@@ -96,6 +117,13 @@ Control:
   role=striker                        # striker | goal_keeper
   team_id=5
   player_id=1
+
+Obstacle avoidance:
+  object_avoidance=true               # true | false
+  object_avoid_distance=1.40          # begin detouring at this distance (m)
+  object_stop=0.50                    # emergency/blocked-path stop distance (m)
+  object_avoidnce=true                # deprecated typo alias
+  object_stop_distance=0.50           # compatibility alias for object_stop
 
 Tracking and rotation:
   stop_angle=0.10
@@ -203,6 +231,9 @@ Example:
     adjust_turn_first_threshold=0.50 \
     adjust_fixed_head_yaw=0.00 \
     adjust_max_ball_range=2.20 \
+    object_avoidance=true \
+    object_avoid_distance=1.40 \
+    object_stop=0.50 \
     ready_samples=10 \
     ready_min_msec=1000
 
@@ -277,6 +308,15 @@ set_value() {
       REQUIRE_PLAY="$(normalize_bool "$key" "$value")"
       return
       ;;
+    object_avoidance)
+      OBJECT_AVOIDANCE="$(normalize_bool "$key" "$value")"
+      return
+      ;;
+    object_avoidnce)
+      OBJECT_AVOIDANCE="$(normalize_bool "$key" "$value")"
+      LEGACY_OBJECT_AVOIDNCE_USED="true"
+      return
+      ;;
     role)
       [[ "$value" == "striker" || "$value" == "goal_keeper" ]] ||
         { echo "Invalid role: ${value}; expected striker or goal_keeper" >&2; exit 2; }
@@ -339,6 +379,12 @@ set_value() {
     adjust_turn_first_threshold) ADJUST_TURN_FIRST_THRESHOLD="$value" ;;
     adjust_fixed_head_yaw) ADJUST_FIXED_HEAD_YAW="$value" ;;
     adjust_max_ball_range) ADJUST_MAX_BALL_RANGE="$value" ;;
+    object_avoid_distance) OBJECT_AVOID_DISTANCE="$value" ;;
+    object_stop) OBJECT_STOP="$value" ;;
+    object_stop_distance)
+      OBJECT_STOP="$value"
+      OBJECT_STOP_DISTANCE_ALIAS_USED="true"
+      ;;
     ready_samples) READY_SAMPLES="$value" ;;
     ready_min_msec) READY_MIN_MSEC="$value" ;;
     ready_data_max_age_msec) READY_DATA_MAX_AGE_MSEC="$value" ;;
@@ -394,6 +440,26 @@ validate_settings() {
     exit 2
   }
 
+  float_lt "0" "$OBJECT_STOP" || {
+    echo "Invalid obstacle stop distance: object_stop (${OBJECT_STOP}) must be greater than 0." >&2
+    exit 2
+  }
+
+  float_lt "$OBJECT_STOP" "$OBJECT_AVOID_DISTANCE" || {
+    echo "Invalid obstacle distances: object_stop (${OBJECT_STOP}) must be less than object_avoid_distance (${OBJECT_AVOID_DISTANCE})." >&2
+    exit 2
+  }
+
+  float_le "$OBJECT_AVOID_DISTANCE" "3.0" || {
+    echo "Invalid obstacle avoid distance: object_avoid_distance (${OBJECT_AVOID_DISTANCE}) must not exceed the 3.0 m depth-map range." >&2
+    exit 2
+  }
+
+  if [[ "$OBJECT_AVOIDANCE" == "false" ]]; then
+    OBSTACLE_STATE="DISABLED"
+    SHOOT_PATH_CLEAR="true"
+  fi
+
 }
 
 print_settings() {
@@ -405,6 +471,10 @@ Autonomous run settings:
   role=${ROLE}
   team_id=${TEAM_ID}
   player_id=${PLAYER_ID}
+
+  object_avoidance=${OBJECT_AVOIDANCE}
+  object_avoid_distance=${OBJECT_AVOID_DISTANCE}
+  object_stop=${OBJECT_STOP}
 
   vx_limit=${VX_LIMIT}
   vy_limit=${VY_LIMIT}
@@ -449,6 +519,16 @@ SETTINGS
   if [[ "$LEGACY_YAW_LIMIT_USED" == "true" ]]; then
     echo
     echo "Warning: yaw_limit is deprecated; use search_yaw_limit."
+  fi
+
+  if [[ "$LEGACY_OBJECT_AVOIDNCE_USED" == "true" ]]; then
+    echo
+    echo "Warning: object_avoidnce is deprecated; use object_avoidance."
+  fi
+
+  if [[ "$OBJECT_STOP_DISTANCE_ALIAS_USED" == "true" ]]; then
+    echo
+    echo "Note: object_stop_distance is a compatibility alias for object_stop."
   fi
 
   if float_lt "$STOP_DIST" "$ADJUST_TARGET_RANGE"; then
@@ -517,6 +597,17 @@ reset_readiness() {
   READY_PROMPTED="false"
 }
 
+mark_shoot_path_blocked() {
+  SHOOT_PATH_CLEAR_SINCE_MSEC=0
+  reset_readiness "shooting corridor is blocked or obstacle data is stale"
+
+  if [[ "$ACTIVE_BEHAVIOR" == "adjust" && "$SHOOT_BLOCKED_PROMPTED" != "true" ]]; then
+    SHOOT_BLOCKED_PROMPTED="true"
+    echo
+    echo "OBJECT IN WAY OF SHOOTING"
+  fi
+}
+
 evaluate_adjust_readiness() {
   local ball_range="$1"
   local range_error="$2"
@@ -529,6 +620,27 @@ evaluate_adjust_readiness() {
   local now
   local elapsed
   local failure_reason
+
+  now="$(now_msec)"
+  if [[ "$OBJECT_AVOIDANCE" == "true" ]]; then
+    if [[ "$SHOOT_PATH_CLEAR" == "false" ]]; then
+      mark_shoot_path_blocked
+      return
+    fi
+    if [[ "$SHOOT_PATH_CLEAR" != "true" ]]; then
+      reset_readiness "waiting for obstacle safety to evaluate the shooting corridor"
+      return
+    fi
+
+    if ((SHOOT_PATH_CLEAR_SINCE_MSEC == 0)); then
+      SHOOT_PATH_CLEAR_SINCE_MSEC="$now"
+    fi
+    elapsed=$((now - SHOOT_PATH_CLEAR_SINCE_MSEC))
+    if ((elapsed < SHOOT_PATH_CLEAR_MIN_MSEC)); then
+      reset_readiness "shooting corridor clear for ${elapsed}/${SHOOT_PATH_CLEAR_MIN_MSEC}ms"
+      return
+    fi
+  fi
 
   failure_reason="$(awk \
     -v ball_range="$ball_range" \
@@ -579,7 +691,6 @@ evaluate_adjust_readiness() {
     ')"
 
   if [[ -z "$failure_reason" ]]; then
-    now="$(now_msec)"
     if ((READY_COUNT == 0)); then
       READY_START_MSEC="$now"
     fi
@@ -608,7 +719,7 @@ evaluate_adjust_readiness() {
 
 process_log_line() {
   local line="$1"
-  local number_re='[-+]?[0-9]*[.]?[0-9]+'
+  local number_re='[-+]?[0-9]*[.]?[0-9]+|[-+]?[Ii][Nn][Ff]|[Nn][Aa][Nn]'
   local pattern
 
   pattern='Autonomy switch => auto [(]phase: (track|chase|adjust)[)]'
@@ -699,6 +810,39 @@ process_log_line() {
     else
       reset_readiness "ShootingAdjust/vector diagnostic line could not be parsed"
     fi
+  elif [[ "$line" == *"ObstacleAvoidance/state"* ]]; then
+    pattern="state: ([A-Z_]+) mode: ([a-z]+) nearest: (${number_re}) side: ([A-Za-z_]+) depthAgeMs: (${number_re}) ballState: ([A-Z_]+) expectedBallX: (${number_re}) expectedBallY: (${number_re}) shootPathClear: (true|false) vx: (${number_re}) vy: (${number_re}) theta: (${number_re})"
+    if [[ "$line" =~ $pattern ]]; then
+      OBSTACLE_STATE="${BASH_REMATCH[1]}"
+      OBSTACLE_MODE="${BASH_REMATCH[2]}"
+      NEAREST_OBSTACLE="${BASH_REMATCH[3]}"
+      OBSTACLE_SIDE="${BASH_REMATCH[4]}"
+      OBSTACLE_DEPTH_AGE_MSEC="${BASH_REMATCH[5]}"
+      OBSTACLE_BALL_STATE="${BASH_REMATCH[6]}"
+      EXPECTED_BALL_X="${BASH_REMATCH[7]}"
+      EXPECTED_BALL_Y="${BASH_REMATCH[8]}"
+      LAST_VX="${BASH_REMATCH[10]}"
+      LAST_VY="${BASH_REMATCH[11]}"
+      LAST_THETA="${BASH_REMATCH[12]}"
+
+      if [[ "${BASH_REMATCH[9]}" == "true" ]]; then
+        if [[ "$ACTIVE_BEHAVIOR" == "adjust" &&
+              ( "$SHOOT_PATH_CLEAR" != "true" || "$SHOOT_PATH_CLEAR_SINCE_MSEC" == "0" ) ]]; then
+          SHOOT_PATH_CLEAR_SINCE_MSEC="$(now_msec)"
+        elif [[ "$ACTIVE_BEHAVIOR" != "adjust" ]]; then
+          SHOOT_PATH_CLEAR_SINCE_MSEC=0
+        fi
+        SHOOT_PATH_CLEAR="true"
+        SHOOT_BLOCKED_PROMPTED="false"
+      else
+        SHOOT_PATH_CLEAR="false"
+        if [[ "$ACTIVE_BEHAVIOR" == "adjust" ]]; then
+          mark_shoot_path_blocked
+        else
+          SHOOT_PATH_CLEAR_SINCE_MSEC=0
+        fi
+      fi
+    fi
   elif [[ "$line" == *"RobotClient/setVelocity_out"* ]]; then
     pattern="vx: (${number_re}).*vy: (${number_re}).*vtheta: (${number_re})"
     if [[ "$line" =~ $pattern ]]; then
@@ -775,6 +919,15 @@ Autonomous status:
   last ball range: ${LAST_BALL_RANGE}
   last adjustment source: ${LAST_ADJUST_SOURCE}
   last velocity: vx=${LAST_VX} vy=${LAST_VY} theta=${LAST_THETA}
+  obstacle avoidance configured: ${OBJECT_AVOIDANCE}
+  obstacle state: ${OBSTACLE_STATE}
+  obstacle mode: ${OBSTACLE_MODE}
+  nearest obstacle: ${NEAREST_OBSTACLE} m
+  chosen side: ${OBSTACLE_SIDE}
+  obstacle depth age: ${OBSTACLE_DEPTH_AGE_MSEC} ms
+  obstacle ball state: ${OBSTACLE_BALL_STATE}
+  expected ball: x=${EXPECTED_BALL_X} y=${EXPECTED_BALL_Y}
+  shooting path clear: ${SHOOT_PATH_CLEAR}
   shoot ready: ${SHOOT_READY}
   readiness progress: samples=${READY_COUNT}/${READY_SAMPLES}, elapsed=${readiness_elapsed}/${READY_MIN_MSEC}ms
   readiness diagnostic: ${LAST_READINESS_REASON}
@@ -868,6 +1021,15 @@ select_auto_switch() {
 send_shoot() {
   local shoot_result
 
+  if [[ "$OBJECT_AVOIDANCE" == "true" &&
+        ( "$SHOOT_PATH_CLEAR" != "true" ||
+          "$OBSTACLE_STATE" == "WAITING_FOR_DEPTH" ||
+          "$OBSTACLE_STATE" == "SENSOR_STALE" ||
+          "$OBSTACLE_STATE" == "HOLD_BLOCKED" ||
+          "$OBSTACLE_STATE" == "STOP_DISTANCE" ) ]]; then
+    echo "Warning: obstacle safety reports a blocked, unknown, or stale shooting path; manual shoot remains unconditional." >&2
+  fi
+
   echo "Operator shoot received. Sending the standalone shoot command immediately..."
   set +e
   ./scripts/shoot_once.sh
@@ -935,6 +1097,7 @@ write_tree() {
   local tree_path="$1"
   local stop_condition
   local run_condition
+  local rgb_track_condition
 
   if [[ "$REQUIRE_PLAY" == "true" ]]; then
     stop_condition="!autonomy_enabled || gc_game_state!='PLAY'"
@@ -942,6 +1105,15 @@ write_tree() {
   else
     stop_condition="!autonomy_enabled || gc_game_state=='END'"
     run_condition="autonomy_enabled &amp;&amp; gc_game_state!='END'"
+  fi
+
+  if [[ "$OBJECT_AVOIDANCE" == "true" ]]; then
+    # Enabled safety tracks an RGB-only reacquisition with the head while the
+    # ObstacleAvoidance node holds translation until metric depth returns.
+    rgb_track_condition="ball_visible"
+  else
+    # Preserve the exact legacy branch selection when avoidance is disabled.
+    rgb_track_condition="ball_visible &amp;&amp; ball_depth_acquired"
   fi
 
   cat > "$tree_path" <<XML
@@ -958,20 +1130,26 @@ write_tree() {
                     head_deadband_x_px="${HEAD_DEADBAND_X_PX}"
                     head_deadband_y_px="${HEAD_DEADBAND_Y_PX}"
                     theta="{tracking_theta}" />
-      <Script code="autonomy_command_vx=0.0; autonomy_command_vy=0.0; autonomy_command_theta=tracking_theta; autonomy_apply_min_theta=true" />
+      <Script code="autonomy_motion_mode='track'; autonomy_command_vx=0.0; autonomy_command_vy=0.0; autonomy_command_theta=tracking_theta; autonomy_command_vx_limit=${VX_LIMIT}; autonomy_command_vy_limit=${VY_LIMIT}; autonomy_command_vtheta_limit=${TRACK_TURN_YAW_LIMIT}; autonomy_apply_min_theta=true" />
     </Sequence>
   </BehaviorTree>
 
   <BehaviorTree ID="SearchBall">
     <Sequence>
-      <CamFindBall yaw_limit="${SEARCH_YAW_LIMIT}"
-                   track_turn_yaw_limit="${TRACK_TURN_YAW_LIMIT}"
-                   loss_turn_pitch_limit="${LOSS_TURN_PITCH_LIMIT}"
-                   head_search_speed="${HEAD_SEARCH_SPEED}"
-                   body_search_speed="${BODY_SEARCH_SPEED}"
-                   cmd_interval_msec="${CMD_INTERVAL_MSEC}"
-                   theta="{tracking_theta}" />
-      <Script code="autonomy_command_vx=0.0; autonomy_command_vy=0.0; autonomy_command_theta=tracking_theta; autonomy_apply_min_theta=false" />
+      <Fallback>
+        <Sequence>
+          <ScriptCondition code="autonomy_obstacle_ball_state=='OCCLUDED_STATIONARY'" />
+          <Script code="tracking_theta=0.0" />
+        </Sequence>
+        <CamFindBall yaw_limit="${SEARCH_YAW_LIMIT}"
+                     track_turn_yaw_limit="${TRACK_TURN_YAW_LIMIT}"
+                     loss_turn_pitch_limit="${LOSS_TURN_PITCH_LIMIT}"
+                     head_search_speed="${HEAD_SEARCH_SPEED}"
+                     body_search_speed="${BODY_SEARCH_SPEED}"
+                     cmd_interval_msec="${CMD_INTERVAL_MSEC}"
+                     theta="{tracking_theta}" />
+      </Fallback>
+      <Script code="autonomy_motion_mode='search'; autonomy_command_vx=0.0; autonomy_command_vy=0.0; autonomy_command_theta=tracking_theta; autonomy_command_vx_limit=${VX_LIMIT}; autonomy_command_vy_limit=${VY_LIMIT}; autonomy_command_vtheta_limit=${BODY_SEARCH_SPEED}; autonomy_apply_min_theta=false" />
     </Sequence>
   </BehaviorTree>
 
@@ -993,7 +1171,7 @@ write_tree() {
                    y_tolerance="${Y_TOLERANCE}"
                    vx="{chase_vx}"
                    vy="{chase_vy}" />
-      <Script code="autonomy_command_vx=chase_vx; autonomy_command_vy=chase_vy; autonomy_command_theta=tracking_theta; autonomy_apply_min_theta=true" />
+      <Script code="autonomy_motion_mode='chase'; autonomy_command_vx=chase_vx; autonomy_command_vy=chase_vy; autonomy_command_theta=tracking_theta; autonomy_command_vx_limit=${VX_LIMIT}; autonomy_command_vy_limit=${VY_LIMIT}; autonomy_command_vtheta_limit=${TRACK_TURN_YAW_LIMIT}; autonomy_apply_min_theta=true" />
     </Sequence>
   </BehaviorTree>
 
@@ -1017,7 +1195,7 @@ write_tree() {
                       vx="{autonomy_adjust_vx}"
                       vy="{autonomy_adjust_vy}"
                       theta="{autonomy_adjust_theta}" />
-      <Script code="autonomy_command_vx=autonomy_adjust_vx; autonomy_command_vy=autonomy_adjust_vy; autonomy_command_theta=autonomy_adjust_theta; autonomy_apply_min_theta=true" />
+      <Script code="autonomy_motion_mode='adjust'; autonomy_command_vx=autonomy_adjust_vx; autonomy_command_vy=autonomy_adjust_vy; autonomy_command_theta=autonomy_adjust_theta; autonomy_command_vx_limit=${ADJUST_VX_LIMIT}; autonomy_command_vy_limit=${ADJUST_VY_LIMIT}; autonomy_command_vtheta_limit=${ADJUST_VTHETA_LIMIT}; autonomy_apply_min_theta=true" />
     </Sequence>
   </BehaviorTree>
 
@@ -1071,15 +1249,41 @@ write_tree() {
             </Sequence>
           </IfThenElse>
           <IfThenElse>
-            <ScriptCondition name="Depth-confirmed RGB acquisition?" code="ball_visible &amp;&amp; ball_depth_acquired" />
+            <ScriptCondition name="RGB ball visible?" code="${rgb_track_condition}" />
             <SubTree ID="TrackVisible" _autoremap="true" />
             <SubTree ID="SearchBall" _autoremap="true" />
           </IfThenElse>
         </IfThenElse>
-        <SetVelocity x="{autonomy_command_vx}"
-                     y="{autonomy_command_vy}"
-                     theta="{autonomy_command_theta}"
-                     apply_min_theta="{autonomy_apply_min_theta}" />
+        <ObstacleAvoidance enabled="${OBJECT_AVOIDANCE}"
+                           mode="{autonomy_motion_mode}"
+                           avoid_distance="${OBJECT_AVOID_DISTANCE}"
+                           stop_distance="${OBJECT_STOP}"
+                           desired_vx="{autonomy_command_vx}"
+                           desired_vy="{autonomy_command_vy}"
+                           desired_theta="{autonomy_command_theta}"
+                           vx_limit="{autonomy_command_vx_limit}"
+                           vy_limit="{autonomy_command_vy_limit}"
+                           vtheta_limit="{autonomy_command_vtheta_limit}"
+                           safe_vx="{autonomy_safe_vx}"
+                           safe_vy="{autonomy_safe_vy}"
+                           safe_theta="{autonomy_safe_theta}"
+                           apply_min_x="{autonomy_safe_apply_min_x}"
+                           apply_min_y="{autonomy_safe_apply_min_y}"
+                           apply_min_theta="{autonomy_safe_apply_min_theta}"
+                           state="{autonomy_obstacle_state}"
+                           nearest_distance="{autonomy_nearest_obstacle}"
+                           side="{autonomy_obstacle_side}"
+                           ball_state="{autonomy_obstacle_ball_state}"
+                           expected_ball_x="{autonomy_expected_ball_x}"
+                           expected_ball_y="{autonomy_expected_ball_y}"
+                           depth_age_ms="{autonomy_obstacle_depth_age_ms}"
+                           shoot_path_clear="{autonomy_shoot_path_clear}" />
+        <SetVelocity x="{autonomy_safe_vx}"
+                     y="{autonomy_safe_vy}"
+                     theta="{autonomy_safe_theta}"
+                     apply_min_x="{autonomy_safe_apply_min_x}"
+                     apply_min_y="{autonomy_safe_apply_min_y}"
+                     apply_min_theta="{autonomy_safe_apply_min_theta}" />
       </ReactiveSequence>
     </Sequence>
   </BehaviorTree>
@@ -1129,6 +1333,9 @@ ros2 launch brain launch.py \
   role:="$ROLE" \
   team_id:="$TEAM_ID" \
   player_id:="$PLAYER_ID" \
+  obstacle_avoidance:="$OBJECT_AVOIDANCE" \
+  object_avoid_distance:="$OBJECT_AVOID_DISTANCE" \
+  object_stop:="$OBJECT_STOP" \
   agent_mode:=false \
   disable_com:=true \
   > brain.log 2>&1 &
@@ -1162,7 +1369,7 @@ else
 fi
 echo "Selected switch=${RUNTIME_SWITCH}, start_mode=${START_MODE}."
 runtime_help
-echo "Diagnostics: tail -f brain.log | grep -E 'CamTrackBall/direct_pixel|CamFindBall/|SimpleChase/vector|ShootingAdjust/vector|RobotClient/setVelocity_out'"
+echo "Diagnostics: tail -f brain.log | grep -E 'CamTrackBall/direct_pixel|CamFindBall/|SimpleChase/vector|ShootingAdjust/vector|ObstacleAvoidance/state|RobotClient/setVelocity_out'"
 
 while true; do
   runtime_iteration
