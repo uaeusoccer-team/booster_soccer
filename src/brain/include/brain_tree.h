@@ -4,6 +4,7 @@
 #include <behaviortree_cpp/behavior_tree.h>
 #include <behaviortree_cpp/bt_factory.h>
 #include <algorithm>
+#include <cstdint>
 
 #include "types.h"
 
@@ -125,7 +126,18 @@ public:
 
     static PortsList providedPorts()
     {
-        return {OutputPort<double>("theta")};
+        return {
+            InputPort<double>("stop_angle", 0.1, "Robot-relative ball yaw deadband"),
+            InputPort<double>("ball_yaw_gain", 4.0, "Body rotation gain applied to robot-relative ball yaw"),
+            InputPort<double>("pitch_turn_gain", 1.0, "Additional body rotation gain per radian of downward head pitch"),
+            InputPort<double>("track_turn_yaw_limit", 0.75, "Observed absolute head yaw that qualifies a later RGB-loss fast turn"),
+            InputPort<double>("loss_turn_pitch_limit", 0.70, "Observed downward head pitch that qualifies a later RGB-loss fast turn"),
+            InputPort<double>("head_step_rad", 0.04, "Normal head yaw/pitch step per new vision frame (rad)"),
+            InputPort<double>("head_settle_step_rad", 0.02, "Head yaw/pitch step near the pixel deadband (rad)"),
+            InputPort<double>("head_deadband_x_px", 35.0, "Horizontal head tracking deadband (px)"),
+            InputPort<double>("head_deadband_y_px", 35.0, "Vertical head tracking deadband (px)"),
+            OutputPort<double>("theta")
+        };
     }
     NodeStatus tick() override;
 
@@ -144,25 +156,34 @@ public:
     static PortsList providedPorts()
     {
         return {
-            InputPort<double>("low_pitch", 1.0, "Lowest pitch used while sweeping for the ball"),
-            InputPort<double>("high_pitch", 0.45, "Highest pitch used while sweeping for the ball"),
-            InputPort<double>("yaw_limit", 1.1, "Maximum absolute yaw used while sweeping for the ball"),
-            InputPort<double>("sweep_msec", 3000.0, "Milliseconds for one left-right-left head sweep"),
-            InputPort<double>("pitch_cycle_msec", 6000.0, "Milliseconds for one high-low-high pitch cycle"),
+            InputPort<double>("yaw_limit", 1.15, "Maximum absolute head yaw used by the ball search"),
+            InputPort<double>("track_turn_yaw_limit", 0.75, "Last observed absolute head yaw that enables a fast same-direction turn after RGB loss"),
+            InputPort<double>("loss_turn_pitch_limit", 0.70, "Last observed downward head pitch that enables a fast same-direction turn after RGB loss"),
+            InputPort<double>("head_search_speed", 0.20, "Head yaw scan speed"),
+            InputPort<double>("body_search_speed", 0.45, "Exact body yaw speed used for an RGB yaw/pitch-triggered turn after ball loss"),
             InputPort<double>("cmd_interval_msec", 100.0, "Minimum time between head commands"),
-            InputPort<bool>("turn_body_on_loss", true, "Rotate toward the most recent ball yaw for a short time after losing sight"),
-            InputPort<double>("lost_turn_msec", 1200.0, "Milliseconds to keep turning toward the recent lost-ball direction"),
-            InputPort<double>("lost_turn_speed", 0.25, "Body yaw speed while turning toward a recently lost ball"),
-            InputPort<double>("lost_turn_min_yaw", 0.08, "Minimum remembered ball yaw required before body turn is used"),
+            OutputPort<double>("theta")
         };
     }
 
     NodeStatus tick() override;
 
 private:
-    rclcpp::Time _timeSearchStart;
+    enum class SearchMode
+    {
+        HEAD_SCAN,
+        CONTINUE_TURN
+    };
+
     rclcpp::Time _timeLastCmd;
-    long _cmdRestartIntervalMSec;
+    std::uint64_t _searchBallGeneration = 0;
+    SearchMode _searchMode = SearchMode::HEAD_SCAN;
+    bool _searchInitialized = false;
+    bool _waitingForObservationLogged = false;
+    double _searchYaw = 0.0;
+    double _searchPitch = 0.0;
+    double _searchDirection = 0.0;
+    double _alternateScanDirection = 1.0;
 
     Brain *brain;
 
@@ -555,6 +576,9 @@ public:
             InputPort<double>("x", 0, "Default x is 0"),
             InputPort<double>("y", 0, "Default y is 0"),
             InputPort<double>("theta", 0, "Default  theta is 0"),
+            InputPort<bool>("apply_min_x", true, "Raise small nonzero x commands to the configured minimum"),
+            InputPort<bool>("apply_min_y", true, "Raise small nonzero y commands to the configured minimum"),
+            InputPort<bool>("apply_min_theta", true, "Raise small nonzero theta commands to the configured minimum"),
         };
     }
 
@@ -691,17 +715,11 @@ public:
     {
         return {
             InputPort<double>("stop_dist", 1.0, "Distance from the ball to stop moving towards it"),
-            InputPort<double>("stop_angle", 0.1, "Angle of the ball to stop turning towards it"),
             InputPort<double>("y_tolerance", 0.03, "Sideways ball offset under which SimpleChase will not command lateral motion"),
-            InputPort<double>("body_turn_speed", 0.25, "Angular speed used to rotate the body when tracked head yaw is near its edge"),
-            InputPort<double>("head_turn_start_ratio", 0.75, "Head yaw limit ratio where body rotation starts while tracking the ball"),
-            InputPort<double>("head_turn_stop_ratio", 0.65, "Head yaw limit ratio where body rotation hands back to normal ball-yaw turning"),
-            InputPort<double>("final_head_yaw_min", "Minimum accepted head yaw when stopped near the ball; omit to disable final head-yaw check"),
-            InputPort<double>("final_head_yaw_max", "Maximum accepted head yaw when stopped near the ball; omit to disable final head-yaw check"),
-            InputPort<double>("final_ball_yaw_min", "Minimum accepted ball yaw when stopped near the ball; defaults to -stop_angle"),
-            InputPort<double>("final_ball_yaw_max", "Maximum accepted ball yaw when stopped near the ball; defaults to stop_angle"),
             InputPort<double>("vy_limit", 0.2, "Limit Y direction speed to prevent walking instability. Must be less than the robot's maximum speed 0.4 to take effect"),
             InputPort<double>("vx_limit", 0.6, "Limit X direction speed to prevent walking instability. Must be less than the robot's maximum speed 1.2 to take effect"),
+            OutputPort<double>("vx"),
+            OutputPort<double>("vy")
         };
     }
 
@@ -711,6 +729,48 @@ private:
     Brain *brain;
 };
 
+
+/**
+ * @brief Fine robot-relative positioning for a shooting pose.
+ *
+ * Commands one fixed head yaw for each ball acquisition, then publishes vx,
+ * vy, and theta outputs. The caller owns the single SetVelocity command.
+ */
+class ShootingAdjust : public SyncActionNode
+{
+public:
+    ShootingAdjust(const string &name, const NodeConfig &config, Brain *_brain) : SyncActionNode(name, config), brain(_brain) {}
+
+    static PortsList providedPorts()
+    {
+        return {
+            InputPort<double>("target_range", 0.40, "Desired forward ball position in the robot frame (m)"),
+            InputPort<double>("target_y_offset", 0.0, "Desired lateral ball position in the robot frame (m)"),
+            InputPort<double>("theta_offset", 0.0, "Desired robot-relative ball yaw (rad)"),
+            InputPort<double>("range_tolerance", 0.06, "Forward position deadband (m)"),
+            InputPort<double>("y_tolerance", 0.05, "Lateral position deadband (m)"),
+            InputPort<double>("stop_angle", 0.10, "Yaw deadband around theta_offset (rad)"),
+            InputPort<double>("range_gain", 1.0, "Forward position gain"),
+            InputPort<double>("y_gain", 1.0, "Lateral position gain"),
+            InputPort<double>("ball_yaw_gain", 4.0, "Yaw gain outside the deadband"),
+            InputPort<double>("vx_limit", 0.4, "Forward speed limit (m/s)"),
+            InputPort<double>("vy_limit", 0.4, "Lateral speed limit (m/s)"),
+            InputPort<double>("vtheta_limit", 0.8, "Body yaw speed limit (rad/s)"),
+            InputPort<double>("turn_first_threshold", 0.50, "Stop translation while yaw error exceeds this angle (rad); zero disables it"),
+            InputPort<double>("fixed_head_yaw", 0.0, "Head yaw commanded once whenever the ball is acquired (rad)"),
+            InputPort<double>("max_ball_range", 1.20, "Maximum depth range that enables shooting-adjustment body motion (m)"),
+            OutputPort<double>("vx"),
+            OutputPort<double>("vy"),
+            OutputPort<double>("theta")
+        };
+    }
+
+    NodeStatus tick() override;
+
+private:
+    Brain *brain;
+    std::uint64_t _fixedHeadCommandGeneration = 0;
+};
 
 class CalibrateOdom : public SyncActionNode
 {

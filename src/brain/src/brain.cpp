@@ -1,6 +1,5 @@
-#include <algorithm>
-#include <cmath>
 #include <iostream>
+#include <cmath>
 #include <string>
 #include <fstream> 
 #include <yaml-cpp/yaml.h>
@@ -60,7 +59,7 @@ Brain::Brain() : rclcpp::Node("brain_node")
     declare_parameter<double>("robot.min_vy", 0.3);
     declare_parameter<double>("robot.min_vtheta", 0.2);
 
-    declare_parameter<double>("strategy.ball_confidence_threshold", 50.0);   
+    declare_parameter<double>("strategy.ball_confidence_threshold", 50.0);
     declare_parameter<double>("strategy.ball_memory_timeout", 3.0);
     declare_parameter<double>("strategy.tm_ball_dist_threshold", 3.0);
     declare_parameter<bool>("strategy.limit_near_ball_speed", true);
@@ -173,10 +172,6 @@ void Brain::init()
     data->timeLastLineDet = get_clock()->now();
     data->timeLastGamecontrolMsg = get_clock()->now();
     data->ball.timePoint = get_clock()->now();
-    data->visualBall.timePoint = get_clock()->now();
-    data->motionBall.timePoint = get_clock()->now();
-    data->ballMotionReceivedTime = get_clock()->now();
-    data->ballVisualReceivedTime = get_clock()->now();
 
     
     auto now = get_clock()->now();
@@ -321,30 +316,6 @@ void Brain::loadConfig()
 
 void Brain::tick()
 {
-    std::lock_guard<std::mutex> ballStateLock(data->ballStateMutex);
-
-    constexpr double CURRENT_BALL_TIMEOUT_MSEC = 250.0;
-    const auto now = get_clock()->now();
-    if (data->ballMotionValid &&
-        data->ballMotionReceivedTime.nanoseconds() > 0 &&
-        (now - data->ballMotionReceivedTime).nanoseconds() / 1e6 > CURRENT_BALL_TIMEOUT_MSEC)
-    {
-        data->ballMotionValid = false;
-        data->motionBall = GameObject{};
-        tree->setEntry<bool>("ball_motion_valid", false);
-        tree->setEntry<bool>("ball_out", false);
-        client->setVelocity(0.0, 0.0, 0.0);
-    }
-    if (data->ballVisible &&
-        data->ballVisualReceivedTime.nanoseconds() > 0 &&
-        (now - data->ballVisualReceivedTime).nanoseconds() / 1e6 > CURRENT_BALL_TIMEOUT_MSEC)
-    {
-        data->ballVisible = false;
-        data->ballDetected = false;
-        data->visualBall = GameObject{};
-        tree->setEntry<bool>("ball_visible", false);
-    }
-
     // Output debug & log related information
     logDebugInfo();
     logLags();
@@ -473,13 +444,8 @@ void Brain::handleCooperation() {
     log_(format("Find ball info among %d alive TMs", aliveTmIdxs.size()));
     for (int i = 0; i < aliveTmIdxs.size(); i++) {
         auto status = data->tmStatus[aliveTmIdxs[i]];
-        log_(format("TM %d, ballLocationKnown: %d, ballRange: %.1f", i + 1, status.ballLocationKnown, status.ballRange));
-        const bool teammatePositionFinite =
-            std::isfinite(status.ballPosToField.x) &&
-            std::isfinite(status.ballPosToField.y) &&
-            std::isfinite(status.ballPosToField.z) &&
-            std::isfinite(status.ballRange);
-        if (status.ballLocationKnown && teammatePositionFinite && status.ballRange > 1e-4 && status.ballRange < minRange) {
+        log_(format("TM %d, ballDetected: %d, ballRange: %.1f", i + 1, status.ballDetected, status.ballRange));
+        if (status.ballDetected && status.ballRange < minRange) {
             log_(format("tm ball range(%.1f) < minRange(%.1f)", status.ballRange, minRange));
             double dist = norm(status.ballPosToField.x - data->robotPoseToField.x, status.ballPosToField.y - data->robotPoseToField.y);
             if (dist > RANGE_THRESHOLD) {
@@ -494,17 +460,14 @@ void Brain::handleCooperation() {
     if (trustedTMIdx >= 0) { // Teammate saw the ball
         log_(format("Reliable tm ball found. PlayerID = %d", trustedTMIdx + 1));
         data->tmBall.posToField = data->tmStatus[trustedTMIdx].ballPosToField;
-        data->tmBall.confidence = data->tmStatus[trustedTMIdx].ballConfidence;
-        data->tmBall.timePoint = get_clock()->now();
         updateRelativePos(data->tmBall);
 
         tree->setEntry<bool>("tm_ball_pos_reliable", true);
         lastTmBallPosTime = get_clock()->now();
-        if (!data->ballMotionValid) {
+        if (!tree->getEntry<bool>("ball_location_known")) { // If I have forgotten, but the teammate's information is reliable, update my memory of the ball's position with the teammate's information.
             log_("update ball.posToField");
-            data->ball = data->tmBall;
-            data->ball.timePoint = get_clock()->now();
-            tree->setEntry<bool>("ball_location_known", true);
+            data->ball.posToField = data->tmBall.posToField;
+            updateRelativePos(data->ball);
         }
     } else {
         log_("TM reported NO BALL or can not be trusted");
@@ -545,10 +508,9 @@ void Brain::handleCooperation() {
     for (int i = 0; i < aliveTmIdxs.size(); i++) {
         int tmIdx = aliveTmIdxs[i];
         auto tmStatus = data->tmStatus[tmIdx];
-        if (tmIdx < selfIdx && tmStatus.role == "striker") myStrikerIDRank++;
-        if (!tmStatus.ballLocationKnown) continue;
         if (tmStatus.cost < tmMinCost) tmMinCost = tmStatus.cost;
         if (tmStatus.cost < data->tmMyCost) myCostRank++;
+        if (tmIdx < selfIdx && tmStatus.role == "striker") myStrikerIDRank++;
     }
     data->tmMyCostRank = myCostRank;
     data->myStrikerIDRank = myStrikerIDRank;
@@ -670,9 +632,8 @@ void Brain::updateObstacleMemory() {
 
 
     if (
-        tree->getEntry<bool>("ball_location_known") &&
-        ((config->get_enable_obstacle_avoidance() && isFreekickStartPlacing())
-         || tree->getEntry<string>("gc_game_state") == "READY")
+        (config->get_enable_obstacle_avoidance() && isFreekickStartPlacing())
+        || tree->getEntry<string>("gc_game_state") == "READY"
     ) {
         obs_new.push_back(data->ball);
     }
@@ -687,26 +648,16 @@ void Brain::updateBallMemory()
     
     double ballMemTimeout = config->get_ball_memory_timeout();
 
-    if (tree->getEntry<bool>("ball_location_known") && secs > ballMemTimeout)
+    if (secs > ballMemTimeout) 
     { 
         tree->setEntry<bool>("ball_location_known", false);
         tree->setEntry<bool>("ball_out", false); 
     }
 
     
-    if (tree->getEntry<bool>("ball_location_known"))
-    {
-        updateRelativePos(data->ball);
-        tree->setEntry<double>("ball_range", data->ball.range);
-    }
-    else
-    {
-        tree->setEntry<double>("ball_range", 0.0);
-    }
-    if (tree->getEntry<bool>("tm_ball_pos_reliable"))
-    {
-        updateRelativePos(data->tmBall);
-    }
+    updateRelativePos(data->ball);
+    updateRelativePos(data->tmBall);
+    tree->setEntry<double>("ball_range", data->ball.range);
 }
 
 void Brain::updateRobotMemory() {
@@ -728,17 +679,15 @@ void Brain::updateRobotMemory() {
 }
 
 void Brain::updateKickoffMemory() {
-
+    
     static Point ballPos;
-    static bool baselineValid = false;
-    static bool wasWaiting = false;
     const double BALL_MOVE_THRESHOLD_FACTOR = 0.15; 
     const double BALL_MOVE_THRESHOLD_MIN = 0.3; 
     auto ballMoved = [=]() {
-        if (!baselineValid || !data->ballMotionValid) return false;
-        double range = data->motionBall.range;
+        if (!data->ballDetected) return false; 
+        double range = data->ball.range;
         double threshold = max(range * BALL_MOVE_THRESHOLD_FACTOR, BALL_MOVE_THRESHOLD_MIN);
-        double posChange = norm(data->motionBall.posToRobot.x - ballPos.x, data->motionBall.posToRobot.y - ballPos.y);
+        double posChange = norm(data->ball.posToRobot.x - ballPos.x, data->ball.posToRobot.y - ballPos.y);
         return posChange > threshold;
     };
     static rclcpp::Time kickOffTime;
@@ -754,14 +703,8 @@ void Brain::updateKickoffMemory() {
         (tree->getEntry<string>("gc_game_sub_state") == "SET" || tree->getEntry<string>("gc_game_sub_state") == "GET_READY")
         && !tree->getEntry<bool>("gc_is_sub_state_kickoff_side")
     );
-    const bool isWaiting = isWaitingForFreekickKickoff || isWaitingForKickoff;
-    if (isWaiting) {
-        if (!wasWaiting) baselineValid = false;
-        if (data->ballMotionValid)
-        {
-            ballPos = data->motionBall.posToRobot;
-            baselineValid = true;
-        }
+    if ( isWaitingForFreekickKickoff || isWaitingForKickoff) {
+        ballPos = data->ball.posToRobot;
         kickOffTime = get_clock()->now();
         tree->setEntry<bool>("wait_for_opponent_kickoff", true);
     } else if (tree->getEntry<bool>("wait_for_opponent_kickoff")) {
@@ -769,7 +712,6 @@ void Brain::updateKickoffMemory() {
             tree->setEntry<bool>("wait_for_opponent_kickoff", false);
         }
     }
-    wasWaiting = isWaiting;
 }
 
 vector<double> Brain::getGoalPostAngles(const double margin)
@@ -824,18 +766,10 @@ void Brain::updateCostToKick() {
     auto log_ = [=](string msg) {
         log->debug("updateCostToKick", msg);
     };
-    if (!data->ballMotionValid)
-    {
-        data->tmMyCost = 1000.0;
-        log_("current Ball position unavailable; cost marked unavailable");
-        return;
-    }
-
-    const auto &currentBall = data->motionBall;
     double cost = 0.;
 
     // ball not detected
-    double secsSinceBallDet = msecsSince(currentBall.timePoint) / 1000;
+    double secsSinceBallDet = msecsSince(data->ball.timePoint) / 1000;
     cost += secsSinceBallDet;
     log_(format("ball not dectect cost: %.1f", secsSinceBallDet));
 
@@ -846,19 +780,19 @@ void Brain::updateCostToKick() {
     }
 
     // cost of chasing the ball
-    cost += currentBall.range;
-    log_(format("ball range cost: %.1f", currentBall.range));
+    cost += data->ball.range;
+    log_(format("ball range cost: %.1f", data->ball.range));
     
     
     // cost of obstacles on the way to the ball
-    if (distToObstacle(currentBall.yawToRobot) < 1.5) {
+    if (distToObstacle(data->ball.yawToRobot) < 1.5) {
         log_(format("obstacle cost: %.1f", 2.0));
         cost += 0.5;
     }
 
     // cost of turning towards the ball
-    cost += fabs(currentBall.yawToRobot) / 1.0;
-    log_(format("ball yaw cost: %.1f", fabs(currentBall.yawToRobot) / 1.0));
+    cost += fabs(data->ball.yawToRobot) / 1.0; 
+    log_(format("ball yaw cost: %.1f", fabs(data->ball.yawToRobot) / 1.0));
 
 
     // cost of bumping into teammates
@@ -867,12 +801,12 @@ void Brain::updateCostToKick() {
         if (i == selfIdx) continue; // Skip self
 
         auto status = data->tmStatus[i]; // Teammate status
-        if (!status.isAlive || !status.ballLocationKnown) continue;
+        if (!status.isAlive) continue; // Skip offline teammates
 
         double theta_tm2ball = atan2(status.ballPosToField.y - status.robotPoseToField.y, status.ballPosToField.x - status.robotPoseToField.x);
         double range_tm2ball = norm(status.ballPosToField.y - status.robotPoseToField.y, status.ballPosToField.x - status.robotPoseToField.x);
         double theta_me2ball = data->robotBallAngleToField;
-        double range_me2ball = currentBall.range;
+        double range_me2ball = data->ball.range;
         double deltaTheta = fabs(toPInPI(theta_tm2ball - theta_me2ball));
 
         const double BUMP_DIST = 1.0;
@@ -955,10 +889,6 @@ bool Brain::isBallOut(double locCompareDist, double lineCompareDist)
 }
 
 void Brain::updateBallOut() {
-    if (!data->ballMotionValid)
-    {
-        return;
-    }
     bool lastBallOut = tree->getEntry<bool>("ball_out");
     double range = lastBallOut ? 4.0 : 2.5;
     double threshold = config->get_ball_out_threshold();
@@ -1023,13 +953,11 @@ void Brain::calibrateOdom(double x, double y, double theta)
 
     double placeHolder;
     // ball
-    if (tree->getEntry<bool>("ball_location_known"))
-    {
-        transCoord(
-            data->ball.posToRobot.x, data->ball.posToRobot.y, 0,
-            data->robotPoseToField.x, data->robotPoseToField.y, data->robotPoseToField.theta,
-            data->ball.posToField.x, data->ball.posToField.y, placeHolder);
-    }
+    transCoord(
+        data->ball.posToRobot.x, data->ball.posToRobot.y, 0,
+        data->robotPoseToField.x, data->robotPoseToField.y, data->robotPoseToField.theta,
+        data->ball.posToField.x, data->ball.posToField.y, placeHolder 
+    );
 
     // robots
     auto robots = data->getRobots();
@@ -1052,7 +980,7 @@ void Brain::calibrateOdom(double x, double y, double theta)
 
     // relog
     vector<GameObject> gameObjects = {};
-    if(data->ballVisible) gameObjects.push_back(data->visualBall);
+    if(data->ballDetected) gameObjects.push_back(data->ball);
     for (int i = 0; i < markings.size(); i++) gameObjects.push_back(markings[i]);
     for (int i = 0; i < robots.size(); i++) gameObjects.push_back(robots[i]);
     for (int i = 0; i < goalposts.size(); i++) gameObjects.push_back(goalposts[i]);
@@ -1061,12 +989,11 @@ void Brain::calibrateOdom(double x, double y, double theta)
 
 void Brain::pubKickMsg() {
     if (!pubKickBall) return;
-    if (!data->ballMotionValid) return;
-    const auto &currentBall = data->motionBall;
+    if (!data->ballDetected) return;
     brain::msg::Kick kickMsg;
     kickMsg.header.stamp = get_clock()->now();
-    kickMsg.x = currentBall.posToRobot.x;
-    kickMsg.y = currentBall.posToRobot.y;
+    kickMsg.x = data->ball.posToRobot.x;
+    kickMsg.y = data->ball.posToRobot.y;
     kickMsg.dir = toPInPI(data->kickDir - data->robotPoseToField.theta);
 
     double goal_x = config->fieldDimensions.length / 2;
@@ -1074,8 +1001,8 @@ void Brain::pubKickMsg() {
     Pose2D goalPose;
     goalPose.x = goal_x;
     goalPose.y = goal_y;
-    double ball_x = currentBall.posToField.x;
-    double ball_y = currentBall.posToField.y;
+    double ball_x = data->ball.posToField.x;
+    double ball_y = data->ball.posToField.y;
     double dist = std::sqrt((goal_x - ball_x) * (goal_x - ball_x) + (goal_y - ball_y) * (goal_y - ball_y));
     dist = std::abs(dist);
     double power = 0.0;
@@ -1321,20 +1248,19 @@ void Brain::detectionsCallback(const vision_interface::msg::Detections &msg)
         const auto &obj = gameObjects[i];
         if (obj.label == "Ball")
             balls.push_back(obj);
-        if (obj.label == "Goalpost" && obj.positionConfidence > 0)
+        if (obj.label == "Goalpost")
             goalposts.push_back(obj);
         if (obj.label == "Person")
         {
             persons.push_back(obj);
 
             // For debugging purposes, you can set treat_person_as_robot in the config to treat Person as Robot
-            if (config->get_treat_person_as_robot() && obj.positionConfidence > 0)
+            if (config->get_treat_person_as_robot())
                 robots.push_back(obj);
         }
-        if (obj.label == "Opponent" && obj.positionConfidence > 0)
+        if (obj.label == "Opponent")
             robots.push_back(obj);
-        if (obj.positionConfidence > 0 &&
-            (obj.label == "LCross" || obj.label == "TCross" || obj.label == "XCross" || obj.label == "PenaltyPoint"))
+        if (obj.label == "LCross" || obj.label == "TCross" || obj.label == "XCross" || obj.label == "PenaltyPoint")
             markings.push_back(obj);
     }
 
@@ -1411,22 +1337,12 @@ void Brain::odometerCallback(const booster_interface::msg::Odometer &msg)
 
 void Brain::lowStateCallback(const booster_interface::msg::LowState &msg)
 {
-    if (msg.motor_state_serial.size() < 2)
-    {
-        return;
-    }
-
-    const double yaw = msg.motor_state_serial[0].q;
-    const double pitch = msg.motor_state_serial[1].q;
-    if (!std::isfinite(yaw) || !std::isfinite(pitch))
-    {
-        return;
-    }
-
-    data->headYaw.store(yaw, std::memory_order_relaxed);
-    data->headPitch.store(pitch, std::memory_order_relaxed);
+    const double headYaw = msg.motor_state_serial[0].q;
+    const double headPitch = msg.motor_state_serial[1].q;
+    data->headYaw.store(headYaw, std::memory_order_relaxed);
+    data->headPitch.store(headPitch, std::memory_order_relaxed);
     data->headStateReceived.store(true, std::memory_order_release);
-    log->debug("head_angles", format("pitch: %.1f, yaw: %.1f", pitch, yaw));
+    log->debug("head_angles", format("pitch: %.1f, yaw: %.1f", headPitch, headYaw));
 }
 
 void Brain::imageCameraInfoCallback(const sensor_msgs::msg::CameraInfo::SharedPtr msg)
@@ -1532,9 +1448,7 @@ int Brain::goalpostCntOnFieldLine(const FieldLine line, const double margin) {
 }
 
 bool Brain::isBallOnFieldLine(const FieldLine line, const double margin) {
-    const auto ballState = data->getBallStateSnapshot();
-    if (!ballState.motionValid) return false;
-    auto ballPos = ballState.motion.posToField;
+    auto ballPos = data->ball.posToField;
     Point2D point = {ballPos.x, ballPos.y}; 
     return fabs(pointPerpDistToLine(point, line.posToField)) < margin;
 }
@@ -1738,7 +1652,7 @@ vector<GameObject> Brain::getGameObjects(const vision_interface::msg::Detections
     for (int i = 0; i < detections.detected_objects.size(); i++)
     {
         auto obj = detections.detected_objects[i];
-        GameObject gObj{};
+        GameObject gObj;
 
         gObj.timePoint = timePoint;
         gObj.label = obj.label;
@@ -1756,27 +1670,40 @@ vector<GameObject> Brain::getGameObjects(const vision_interface::msg::Detections
         gObj.boundingBox.ymin = obj.ymin;
         gObj.confidence = obj.confidence;
 
-        const bool positionUsable =
+        gObj.projectionToRobot = {0.0, 0.0, 0.0};
+        if (obj.position_projection.size() >= 2 &&
+            std::isfinite(obj.position_projection[0]) &&
+            std::isfinite(obj.position_projection[1])) {
+            gObj.projectionToRobot.x = obj.position_projection[0];
+            gObj.projectionToRobot.y = obj.position_projection[1];
+            if (obj.position_projection.size() >= 3 && std::isfinite(obj.position_projection[2])) {
+                gObj.projectionToRobot.z = obj.position_projection[2];
+            }
+        }
+
+        const bool isBall = obj.label == "Ball";
+        const bool hasValidDepthPosition =
+            isBall &&
             obj.position_confidence > 0 &&
             obj.position.size() >= 3 &&
             std::isfinite(obj.position[0]) &&
             std::isfinite(obj.position[1]) &&
             std::isfinite(obj.position[2]) &&
-            std::hypot(
-                std::hypot(static_cast<double>(obj.position[0]), static_cast<double>(obj.position[1])),
-                static_cast<double>(obj.position[2])) > 1e-4;
+            norm(obj.position[0], obj.position[1]) > 0.0001;
 
-        if (positionUsable)
-        {
-            gObj.positionConfidence = obj.position_confidence;
+        gObj.positionConfidence = isBall
+            ? (hasValidDepthPosition ? obj.position_confidence : 0)
+            : obj.position_confidence;
+        if (hasValidDepthPosition) {
             gObj.posToRobot.x = obj.position[0];
             gObj.posToRobot.y = obj.position[1];
             gObj.posToRobot.z = obj.position[2];
-        }
-        else
-        {
-            gObj.positionConfidence = 0;
+        } else if (isBall) {
+            // A visual-only ball may move the head, but it must not supply body
+            // coordinates through the RGB ground projection.
             gObj.posToRobot = {0.0, 0.0, 0.0};
+        } else {
+            gObj.posToRobot = gObj.projectionToRobot;
         }
 
         // Calculate angles
@@ -1785,13 +1712,11 @@ vector<GameObject> Brain::getGameObjects(const vision_interface::msg::Detections
         gObj.pitchToRobot = atan2(config->get_robot_height(), gObj.range); // Note: this is an approximate value
 
         // Calculate the position of the object in the field coordinate system
-        double unusedTheta = 0.0;
         transCoord(
             gObj.posToRobot.x, gObj.posToRobot.y, 0,
             data->robotPoseToField.x, data->robotPoseToField.y, data->robotPoseToField.theta,
-            gObj.posToField.x, gObj.posToField.y, unusedTheta
+            gObj.posToField.x, gObj.posToField.y, gObj.posToField.z // Note: z is not used elsewhere, here it is just a placeholder
         );
-        gObj.posToField.z = gObj.posToRobot.z;
 
         res.push_back(gObj);
     }
@@ -1801,71 +1726,87 @@ vector<GameObject> Brain::getGameObjects(const vision_interface::msg::Detections
 
 void Brain::detectProcessBalls(const vector<GameObject> &ballObjs)
 {
-    std::lock_guard<std::mutex> ballStateLock(data->ballStateMutex);
-    const bool wasMotionValid = data->ballMotionValid.load(std::memory_order_acquire);
-    const bool wasVisualOnly =
-        data->ballVisible.load(std::memory_order_acquire) && !wasMotionValid;
-    static rclcpp::Time lastSeenVisualBallTime;
-    int visualIndex = -1;
-    int motionIndex = -1;
-    bool visualHasPosition = false;
-    double visualConfidence = -1.0;
-    double motionConfidence = -1.0;
+    static rclcpp::Time lastSeenRealBallTime;
+    const bool wasDepthAcquired =
+        data->ballDepthAcquired.load(std::memory_order_acquire);
+    double bestConfidence = -1.0;
+    bool bestHasDepth = false;
+    int indexRealBall = -1;
 
-    for (std::size_t i = 0; i < ballObjs.size(); ++i)
+    for (int i = 0; i < ballObjs.size(); i++)
     {
-        const auto &candidate = ballObjs[i];
-        if (candidate.confidence < config->get_ball_confidence_threshold())
-        {
+        const auto &ballObj = ballObjs[i];
+
+        const bool hasDepth = ballObj.positionConfidence > 0;
+        const double candidateX = hasDepth
+            ? ballObj.posToRobot.x
+            : ballObj.projectionToRobot.x;
+
+        // Prevent misidentifying lights in the sky as balls. Visual-only
+        // candidates use projection for filtering, never for body motion.
+        if (candidateX < -0.5 || candidateX > 15.0)
             continue;
-        }
 
-        const bool bboxValid =
-            candidate.boundingBox.xmax > candidate.boundingBox.xmin &&
-            candidate.boundingBox.ymax > candidate.boundingBox.ymin;
-        const bool positionValid =
-            candidate.positionConfidence > 0 &&
-            std::isfinite(candidate.posToRobot.x) &&
-            std::isfinite(candidate.posToRobot.y) &&
-            std::isfinite(candidate.posToRobot.z) &&
-            std::hypot(std::hypot(candidate.posToRobot.x, candidate.posToRobot.y), candidate.posToRobot.z) > 1e-4;
+        if (ballObj.confidence < config->get_ball_confidence_threshold())
+            continue;
 
-        if (bboxValid &&
-            ((positionValid && !visualHasPosition) ||
-             (positionValid == visualHasPosition && candidate.confidence > visualConfidence)))
+        if ((hasDepth && !bestHasDepth) ||
+            (hasDepth == bestHasDepth && ballObj.confidence > bestConfidence))
         {
-            visualIndex = static_cast<int>(i);
-            visualHasPosition = positionValid;
-            visualConfidence = candidate.confidence;
-        }
-
-        if (positionValid && candidate.confidence > motionConfidence)
-        {
-            motionIndex = static_cast<int>(i);
-            motionConfidence = candidate.confidence;
+            bestConfidence = ballObj.confidence;
+            bestHasDepth = hasDepth;
+            indexRealBall = i;
         }
     }
 
-    const auto now = get_clock()->now();
-    data->ballMotionValid = motionIndex >= 0;
-    data->ballVisible = visualIndex >= 0;
-    data->ballDetected.store(data->ballVisible.load(std::memory_order_acquire), std::memory_order_release);
-    tree->setEntry<bool>("ball_visible", data->ballVisible.load(std::memory_order_acquire));
-    tree->setEntry<bool>("ball_motion_valid", data->ballMotionValid.load(std::memory_order_acquire));
+    auto now = this->get_clock()->now();
 
-    if (data->ballVisible)
-    {
-        data->visualBall = ballObjs[visualIndex];
-        data->ballVisualReceivedTime = now;
-        lastSeenVisualBallTime = now;
+    if (indexRealBall >= 0)
+    { // Ball detected
+        data->ballDetected = true;
+        tree->setEntry<bool>("ball_visible", true);
+
+        data->ball = ballObjs[indexRealBall];
+        data->ball.confidence = bestConfidence;
+        if (!wasDepthAcquired && bestHasDepth)
+        {
+            data->ballDepthAcquired.store(true, std::memory_order_release);
+            data->ballTrackingGeneration.fetch_add(1, std::memory_order_relaxed);
+            log->log(
+                "BallAcquisition",
+                format("Depth-confirmed RGB acquisition accepted; generation: %llu",
+                       static_cast<unsigned long long>(
+                           data->ballTrackingGeneration.load(std::memory_order_relaxed))));
+        }
+
+        const bool depthAcquired =
+            data->ballDepthAcquired.load(std::memory_order_acquire);
+        tree->setEntry<bool>("ball_depth_acquired", depthAcquired);
+        tree->setEntry<bool>("ball_location_known", bestHasDepth);
+        if (bestHasDepth) {
+            updateBallOut();
+        }
+
+        lastSeenRealBallTime = now;
         data->lose_ball = false;
     }
     else
-    {
-        data->visualBall = GameObject{};
-        if (lastSeenVisualBallTime.nanoseconds() > 0)
+    { // No ball detected
+        data->ballDetected = false;
+        data->ballDepthAcquired.store(false, std::memory_order_release);
+        tree->setEntry<bool>("ball_visible", false);
+        tree->setEntry<bool>("ball_location_known", false);
+        tree->setEntry<bool>("ball_depth_acquired", false);
+        if (wasDepthAcquired)
         {
-            data->lose_ball = (now - lastSeenVisualBallTime).nanoseconds() / 1e6 > 2000.0;
+            log->log(
+                "BallAcquisition",
+                "Accepted RGB ball lost; depth-confirmed acquisition latch reset");
+        }
+        if (lastSeenRealBallTime.seconds() > 0.0)
+        {
+            double msecs = (now - lastSeenRealBallTime).nanoseconds() / 1e6;
+            data->lose_ball = (msecs > 2000.0);
         }
         else
         {
@@ -1873,79 +1814,8 @@ void Brain::detectProcessBalls(const vector<GameObject> &ballObjs)
         }
     }
 
-    if (data->ballMotionValid)
-    {
-        data->motionBall = ballObjs[motionIndex];
-        data->ballMotionReceivedTime = now;
-        data->ball = data->motionBall;
-        tree->setEntry<bool>("ball_location_known", true);
-        updateBallOut();
-    }
-    else
-    {
-        // Never replace the remembered location with a visual-only zero vector.
-        data->motionBall = GameObject{};
-        tree->setEntry<bool>("ball_out", false);
-    }
-
-    if (data->ballVisible || data->ballMotionValid)
-    {
-        auto &observation = data->lastBallObservation;
-        observation.recorded = true;
-        observation.timePoint = data->ballVisible
-            ? data->visualBall.timePoint
-            : data->motionBall.timePoint;
-        observation.normalizedBoundingBox = {0.0, 0.0, 0.0, 0.0};
-        observation.normalizedCenter = {0.0, 0.0};
-        observation.pixelCenter = {0.0, 0.0};
-
-        if (data->ballVisible)
-        {
-            observation.pixelCenter = {
-                mean(data->visualBall.boundingBox.xmin, data->visualBall.boundingBox.xmax),
-                mean(data->visualBall.boundingBox.ymin, data->visualBall.boundingBox.ymax)};
-
-            const double imageWidth = static_cast<double>(config->cameraImageWidth);
-            const double imageHeight = static_cast<double>(config->cameraImageHeight);
-            if (imageWidth > 0.0 && imageHeight > 0.0)
-            {
-                observation.normalizedBoundingBox = {
-                    std::clamp(data->visualBall.boundingBox.xmin / imageWidth, 0.0, 1.0),
-                    std::clamp(data->visualBall.boundingBox.xmax / imageWidth, 0.0, 1.0),
-                    std::clamp(data->visualBall.boundingBox.ymin / imageHeight, 0.0, 1.0),
-                    std::clamp(data->visualBall.boundingBox.ymax / imageHeight, 0.0, 1.0)};
-                observation.normalizedCenter = {
-                    std::clamp(observation.pixelCenter.x / imageWidth, 0.0, 1.0),
-                    std::clamp(observation.pixelCenter.y / imageHeight, 0.0, 1.0)};
-            }
-        }
-
-        if (data->ballMotionValid)
-        {
-            observation.lastValidPosition = data->motionBall.posToRobot;
-            observation.hasLastValidPosition = true;
-        }
-        observation.headYaw = data->headYaw.load(std::memory_order_relaxed);
-        observation.headPitch = data->headPitch.load(std::memory_order_relaxed);
-        observation.robotPoseToOdom = data->robotPoseToOdom;
-        observation.robotPoseToField = data->robotPoseToField;
-        observation.bodyTurnDirection = client->getActiveBodyTurnDirection();
-    }
-
-    if (tree->getEntry<bool>("ball_location_known"))
-    {
-        data->robotBallAngleToField = atan2(
-            data->ball.posToField.y - data->robotPoseToField.y,
-            data->ball.posToField.x - data->robotPoseToField.x);
-    }
-
-    const bool isVisualOnly = data->ballVisible.load(std::memory_order_acquire) &&
-                              !data->ballMotionValid.load(std::memory_order_acquire);
-    if ((wasMotionValid && !data->ballMotionValid.load(std::memory_order_acquire)) ||
-        (isVisualOnly && !wasVisualOnly))
-    {
-        client->setVelocity(0.0, 0.0, 0.0);
-    }
+    // Calculate the vector from the robot to the ball in the field coordinate system
+    data->robotBallAngleToField = atan2(data->ball.posToField.y - data->robotPoseToField.y, data->ball.posToField.x - data->robotPoseToField.x);
 }
 
 void Brain::detectProcessMarkings(const vector<GameObject> &markingObjs)
@@ -2088,14 +1958,10 @@ void Brain::logDepth(int grid_x_count, int grid_y_count, vector<vector<int>> &gr
     // Log ball exclusion box
     double r = config->get_ball_exclusion_radius();
     double h = config->get_ball_exclusion_height();
-    const auto ballState = data->getBallStateSnapshot();
-    if (ballState.motionValid)
-    {
-        log->debug(
-            "depth/ball_exclusion_box",
-            format("Ball exclusion box at (%.2f, %.2f) with radius %.2f",
-                   ballState.motion.posToRobot.x, ballState.motion.posToRobot.y, r));
-    }
+    log->debug(
+        "depth/ball_exclusion_box",
+        format("Ball exclusion box at (%.2f, %.2f) with radius %.2f", data->ball.posToRobot.x, data->ball.posToRobot.y, r)
+    );
 }
 
 void Brain::logDebugInfo() {
@@ -2129,7 +1995,7 @@ void Brain::updateRelativePos(GameObject &obj) {
     obj.posToRobot.y = pr.y;
     obj.range = norm(obj.posToRobot.x, obj.posToRobot.y);
     obj.yawToRobot = atan2(obj.posToRobot.y, obj.posToRobot.x);
-    obj.pitchToRobot = atan2(config->get_robot_height(), obj.range);
+    obj.pitchToRobot = asin(config->get_robot_height() / obj.range);
 }
 
 void Brain::updateFieldPos(GameObject &obj) {
@@ -2142,7 +2008,7 @@ void Brain::updateFieldPos(GameObject &obj) {
     obj.posToField.y = pf.y;
     obj.range = norm(obj.posToRobot.x, obj.posToRobot.y);
     obj.yawToRobot = atan2(obj.posToRobot.y, obj.posToRobot.x);
-    obj.pitchToRobot = atan2(config->get_robot_height(), obj.range);
+    obj.pitchToRobot = asin(config->get_robot_height() / obj.range);
 }
 
 void Brain::compressedDepthImageCallback(const sensor_msgs::msg::CompressedImage::SharedPtr msg)
@@ -2224,7 +2090,6 @@ void Brain::depthImageCallback(const sensor_msgs::msg::Image::ConstSharedPtr &ms
 void Brain::processDepthImage(const cv::Mat &depthFloat, int width, int height, const std_msgs::msg::Header &header)
 {
     try {
-        const auto ballState = data->getBallStateSnapshot();
         vector<std::array<float, 3>> points_robot;  // for log
 
         const double fx = config->depthCameraFx;
@@ -2282,9 +2147,8 @@ void Brain::processDepthImage(const cv::Mat &depthFloat, int width, int height, 
                     auto isBall = [&]() {
                         double r = config->get_ball_exclusion_radius();
                         double h = config->get_ball_exclusion_height();
-                        return ballState.motionValid
-                            && fabs(point_robot(0) - ballState.motion.posToRobot.x) < r
-                            && fabs(point_robot(1) - ballState.motion.posToRobot.y) < r
+                        return fabs(point_robot(0) - data->ball.posToRobot.x) < r 
+                            && fabs(point_robot(1) - data->ball.posToRobot.y) < r
                             && point_robot(2) < h;
                     };
 
@@ -2329,8 +2193,9 @@ void Brain::processDepthImage(const cv::Mat &depthFloat, int width, int height, 
         // Clean up old obstacles
         for (int i = 0; i < obs_old.size(); i++) {
            // First, clear old obstacles within the current field of view. Note that the angle is only roughly calculated, and the range is appropriately expanded using an offset.
-            double visionLeft = data->headYaw + config->depthCameraFovX / 2;
-            double visionRight = data->headYaw - config->depthCameraFovX / 2;
+            const double headYaw = data->headYaw.load(std::memory_order_relaxed);
+            double visionLeft = headYaw + config->depthCameraFovX / 2;
+            double visionRight = headYaw - config->depthCameraFovX / 2;
             auto obs = obs_old[i];
             const double offset = 0.20;
             double obsYawLeft = atan2(obs.posToRobot.y - offset, obs.posToRobot.x + offset);
@@ -2581,6 +2446,76 @@ bool Brain::isFreekickStartPlacing() {
 void Brain::agentCommandCallback(const std_msgs::msg::String::SharedPtr msg) {
     RCLCPP_INFO(get_logger(), "Received agent command: %s", msg->data.c_str());
 
+    if (msg->data == "autonomy_stop") {
+        tree->setEntry<bool>("autonomy_enabled", false);
+        tree->setEntry<double>("autonomy_command_vx", 0.0);
+        tree->setEntry<double>("autonomy_command_vy", 0.0);
+        tree->setEntry<double>("autonomy_command_theta", 0.0);
+        client->setVelocity(0.0, 0.0, 0.0);
+        RCLCPP_INFO(get_logger(), "Autonomy disabled with zero velocity");
+        return;
+    }
+
+    if (msg->data == "autonomy_save_track" ||
+        msg->data == "autonomy_save_chase" ||
+        msg->data == "autonomy_save_adjust") {
+        const string phase = msg->data.substr(string("autonomy_save_").size());
+        tree->setEntry<string>("autonomy_auto_phase", phase);
+        RCLCPP_INFO(get_logger(), "Autonomy saved phase => %s", phase.c_str());
+        return;
+    }
+
+    if (msg->data == "autonomy_auto_track" ||
+        msg->data == "autonomy_auto_chase" ||
+        msg->data == "autonomy_auto_adjust") {
+        const string phase = msg->data.substr(string("autonomy_auto_").size());
+        tree->setEntry<string>("autonomy_auto_phase", phase);
+        tree->setEntry<string>("autonomy_switch", "auto");
+        tree->setEntry<bool>("autonomy_enabled", true);
+        RCLCPP_INFO(get_logger(), "Autonomy switch => auto (phase: %s)", phase.c_str());
+        return;
+    }
+
+    if (msg->data == "autonomy_auto") {
+        const string manual_mode = tree->getEntry<string>("autonomy_manual_mode");
+        if (manual_mode == "chase" || manual_mode == "adjust") {
+            tree->setEntry<string>("autonomy_auto_phase", manual_mode);
+        }
+        tree->setEntry<string>("autonomy_switch", "auto");
+        tree->setEntry<bool>("autonomy_enabled", true);
+        RCLCPP_INFO(
+            get_logger(),
+            "Autonomy switch => auto (phase: %s)",
+            tree->getEntry<string>("autonomy_auto_phase").c_str());
+        return;
+    }
+
+    if (msg->data == "autonomy_manual") {
+        if (tree->getEntry<string>("autonomy_switch") == "auto") {
+            tree->setEntry<string>(
+                "autonomy_manual_mode",
+                tree->getEntry<string>("autonomy_auto_phase"));
+        }
+        tree->setEntry<string>("autonomy_switch", "manual");
+        tree->setEntry<bool>("autonomy_enabled", true);
+        RCLCPP_INFO(
+            get_logger(),
+            "Autonomy switch => manual (mode: %s)",
+            tree->getEntry<string>("autonomy_manual_mode").c_str());
+        return;
+    }
+
+    if (msg->data == "autonomy_track" ||
+        msg->data == "autonomy_chase" ||
+        msg->data == "autonomy_adjust") {
+        const string mode = msg->data.substr(string("autonomy_").size());
+        tree->setEntry<string>("autonomy_manual_mode", mode);
+        tree->setEntry<string>("autonomy_switch", "manual");
+        tree->setEntry<bool>("autonomy_enabled", true);
+        RCLCPP_INFO(get_logger(), "Autonomy manual mode => %s", mode.c_str());
+        return;
+    }
+
     data->timeLastGamecontrolMsg = get_clock()->now();
 
 
@@ -2681,15 +2616,12 @@ void Brain::publishVisualizationMarkers()
     marker_array.markers.push_back(robot_marker);
 
     // 3. Publish ball position
-    if (tree->getEntry<bool>("ball_location_known"))
-    {
-        auto ball_marker = visualizer->createBallMarker(
-            data->ball.posToField.x,
-            data->ball.posToField.y,
-            0.11,
-            "map");
-        marker_array.markers.push_back(ball_marker);
-    }
+    auto ball_marker = visualizer->createBallMarker(
+        data->ball.posToField.x,
+        data->ball.posToField.y,
+        0.11, // ball radius is 0.11
+        "map");
+    marker_array.markers.push_back(ball_marker);
 
     // 4. Publish observed Mark points (dynamic)
     std::vector<std::tuple<double, double, char>> mark_points;
@@ -2820,10 +2752,9 @@ void Brain::publishRobotPose()
 
 void Brain::publishBallPosition()
 {
-    if (!data->ballMotionValid) return;
     auto msg = geometry_msgs::msg::Point();
-    msg.x = data->motionBall.posToField.x;
-    msg.y = data->motionBall.posToField.y;
+    msg.x = data->ball.posToField.x;
+    msg.y = data->ball.posToField.y;
     msg.z = 0.0;
     
     pubBallPosition->publish(msg);

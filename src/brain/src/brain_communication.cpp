@@ -383,21 +383,17 @@ void BrainCommunication::unicastCommunication() {
             msg.playerRole = 3; // Unknown role
         }
 
-        const auto ballState = brain->data->getBallStateSnapshot();
-
         msg.isAlive = brain->data->tmImAlive;
         msg.isLead = brain->data->tmImLead;
-        msg.ballDetected = ballState.visible;
-        msg.ballLocationKnown = ballState.motionValid;
-        msg.ballConfidence = ballState.motionValid ? ballState.motion.confidence : 0.0;
-        msg.ballRange = ballState.motionValid ? ballState.motion.range : 0.0;
-        msg.cost = ballState.motionValid ? brain->data->tmMyCost : 1000.0;
-        msg.ballPosToField = ballState.motionValid
-            ? ballState.motion.posToField
-            : Point{0.0, 0.0, 0.0};
+        msg.ballDetected = brain->data->ballDetected;
+        msg.ballLocationKnown = brain->tree->getEntry<bool>("ball_location_known");
+        msg.ballConfidence = brain->data->ball.confidence;
+        msg.ballRange = brain->data->ball.range;
+        msg.cost = brain->data->tmMyCost;
+        msg.ballPosToField = brain->data->ball.posToField;
         msg.robotPoseToField = brain->data->robotPoseToField;
-        msg.kickDir = ballState.motionValid ? brain->data->kickDir : 0.0;
-        msg.thetaRb = ballState.motionValid ? ballState.robotBallAngleToField : 0.0;
+        msg.kickDir = brain->data->kickDir;
+        msg.thetaRb = brain->data->robotBallAngleToField;
         msg.cmdId = brain->data->tmMyCmdId;
         msg.cmd = brain->data->tmMyCmd;
         log(format("ImAlive: %d, ImLead: %d, myCost: %.1f, myCmdId: %d, myCmd: %d", msg.isAlive, msg.isLead, msg.cost, msg.cmdId, msg.cmd));

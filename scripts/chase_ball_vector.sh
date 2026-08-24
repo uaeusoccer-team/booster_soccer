@@ -3,10 +3,16 @@ set -Eeo pipefail
 
 WORKSPACE="${WORKSPACE:-$HOME/booster_soccer}"
 
+VX_LIMIT="0.60"
+VY_LIMIT="0.20"
+STOP_DIST="1.00"
+Y_TOLERANCE="0.03"
+
 STOP_ANGLE="0.10"
 BALL_YAW_GAIN="4.0"
 PITCH_TURN_GAIN="1.0"
 REQUIRE_PLAY="false"
+
 HEAD_SEARCH_SPEED="0.20"
 BODY_SEARCH_SPEED="0.45"
 TRACK_TURN_YAW_LIMIT="0.75"
@@ -23,13 +29,21 @@ SEARCH_YAW_LIMIT_EXPLICIT="false"
 usage() {
   cat <<'USAGE'
 Usage:
-  ./scripts/test_head_tracking_rotation.sh [setting=value ...]
+  ./scripts/chase_ball_vector.sh [setting=value ...]
 
-Settings:
+Chase settings:
+  vx_limit=0.60
+  vy_limit=0.20
+  stop_dist=1.00
+  y_tolerance=0.03
+
+Tracking and rotation settings:
   stop_angle=0.10
   ball_yaw_gain=4.0
   pitch_turn_gain=1.0
   require_play=false
+
+Ball-search settings:
   head_search_speed=0.20          # head-only scan speed
   body_search_speed=0.45          # exact fast body turn after qualifying RGB loss
   track_turn_yaw_limit=0.75       # last head-yaw threshold for a fast loss turn
@@ -43,27 +57,22 @@ Settings:
   head_deadband_y_px=35            # vertical head deadband
 
 Examples:
-  # Run immediately with base ballYaw x 4 body rotation:
-  ./scripts/test_head_tracking_rotation.sh
+  # Start chasing immediately with base ballYaw x 4 rotation:
+  ./scripts/chase_ball_vector.sh
 
-  # Tune visible-ball rotation and the extra speed while looking down:
-  ./scripts/test_head_tracking_rotation.sh stop_angle=0.20 ball_yaw_gain=5.0 pitch_turn_gain=1.5
+  # Change chase limits and stop distance:
+  ./scripts/chase_ball_vector.sh vx_limit=0.40 vy_limit=0.15 stop_dist=0.80
 
-  # Require referee GameController PLAY instead of starting immediately:
-  ./scripts/test_head_tracking_rotation.sh require_play=true
+  # Tune visible rotation and require referee GameController PLAY:
+  ./scripts/chase_ball_vector.sh stop_angle=0.20 ball_yaw_gain=5.0 pitch_turn_gain=1.5 require_play=true
 
-  # Tune the head scan and continued body turn after ball loss:
-  ./scripts/test_head_tracking_rotation.sh head_search_speed=0.15 body_search_speed=0.35
+SimpleChase calculates only vx and vy. CamTrackBall/CamFindBall calculate theta.
+SetVelocity publishes the combined vx, vy, and theta once per active tick.
 
-The script always commands vx=0 and vy=0. With require_play=false (the default),
-tracking and rotation begin as soon as the brain starts. Set require_play=true
-if GameController PLAY should gate the test.
-
-After RGB ball loss, the last RGB/head direction selects the search side. If
-the last head yaw passed track_turn_yaw_limit or the last downward head pitch
-passed loss_turn_pitch_limit, the body turns in that direction at the exact
-body_search_speed. Otherwise the body stays still and the head scans between
-search_yaw_limit edges. Before the first observed ball, search holds still.
+Each new RGB acquisition must contain usable depth once before tracking and
+chasing are allowed. After RGB loss, the last RGB/head direction selects the
+search side. If the last head yaw or downward pitch passes its configured
+threshold, the body turns at body_search_speed; otherwise it scans head-only.
 Press s or Ctrl-C to stop the test stack.
 USAGE
 }
@@ -105,6 +114,10 @@ set_value() {
   esac
 
   case "$key" in
+    vx_limit) VX_LIMIT="$value" ;;
+    vy_limit) VY_LIMIT="$value" ;;
+    stop_dist) STOP_DIST="$value" ;;
+    y_tolerance) Y_TOLERANCE="$value" ;;
     stop_angle) STOP_ANGLE="$value" ;;
     ball_yaw_gain) BALL_YAW_GAIN="$value" ;;
     pitch_turn_gain) PITCH_TURN_GAIN="$value" ;;
@@ -137,7 +150,7 @@ parse_args() {
         usage
         exit 0
         ;;
-      stop_angle=*|ball_yaw_gain=*|pitch_turn_gain=*|require_play=*|head_search_speed=*|body_search_speed=*|track_turn_yaw_limit=*|loss_turn_pitch_limit=*|search_yaw_limit=*|yaw_limit=*|cmd_interval_msec=*|head_step_rad=*|head_settle_step_rad=*|head_deadband_x_px=*|head_deadband_y_px=*)
+      vx_limit=*|vy_limit=*|stop_dist=*|y_tolerance=*|stop_angle=*|ball_yaw_gain=*|pitch_turn_gain=*|require_play=*|head_search_speed=*|body_search_speed=*|track_turn_yaw_limit=*|loss_turn_pitch_limit=*|search_yaw_limit=*|yaw_limit=*|cmd_interval_msec=*|head_step_rad=*|head_settle_step_rad=*|head_deadband_x_px=*|head_deadband_y_px=*)
         set_value "${1%%=*}" "${1#*=}"
         shift
         ;;
@@ -197,9 +210,11 @@ trap 'controlled_stop "Ctrl-C"' INT
 trap 'controlled_stop "termination signal"' TERM
 trap 'controlled_stop "terminal disconnected"' HUP
 
-echo "Head tracking + body rotation test settings:"
-echo "  vx=0 (fixed)"
-echo "  vy=0 (fixed)"
+echo "Ball vector chase settings:"
+echo "  vx_limit=${VX_LIMIT}"
+echo "  vy_limit=${VY_LIMIT}"
+echo "  stop_dist=${STOP_DIST}"
+echo "  y_tolerance=${Y_TOLERANCE}"
 echo "  stop_angle=${STOP_ANGLE}"
 echo "  ball_yaw_gain=${BALL_YAW_GAIN}"
 echo "  pitch_turn_gain=${PITCH_TURN_GAIN}"
@@ -214,62 +229,69 @@ echo "  head_step_rad=${HEAD_STEP_RAD}"
 echo "  head_settle_step_rad=${HEAD_SETTLE_STEP_RAD}"
 echo "  head_deadband_x_px=${HEAD_DEADBAND_X_PX}"
 echo "  head_deadband_y_px=${HEAD_DEADBAND_Y_PX}"
+
 if [[ "$REQUIRE_PLAY" == "true" ]]; then
   STOP_CONDITION="gc_game_state!='PLAY'"
   RUN_CONDITION="gc_game_state=='PLAY'"
-  echo "Tracking waits for GameController PLAY."
+  echo "Chase waits for GameController PLAY."
 else
   STOP_CONDITION="gc_game_state=='END'"
   RUN_CONDITION="gc_game_state!='END'"
-  echo "Tracking starts immediately; GameController END or app stop disables it."
+  echo "Chase starts immediately; GameController END or app stop disables it."
 fi
 
 # Avoid multiple brain nodes publishing conflicting movement commands.
 ./scripts/stop.sh || true
 
 BRAIN_SHARE="$(ros2 pkg prefix brain)/share/brain"
-TREE_PATH="${BRAIN_SHARE}/behavior_trees/head_tracking_rotation_test.xml"
+TREE_PATH="${BRAIN_SHARE}/behavior_trees/chase_ball_vector.xml"
 
 cat > "$TREE_PATH" <<XML
 <root BTCPP_format="4">
   <BehaviorTree ID="MainTree">
     <Sequence name="root">
-      <ReactiveSequence _while="${STOP_CONDITION}" name="rotation disabled">
+      <ReactiveSequence _while="${STOP_CONDITION}" name="chase disabled">
         <SetVelocity x="0" y="0" theta="0" />
       </ReactiveSequence>
 
-      <ReactiveSequence _while="${RUN_CONDITION}" name="head tracking with body rotation">
-          <CheckAndStandUp />
-          <IfThenElse>
-            <ScriptCondition name="Depth-confirmed RGB acquisition?" code="ball_visible &amp;&amp; ball_depth_acquired" />
-            <Sequence>
-              <CamTrackBall stop_angle="${STOP_ANGLE}"
-                            ball_yaw_gain="${BALL_YAW_GAIN}"
-                            pitch_turn_gain="${PITCH_TURN_GAIN}"
-                            track_turn_yaw_limit="${TRACK_TURN_YAW_LIMIT}"
-                            loss_turn_pitch_limit="${LOSS_TURN_PITCH_LIMIT}"
-                            head_step_rad="${HEAD_STEP_RAD}"
-                            head_settle_step_rad="${HEAD_SETTLE_STEP_RAD}"
-                            head_deadband_x_px="${HEAD_DEADBAND_X_PX}"
-                            head_deadband_y_px="${HEAD_DEADBAND_Y_PX}"
-                            theta="{tracking_theta}" />
-              <Script code="tracking_apply_min_theta=true" />
-            </Sequence>
-            <Sequence>
-              <CamFindBall yaw_limit="${SEARCH_YAW_LIMIT}"
-                           track_turn_yaw_limit="${TRACK_TURN_YAW_LIMIT}"
-                           loss_turn_pitch_limit="${LOSS_TURN_PITCH_LIMIT}"
-                           head_search_speed="${HEAD_SEARCH_SPEED}"
-                           body_search_speed="${BODY_SEARCH_SPEED}"
-                           cmd_interval_msec="${CMD_INTERVAL_MSEC}"
-                           theta="{tracking_theta}" />
-              <Script code="tracking_apply_min_theta=false" />
-            </Sequence>
-          </IfThenElse>
-          <SetVelocity x="0"
-                       y="0"
-                       theta="{tracking_theta}"
-                       apply_min_theta="{tracking_apply_min_theta}" />
+      <ReactiveSequence _while="${RUN_CONDITION}" name="track rotate and chase ball">
+        <CheckAndStandUp />
+        <IfThenElse>
+          <ScriptCondition name="Depth-confirmed RGB acquisition?" code="ball_visible &amp;&amp; ball_depth_acquired" />
+          <Sequence>
+            <CamTrackBall stop_angle="${STOP_ANGLE}"
+                          ball_yaw_gain="${BALL_YAW_GAIN}"
+                          pitch_turn_gain="${PITCH_TURN_GAIN}"
+                          track_turn_yaw_limit="${TRACK_TURN_YAW_LIMIT}"
+                          loss_turn_pitch_limit="${LOSS_TURN_PITCH_LIMIT}"
+                          head_step_rad="${HEAD_STEP_RAD}"
+                          head_settle_step_rad="${HEAD_SETTLE_STEP_RAD}"
+                          head_deadband_x_px="${HEAD_DEADBAND_X_PX}"
+                          head_deadband_y_px="${HEAD_DEADBAND_Y_PX}"
+                          theta="{tracking_theta}" />
+            <Script code="chase_apply_min_theta=true" />
+          </Sequence>
+          <Sequence>
+            <CamFindBall yaw_limit="${SEARCH_YAW_LIMIT}"
+                         track_turn_yaw_limit="${TRACK_TURN_YAW_LIMIT}"
+                         loss_turn_pitch_limit="${LOSS_TURN_PITCH_LIMIT}"
+                         head_search_speed="${HEAD_SEARCH_SPEED}"
+                         body_search_speed="${BODY_SEARCH_SPEED}"
+                         cmd_interval_msec="${CMD_INTERVAL_MSEC}"
+                         theta="{tracking_theta}" />
+            <Script code="chase_apply_min_theta=false" />
+          </Sequence>
+        </IfThenElse>
+        <SimpleChase vx_limit="${VX_LIMIT}"
+                     vy_limit="${VY_LIMIT}"
+                     stop_dist="${STOP_DIST}"
+                     y_tolerance="${Y_TOLERANCE}"
+                     vx="{chase_vx}"
+                     vy="{chase_vy}" />
+        <SetVelocity x="{chase_vx}"
+                     y="{chase_vy}"
+                     theta="{tracking_theta}"
+                     apply_min_theta="{chase_apply_min_theta}" />
       </ReactiveSequence>
     </Sequence>
   </BehaviorTree>
@@ -277,10 +299,10 @@ cat > "$TREE_PATH" <<XML
 XML
 
 echo "Wrote ${TREE_PATH}"
-echo "Starting vision, immediate rotation test, and GameController receiver..."
+echo "Starting vision, vector chase, and GameController receiver..."
 ros2 launch vision launch.py > vision.log 2>&1 &
 ros2 launch brain launch.py \
-  tree:=head_tracking_rotation_test.xml \
+  tree:=chase_ball_vector.xml \
   role:=striker \
   team_id:=5 \
   player_id:=1 \
@@ -290,12 +312,12 @@ ros2 launch brain launch.py \
 ros2 launch game_controller launch.py > game_controller.log 2>&1 &
 
 if [[ "$REQUIRE_PLAY" == "true" ]]; then
-  echo "Ready. GameController PLAY runs the test; non-PLAY states command zero."
+  echo "Ready. GameController PLAY runs the chase; non-PLAY states command zero."
 else
-  echo "Running immediately."
+  echo "Chasing immediately."
 fi
 echo "Press s or Ctrl-C to stop."
-echo "Diagnostics: tail -f brain.log | grep -E 'CamTrackBall/direct_pixel|CamFindBall/(wait_observation|start|search)'"
+echo "Diagnostics: tail -f brain.log | grep -E 'CamTrackBall/direct_pixel|CamFindBall/(wait_observation|start|search)|SimpleChase/vector'"
 
 while true; do
   if ! read -rsn1 key; then

@@ -51,18 +51,18 @@ camera:
       - 0
       - 0
       - 1
-  pitch_compensation: 0.00
-  yaw_compensation: -6.0
+  pitch_compensation: 0
+  yaw_compensation: 0
   z_compensation: 0
 detection_model:
-  model_path: ./src/vision/model/best_digua_1223_10.3.engine
+  model_path: ./src/vision/model/best_1223_10.3.engine
   confidence_threshold: 0.2
   nms_threshold: 0.4
   classnames: [Ball, Goalpost, Person, LCross, TCross, XCross, PenaltyPoint, Opponent, BRMarker]
   post_process:
     single_ball_assumption: false
     confidence_thresholds:
-      Ball: 0.4 #123456789 it was 0.3
+      Ball: 0.2
       Goalpost: 0.2
       Person: 0.2
       LCross: 0.1
@@ -75,19 +75,16 @@ segmentation_model:
   model_path: ./src/vision/model/best_seg_orin_10.3.engine
   confidence_threshold: 0.3
   nms_threshold: 0.9
-use_depth: true
+use_depth: false
 ball_pose_estimator:
-  use_depth: true
+  use_depth: false
+  radius: 0.109
+  down_sample_leaf_size: 0.01
+  cluster_distance_threshold: 0.01
+  fitting_distance_threshold: 0.01
+  minimum_cluster_size: 150
+  filter_distance: 1.2
   check_ball_height: true
-  depth_sample_step: 4
-  min_depth_points: 12
-  min_points_above_ground: 3
-  min_height_above_ground: 0.04
-  min_above_ground_ratio: 0.05
-  ground_ring_scale: 1.5
-  min_ground_points: 12
-  max_height_above_ground: 0.35
-  cluster_neighbor_distance: 0.20
 human_like_pose_estimator:
   use_depth: false
   down_sample_leaf_size: 0.01

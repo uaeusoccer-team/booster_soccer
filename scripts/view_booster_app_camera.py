@@ -31,7 +31,7 @@ JPEG_SOI = b"\xff\xd8"
 JPEG_EOI = b"\xff\xd9"
 DETECTION_FIELDS = {"label", "confidence", "xmin", "ymin", "xmax", "ymax"}
 DETECTION_OPTIONAL_FIELDS = {"position_confidence"}
-DETECTION_VECTOR_FIELDS = {"position"}
+DETECTION_VECTOR_FIELDS = {"position", "position_projection"}
 
 
 @dataclass
@@ -43,12 +43,10 @@ class Detection:
     xmax: int
     ymax: int
     position: list[float] = field(default_factory=list)
+    position_projection: list[float] = field(default_factory=list)
     position_confidence: int = 0
 
     def as_dict(self) -> dict[str, object]:
-        position = self.position[:3]
-        if not all(math.isfinite(value) for value in position):
-            position = []
         return {
             "label": self.label,
             "confidence": self.confidence,
@@ -56,19 +54,22 @@ class Detection:
             "ymin": self.ymin,
             "xmax": self.xmax,
             "ymax": self.ymax,
-            "position": position,
+            "position": self.position,
+            "position_projection": self.position_projection,
             "position_confidence": self.position_confidence,
         }
 
     def is_ball(self) -> bool:
         return self.label.strip().lower() == "ball"
 
-    def has_valid_position(self) -> bool:
-        """Return whether this detection has a usable canonical position."""
+    def has_depth(self) -> bool:
+        """Return whether this detection has a usable depth position."""
         if self.position_confidence <= 0 or len(self.position) < 3:
             return False
-        position = self.position[:3]
-        return all(math.isfinite(value) for value in position) and math.hypot(*position) > 0.0001
+        return (
+            all(math.isfinite(value) for value in self.position)
+            and math.hypot(self.position[0], self.position[1]) > 0.0001
+        )
 
 
 @dataclass
@@ -108,7 +109,7 @@ class FrameStore:
             if self.yolo_only_ball_with_depth:
                 self.detections = [
                     detection for detection in detections
-                    if detection.is_ball() and detection.has_valid_position()
+                    if detection.is_ball() and detection.has_depth()
                 ]
             elif self.yolo_only_ball:
                 self.detections = [detection for detection in detections if detection.is_ball()]
@@ -384,6 +385,7 @@ class RosDetectionParser:
                     xmax=xmax,
                     ymax=ymax,
                     position=list(obj.get("position", [])),
+                    position_projection=list(obj.get("position_projection", [])),
                     position_confidence=int(obj.get("position_confidence", 0)),
                 )
             )
@@ -545,13 +547,10 @@ INDEX_HTML = """<!doctype html>
     img, svg { position: absolute; inset: 0; display: block; width: 100%; height: 100%; object-fit: contain; }
     svg { pointer-events: none; }
     .box { fill: none; stroke: #00e676; stroke-width: 3; vector-effect: non-scaling-stroke; }
-    .box-visual-only { stroke: #ffd600; }
     .box-text { fill: #fff; font-size: 22px; font-weight: 700; paint-order: stroke; stroke: #000; stroke-width: 4px; stroke-linejoin: round; }
     .center-dot { fill: #ff2d16; stroke: #7a0e06; stroke-width: 2; vector-effect: non-scaling-stroke; }
     .center-text { fill: #ffe94a; font-size: 22px; font-weight: 800; paint-order: stroke; stroke: #000; stroke-width: 4px; stroke-linejoin: round; }
-    .ball-position-text { fill: #7df9ff; font-size: 21px; font-weight: 800; paint-order: stroke; stroke: #000; stroke-width: 4px; stroke-linejoin: round; }
-    .last-seen-box { fill: none; stroke: #ff9800; stroke-width: 4; stroke-dasharray: 12 7; vector-effect: non-scaling-stroke; }
-    .last-seen-text { fill: #ffb74d; font-size: 21px; font-weight: 800; paint-order: stroke; stroke: #000; stroke-width: 4px; stroke-linejoin: round; }
+    .ball-depth-text { fill: #7df9ff; font-size: 21px; font-weight: 800; paint-order: stroke; stroke: #000; stroke-width: 4px; stroke-linejoin: round; }
   </style>
 </head>
 <body>
@@ -570,7 +569,6 @@ INDEX_HTML = """<!doctype html>
     const overlay = document.getElementById('overlay');
     const svgNS = 'http://www.w3.org/2000/svg';
     let latestDetections = [];
-    let lastSelectedBall = null;
 
     function setOverlayViewBox() {
       if (img.naturalWidth && img.naturalHeight) {
@@ -594,43 +592,30 @@ INDEX_HTML = """<!doctype html>
       if (!Array.isArray(value)) {
         return [];
       }
-      const values = value.map((item) => typeof item === 'number' ? item : Number.NaN);
+      const values = value.map(Number);
       return values.every(Number.isFinite) ? values : [];
+    }
+
+    function vectorHasSignal(values) {
+      return values.length >= 2 && values.some((value) => Math.abs(value) > 0.0001);
     }
 
     function formatMeters(value) {
       return `${value.toFixed(2)}m`;
     }
 
-    function validPosition(det) {
-      const position = numericVector(det.position);
-      if (Number(det.position_confidence) <= 0 || position.length < 3) {
-        return null;
-      }
-      const canonicalPosition = position.slice(0, 3);
-      return Math.hypot(...canonicalPosition) > 0.0001 ? canonicalPosition : null;
-    }
-
-    function hasValidPosition(det) {
-      return validPosition(det) !== null;
-    }
-
-    function detectionBox(det) {
-      const x = Number(det.xmin);
-      const y = Number(det.ymin);
-      const width = Number(det.xmax) - x;
-      const height = Number(det.ymax) - y;
-      if (!Number.isFinite(x + y + width + height) || width <= 0 || height <= 0) {
-        return null;
-      }
-      return {x, y, width, height};
+    function hasValidDepth(det) {
+      const depthPosition = numericVector(det.position);
+      return Number(det.position_confidence) > 0 &&
+        depthPosition.length >= 3 &&
+        Math.hypot(depthPosition[0], depthPosition[1]) > 0.0001;
     }
 
     function selectedBallIndex(detections) {
       let selected = -1;
       for (let index = 0; index < detections.length; index += 1) {
         const candidate = detections[index];
-        if (!detectionIsBall(candidate) || detectionBox(candidate) === null) {
+        if (!detectionIsBall(candidate)) {
           continue;
         }
         if (selected < 0) {
@@ -639,139 +624,72 @@ INDEX_HTML = """<!doctype html>
         }
 
         const selectedDetection = detections[selected];
-        const candidateHasPosition = hasValidPosition(candidate);
-        const selectedHasPosition = hasValidPosition(selectedDetection);
+        const candidateHasDepth = hasValidDepth(candidate);
+        const selectedHasDepth = hasValidDepth(selectedDetection);
         const candidateConfidence = Number(candidate.confidence) || 0;
         const selectedConfidence = Number(selectedDetection.confidence) || 0;
-        if ((candidateHasPosition && !selectedHasPosition) ||
-            (candidateHasPosition === selectedHasPosition && candidateConfidence > selectedConfidence)) {
+        if ((candidateHasDepth && !selectedHasDepth) ||
+            (candidateHasDepth === selectedHasDepth && candidateConfidence > selectedConfidence)) {
           selected = index;
         }
       }
       return selected;
     }
 
-    function ballPositionLines(det) {
+    function ballPositionLines(det, isSelected) {
       if (!detectionIsBall(det)) {
         return [];
       }
 
-      const position = validPosition(det);
-      if (position === null) {
-        return ['VISUAL ONLY'];
+      const depthPosition = numericVector(det.position);
+      const projection = numericVector(det.position_projection);
+      const lines = [];
+      const depthValid = hasValidDepth(det);
+
+      if (isSelected) {
+        lines.push(depthValid ? 'control=BODY DEPTH' : 'control=HEAD ONLY');
+      } else {
+        lines.push(depthValid ? 'control=DEPTH CANDIDATE' : 'control=VISUAL ONLY');
       }
 
-      const [x, y, z] = position;
-      const range = Math.hypot(x, y);
-      const yaw = Math.atan2(y, x);
-      const yawDegrees = yaw * 180 / Math.PI;
-      return [
-        'POSITION VALID',
-        `x=${formatMeters(x)} y=${formatMeters(y)} z=${formatMeters(z)} r=${formatMeters(range)} yaw=${yaw.toFixed(3)}rad/${yawDegrees.toFixed(1)}deg`,
-      ];
-    }
-
-    function normalizedBox(box) {
-      const imageWidth = img.naturalWidth;
-      const imageHeight = img.naturalHeight;
-      if (!imageWidth || !imageHeight) {
-        return null;
+      if (depthValid) {
+        const x = depthPosition[0] ?? 0;
+        const y = depthPosition[1] ?? 0;
+        const z = depthPosition[2] ?? 0;
+        const range = Math.hypot(x, y);
+        const yaw = Math.atan2(y, x);
+        lines.push(`depth x=${formatMeters(x)} y=${formatMeters(y)} z=${formatMeters(z)} r=${formatMeters(range)} yaw=${yaw.toFixed(3)}rad`);
+      } else {
+        lines.push('depth none');
       }
 
-      const left = Math.max(0, Math.min(imageWidth, box.x));
-      const top = Math.max(0, Math.min(imageHeight, box.y));
-      const right = Math.max(0, Math.min(imageWidth, box.x + box.width));
-      const bottom = Math.max(0, Math.min(imageHeight, box.y + box.height));
-      if (right <= left || bottom <= top) {
-        return null;
-      }
-      return {
-        x: left / imageWidth,
-        y: top / imageHeight,
-        width: (right - left) / imageWidth,
-        height: (bottom - top) / imageHeight,
-      };
-    }
-
-    function rememberSelectedBall(detections, observedAt) {
-      const selectedIndex = selectedBallIndex(detections);
-      if (selectedIndex < 0) {
-        return;
+      if (vectorHasSignal(projection)) {
+        const x = projection[0] ?? 0;
+        const y = projection[1] ?? 0;
+        const yaw = Math.atan2(y, x);
+        lines.push(`projection diagnostic x=${formatMeters(x)} y=${formatMeters(y)} yaw=${yaw.toFixed(3)}rad`);
       }
 
-      const selected = detections[selectedIndex];
-      const position = validPosition(selected);
-      if (position === null) {
-        return;
-      }
-
-      const box = detectionBox(selected);
-      const normalized = box === null ? null : normalizedBox(box);
-      if (normalized === null) {
-        return;
-      }
-
-      const now = Number.isFinite(observedAt) ? observedAt : Date.now();
-      lastSelectedBall = {
-        box: normalized,
-        seenAt: now,
-        lastValidPosition: position,
-        positionSeenAt: now,
-      };
-    }
-
-    function renderLastSeenBall(currentBallIndex, layer) {
-      if (currentBallIndex >= 0 || lastSelectedBall === null ||
-          !img.naturalWidth || !img.naturalHeight) {
-        return;
-      }
-
-      const x = lastSelectedBall.box.x * img.naturalWidth;
-      const y = lastSelectedBall.box.y * img.naturalHeight;
-      const width = lastSelectedBall.box.width * img.naturalWidth;
-      const height = lastSelectedBall.box.height * img.naturalHeight;
-      const ageSeconds = Math.max(0, (Date.now() - lastSelectedBall.seenAt) / 1000);
-      const title = `LAST SEEN ${ageSeconds.toFixed(1)}s ago — HISTORICAL PIXELS`;
-      const textY = y > 28 ? y - 8 : y + 27;
-
-      layer.appendChild(makeSvg('rect', {
-        class: 'last-seen-box', x, y, width, height, rx: 2,
-      }));
-      layer.appendChild(makeSvg('text', {
-        class: 'last-seen-text', x: x + 4, y: textY,
-      }));
-      layer.lastChild.textContent = title;
-
-      if (lastSelectedBall.lastValidPosition !== null) {
-        const [positionX, positionY, positionZ] = lastSelectedBall.lastValidPosition;
-        const positionAge = lastSelectedBall.positionSeenAt === null
-          ? ''
-          : ` (${Math.max(0, (Date.now() - lastSelectedBall.positionSeenAt) / 1000).toFixed(1)}s old)`;
-        const details = `last valid x=${formatMeters(positionX)} y=${formatMeters(positionY)} z=${formatMeters(positionZ)}${positionAge}`;
-        const belowY = y + height + 30;
-        const detailsY = img.naturalHeight && belowY > img.naturalHeight
-          ? Math.max(24, y - 34)
-          : belowY;
-        layer.appendChild(makeSvg('text', {
-          class: 'last-seen-text', x: x + 4, y: detailsY,
-        }));
-        layer.lastChild.textContent = details;
-      }
+      return lines;
     }
 
     function renderDetections(detections, layer) {
-      for (const det of detections) {
-        const box = detectionBox(det);
-        if (box === null) {
+      setOverlayViewBox();
+      const selectedBall = selectedBallIndex(detections);
+      for (const [detectionIndex, det] of detections.entries()) {
+        const x = Number(det.xmin);
+        const y = Number(det.ymin);
+        const width = Number(det.xmax) - x;
+        const height = Number(det.ymax) - y;
+        if (!Number.isFinite(x + y + width + height) || width <= 0 || height <= 0) {
           continue;
         }
-        const {x, y, width, height} = box;
         const confidence = Number(det.confidence);
         const label = `${det.label ?? 'object'} ${Number.isFinite(confidence) ? confidence.toFixed(2) : ''}`;
         const textY = y > 26 ? y - 7 : y + 25;
         const centerX = Math.round(x + width / 2);
         const centerY = Math.round(y + height / 2);
-        const positionLines = ballPositionLines(det);
+        const positionLines = ballPositionLines(det, detectionIndex === selectedBall);
         const lineGap = 24;
         const infoLines = [`center=(${centerX},${centerY})`, ...positionLines];
         const belowStartY = y + height + 34;
@@ -781,15 +699,12 @@ INDEX_HTML = """<!doctype html>
           img.naturalHeight && infoBlockBottom > img.naturalHeight
             ? Math.max(24, aboveStartY)
             : belowStartY;
-        const boxClass = detectionIsBall(det) && !hasValidPosition(det)
-          ? 'box box-visual-only'
-          : 'box';
-        layer.appendChild(makeSvg('rect', {class: boxClass, x, y, width, height, rx: 2}));
+        layer.appendChild(makeSvg('rect', {class: 'box', x, y, width, height, rx: 2}));
         layer.appendChild(makeSvg('text', {class: 'box-text', x: x + 4, y: textY}, label));
         layer.lastChild.textContent = label;
         layer.appendChild(makeSvg('circle', {class: 'center-dot', cx: centerX, cy: centerY, r: 8}));
         infoLines.forEach((line, index) => {
-          const className = index === 0 ? 'center-text' : 'ball-position-text';
+          const className = index === 0 ? 'center-text' : 'ball-depth-text';
           layer.appendChild(makeSvg('text', {class: className, x: x + 4, y: infoStartY + index * lineGap}, line));
           layer.lastChild.textContent = line;
         });
@@ -797,13 +712,9 @@ INDEX_HTML = """<!doctype html>
     }
 
     function renderOverlay() {
-      setOverlayViewBox();
-      const currentBallIndex = selectedBallIndex(latestDetections);
-      const historyLayer = makeSvg('g', {id: 'last-seen-ball-layer'});
       const yoloLayer = makeSvg('g', {id: 'yolo-detection-layer'});
-      renderLastSeenBall(currentBallIndex, historyLayer);
       renderDetections(latestDetections, yoloLayer);
-      overlay.replaceChildren(yoloLayer, historyLayer);
+      overlay.replaceChildren(yoloLayer);
     }
 
     async function updateStats() {
@@ -823,12 +734,7 @@ INDEX_HTML = """<!doctype html>
       try {
         const res = await fetch('/detections.json', {cache: 'no-store'});
         const payload = await res.json();
-        latestDetections = Array.isArray(payload.detections) ? payload.detections : [];
-        const detectionAge = Number(payload.stats?.last_update_age_sec);
-        const observedAt = Number.isFinite(detectionAge)
-          ? Date.now() - Math.max(0, detectionAge) * 1000
-          : Date.now();
-        rememberSelectedBall(latestDetections, observedAt);
+        latestDetections = payload.detections ?? [];
       } catch (_) {
         latestDetections = [];
       }
@@ -837,10 +743,6 @@ INDEX_HTML = """<!doctype html>
 
     updateStats();
     updateDetections();
-    img.addEventListener('load', () => {
-      rememberSelectedBall(latestDetections, Date.now());
-      renderOverlay();
-    });
     setInterval(updateDetections, 100);
     setInterval(updateStats, 1000);
     setInterval(renderOverlay, 1000);
@@ -877,7 +779,7 @@ def apply_legacy_key_value_args(args: argparse.Namespace, extras: list[str]) -> 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--robot", default="192.168.68.105", help="robot IP address")
+    parser.add_argument("--robot", default="192.168.68.103", help="robot IP address")
     parser.add_argument("--ws-port", type=int, default=51111, help="robot WebSocket camera port")
     parser.add_argument("--ws-path", default="/", help="robot WebSocket path")
     parser.add_argument(
@@ -904,7 +806,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--yolo-only-ball-with-depth",
         action="store_true",
-        help="show only Ball detections with a valid canonical position",
+        help="show only Ball detections with a valid depth position",
     )
     args, extras = parser.parse_known_args()
     apply_legacy_key_value_args(args, extras)
@@ -949,7 +851,7 @@ def main() -> int:
             print(f"Detection source command: {args.detections_cmd}", flush=True)
 
         if args.yolo_only_ball_with_depth:
-            print("Detection filter: Ball detections with valid position", flush=True)
+            print("Detection filter: Ball detections with valid depth", flush=True)
         elif args.yolo_only_ball:
             print("Detection filter: Ball detections", flush=True)
 

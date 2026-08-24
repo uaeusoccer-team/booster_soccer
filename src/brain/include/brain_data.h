@@ -4,6 +4,7 @@
 #include <string>
 #include <mutex>
 #include <tuple>
+#include <cstdint>
 
 #include <sensor_msgs/msg/image.hpp>
 #include "booster_interface/msg/odometer.hpp"
@@ -51,38 +52,28 @@ public:
     Eigen::Matrix4d camToRobot = Eigen::Matrix4d::Identity(); 
 
 
-    // Legacy mirror of ballVisible for code outside this package.
-    std::atomic<bool> ballDetected{false};
-    std::atomic<bool> ballVisible{false};
-    std::atomic<bool> ballMotionValid{false};
-    GameObject visualBall{};
-    GameObject motionBall{};
-    // Last valid local or teammate-derived location, retained until timeout.
+    bool ballDetected = false;
+    // A new RGB acquisition must contain usable depth once before tracking is
+    // authorized. The latch remains true across temporary depth loss and is
+    // reset only when the accepted RGB ball disappears completely.
+    std::atomic<bool> ballDepthAcquired{false};
+    std::atomic<std::uint64_t> ballTrackingGeneration{0};
+    // Last RGB/head observation used to choose the direction and urgency of a
+    // search after the ball leaves the image. This memory is deliberately
+    // independent of the depth position and the robot's velocity-command
+    // history. Positive direction is left and negative direction is right.
+    std::atomic<int> lastBallSearchDirection{0};
+    std::atomic<double> lastBallPixelX{0.0};
+    std::atomic<double> lastBallPixelY{0.0};
+    std::atomic<double> lastBallPixelDx{0.0};
+    std::atomic<double> lastBallPixelDy{0.0};
+    std::atomic<double> lastBallObservedHeadYaw{0.0};
+    std::atomic<double> lastBallObservedHeadPitch{0.0};
+    std::atomic<std::uint64_t> lastBallSearchGeneration{0};
     GameObject ball{};
     GameObject tmBall{};
-    LastBallObservation lastBallObservation{};
-    rclcpp::Time ballMotionReceivedTime;
-    rclcpp::Time ballVisualReceivedTime;
-    mutable std::mutex ballStateMutex;
-    double robotBallAngleToField = 0.0;
+    double robotBallAngleToField; 
     bool lose_ball = false;
-
-    inline BallStateSnapshot getBallStateSnapshot() const
-    {
-        std::lock_guard<std::mutex> lock(ballStateMutex);
-        BallStateSnapshot snapshot;
-        snapshot.visible = ballVisible.load(std::memory_order_acquire);
-        snapshot.motionValid = ballMotionValid.load(std::memory_order_acquire);
-        snapshot.visual = visualBall;
-        snapshot.motion = motionBall;
-        snapshot.remembered = ball;
-        snapshot.teammate = tmBall;
-        snapshot.lastObservation = lastBallObservation;
-        snapshot.motionReceivedTime = ballMotionReceivedTime;
-        snapshot.visualReceivedTime = ballVisualReceivedTime;
-        snapshot.robotBallAngleToField = robotBallAngleToField;
-        return snapshot;
-    }
 
     inline vector<GameObject> getRobots() const {
         std::lock_guard<std::mutex> lock(_robotsMutex);

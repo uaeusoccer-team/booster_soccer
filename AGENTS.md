@@ -40,7 +40,7 @@ If the GitHub CLI is available and the team's workflow uses it, the agent may us
 
 Do not create new branches, delete branches, rename branches, or switch to a new work branch. Each team member already has a dedicated branch. If the working tree already has uncommitted user changes, do not overwrite them; ask the user before pulling if a conflict or merge would affect those changes.
 
-For the normal integration workflow, unless the user invokes the explicit `commit++` shortcut below, remind the user that robot testing requires moving changes through `main`:
+When an agent changes code, remind the user that robot testing requires moving the changes to the robot:
 
 1. Push the current working branch.
 2. Merge that branch into `main`.
@@ -67,59 +67,6 @@ git pull origin main
 git submodule update --init --recursive
 chmod +x scripts/*.sh
 ```
-
-## `commit++` Shortcut
-
-When the user sends `commit++`, treat it as shorthand for the complete local-commit and robot-transfer handoff. Do not make the user separately ask for `commit`, `push pull commands`, and `build command`.
-
-For `commit++`:
-
-1. Inspect the status and diff and run checks appropriate to the changed files. If a required check fails, stop and report it instead of committing.
-2. Stage only the files belonging to the current task, preserve unrelated user changes, review the staged diff, and run `git diff --cached --check`.
-3. Create one local commit with a clear message and report its hash. Do not create an empty commit if there are no changes.
-4. Do **not** automatically push, merge, connect to the robot, discard robot changes, change the robot clock, or start a build. Instead, return the commands below for the user to run.
-5. Replace the development path and branch placeholders with the actual checkout path and exact current dedicated branch. The final response must not leave placeholders for the user to edit.
-6. Keep development-machine commands and robot commands in separate, clearly labeled copyable blocks. Assume the user is already in the robot SSH session for robot blocks.
-
-First provide the development-machine push block:
-
-```bash
-cd <actual-development-checkout>
-git status --short --branch
-git push origin <current-dedicated-branch>
-```
-
-Then provide the immediate dedicated-branch test pull block for the robot:
-
-```bash
-cd ~/booster_soccer
-git status --short --branch
-git switch <current-dedicated-branch>
-git pull --ff-only origin <current-dedicated-branch>
-git log -1 --oneline
-```
-
-If robot changes prevent switching or pulling, tell the user to stop and share `git status`; never add an automatic stash, reset, or clean operation to this shortcut.
-
-Then provide the clock command, explicitly labeled to run from the development machine:
-
-```bash
-ssh -t booster@192.168.68.105 "sudo timedatectl set-ntp false; sudo date -s '@$(date +%s)'; sudo hwclock --systohc 2>/dev/null || true; date"
-```
-
-Finally provide this clean-build block, explicitly labeled to run inside the robot SSH session. Keep `./scripts/build.sh` as the final command and remind the user to wait for its summary and shell prompt:
-
-```bash
-cd ~/booster_soccer
-date
-timedatectl status
-deactivate 2>/dev/null || true
-source /opt/ros/humble/setup.bash
-rm -rf build install log
-./scripts/build.sh
-```
-
-For `commit++` only, the dedicated-branch pull above replaces the normal `main` pull for immediate robot testing. It does not replace the normal merge into `main` before shared or tournament use.
 
 ## Safety Rules
 
@@ -291,7 +238,7 @@ sleep 2
 ros2 launch vision launch.py > vision.log 2>&1 &
 sleep 8
 
-timeout 5 ros2 topic echo /booster_soccer/detection --once | grep -E 'label:|confidence:|position:|position_confidence:|xmin:|ymin:|xmax:|ymax:' || true
+timeout 5 ros2 topic echo /booster_soccer/detection --once | grep -E 'label:|confidence:|position_projection|xmin:|ymin:|xmax:|ymax:' || true
 
 ros2 launch brain launch.py \
   tree:=head_track_only.xml \
@@ -358,8 +305,7 @@ Press `s` in that script to stop if supported by the running helper. Otherwise s
 
 - Official `vision` publishes `/booster_soccer/detection`, `/booster_soccer/line_segments`, and `/booster_soccer/ball`.
 - `brain` primarily consumes `/booster_soccer/detection`, not `/booster_soccer/ball`.
-- A motion-valid ball detection includes canonical `position: [x, y, z]` with positive `position_confidence`; an RGB-only Ball keeps its bounding box but has no usable position.
-- `position_projection` remains only as a temporary compatibility mirror for non-Ball objects while their canonical coordinates are verified on the robot.
+- A ball detection includes `position_projection: [x, y, z]`.
 - For the ball, `x` is forward distance, `y` is lateral offset, and `z` is near zero on the ground plane.
 - Depth is available on `/boostercamera/head/depth` and `/boostercamera/head/depth/camera_info`.
 - T1 camera config in this repo uses `/boostercamera/head/rgb`, `/boostercamera/head/rgb/camera_info`, and `/boostercamera/head/depth`.
@@ -385,6 +331,7 @@ Important files:
 ```text
 src/brain/behavior_trees/game.xml
 src/brain/behavior_trees/head_track_only.xml
+src/brain/behavior_trees/head_track_no_search.xml
 src/brain/behavior_trees/subtrees/subtree_cam_find_and_track_ball.xml
 src/brain/behavior_trees/subtrees/subtree_find_ball.xml
 src/brain/behavior_trees/subtrees/subtree_striker_play.xml

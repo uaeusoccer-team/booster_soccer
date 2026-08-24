@@ -41,15 +41,16 @@ public:
     Pose EstimateByDepth(const Pose &p_eye2base, const DetectionRes &detection, const cv::Mat &rgb, const cv::Mat &depth) override;
 
 private:
-    bool debug_depth_gate_ = false;
-    int depth_sample_step_ = 2;
-    int min_ground_points_ = 12;
-    int min_depth_points_ = 8;
-    int min_points_above_ground_ = 3;
-    float min_above_ground_ratio_ = 0.05f;
-    float min_height_above_ground_ = 0.04f;
-    float max_height_above_ground_ = 0.35f;
-    float ground_ring_scale_ = 1.5f;
+    bool check_ball_height_;
+    int depth_sample_step_;
+    int min_depth_points_;
+    int min_points_above_ground_;
+    float min_height_above_ground_;
+    float min_above_ground_ratio_;
+    float ground_ring_scale_;
+    int min_ground_points_;
+    float max_height_above_ground_;
+    float cluster_neighbor_distance_;
 };
 
 class HumanLikePoseEstimator : public PoseEstimator {
