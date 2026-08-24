@@ -1,6 +1,8 @@
 #include <cmath>
 #include <cstdlib>
 #include "brain_tree.h"
+#include "ball_framing_utils.h"
+#include "obstacle_avoidance_node.h"
 #include "locator.h"
 #include "brain.h"
 #include "utils/math.h"
@@ -31,7 +33,9 @@ void BrainTree::init()
     REGISTER_BUILDER(RobotFindBall)
     REGISTER_BUILDER(Chase)
     REGISTER_BUILDER(SimpleChase)
+    REGISTER_BUILDER(ScoreBall)
     REGISTER_BUILDER(ShootingAdjust)
+    REGISTER_BUILDER(ObstacleAvoidance)
     REGISTER_BUILDER(Adjust)
     REGISTER_BUILDER(Kick)
     REGISTER_BUILDER(StandStill)
@@ -86,6 +90,7 @@ void BrainTree::initEntry()
     setEntry<double>("tracking_theta", 0.0);
     setEntry<double>("chase_vx", 0.0);
     setEntry<double>("chase_vy", 0.0);
+    setEntry<string>("autonomy_obstacle_ball_state", "LOST");
 
     setEntry<bool>("gamecontroller_isKickOff", true);
     setEntry<string>("gc_game_state", "");
@@ -115,6 +120,15 @@ void BrainTree::initEntry()
     setEntry<double>("autonomy_adjust_vx", 0.0);
     setEntry<double>("autonomy_adjust_vy", 0.0);
     setEntry<double>("autonomy_adjust_theta", 0.0);
+    setEntry<bool>("autonomy_adjust_ready", false);
+    setEntry<double>("autonomy_adjust_epoch", 0.0);
+    setEntry<string>("autonomy_striker_phase", "track");
+    setEntry<bool>("autonomy_score_active", false);
+    setEntry<double>("autonomy_score_vx", 0.0);
+    setEntry<double>("autonomy_score_vy", 0.0);
+    setEntry<double>("autonomy_score_theta", 0.0);
+    setEntry<bool>("autonomy_score_done", false);
+    setEntry<string>("autonomy_score_state", "INACTIVE");
 
     setEntry<bool>("we_just_scored", false);
     setEntry<bool>("wait_for_opponent_kickoff", false);
@@ -176,6 +190,9 @@ NodeStatus CamTrackBall::tick()
     double headSettleStep = 0.02;
     double headDeadbandX = 35.0;
     double headDeadbandY = 35.0;
+    double targetYRatio = 0.50;
+    double bottomMarginPx = 0.0;
+    double headPitchLimitDown = 0.90;
     getInput("stop_angle", stopAngle);
     getInput("ball_yaw_gain", ballYawGain);
     getInput("pitch_turn_gain", pitchTurnGain);
@@ -185,6 +202,9 @@ NodeStatus CamTrackBall::tick()
     getInput("head_settle_step_rad", headSettleStep);
     getInput("head_deadband_x_px", headDeadbandX);
     getInput("head_deadband_y_px", headDeadbandY);
+    getInput("target_y_ratio", targetYRatio);
+    getInput("bottom_margin_px", bottomMarginPx);
+    getInput("head_pitch_limit_down", headPitchLimitDown);
 
     stopAngle = std::fabs(stopAngle);
     ballYawGain = std::max(0.0, ballYawGain);
@@ -195,6 +215,10 @@ NodeStatus CamTrackBall::tick()
     headSettleStep = std::fabs(headSettleStep);
     headDeadbandX = std::fabs(headDeadbandX);
     headDeadbandY = std::fabs(headDeadbandY);
+    bottomMarginPx = std::fabs(bottomMarginPx);
+    headPitchLimitDown = std::max(
+        brain->config->get_head_pitch_limit_up(),
+        std::fabs(headPitchLimitDown));
 
     if (!brain->data->headStateReceived.load(std::memory_order_acquire))
     {
@@ -207,9 +231,13 @@ NodeStatus CamTrackBall::tick()
     const double measuredHeadYaw = brain->data->headYaw.load(std::memory_order_relaxed);
 
     const double xCenter = brain->config->cameraImageWidth / 2.0;
-    const double yCenter = brain->config->cameraImageHeight / 2.0;
-    const bool iSeeBall = brain->data->ballDetected;
+    const bool iSeeBall =
+        brain->data->ballDetected.load(std::memory_order_acquire);
     const bool bboxValid =
+        std::isfinite(brain->data->ball.boundingBox.xmin) &&
+        std::isfinite(brain->data->ball.boundingBox.xmax) &&
+        std::isfinite(brain->data->ball.boundingBox.ymin) &&
+        std::isfinite(brain->data->ball.boundingBox.ymax) &&
         brain->data->ball.boundingBox.xmax > brain->data->ball.boundingBox.xmin &&
         brain->data->ball.boundingBox.ymax > brain->data->ball.boundingBox.ymin;
 
@@ -244,6 +272,13 @@ NodeStatus CamTrackBall::tick()
 
     const double ballX = mean(brain->data->ball.boundingBox.xmax, brain->data->ball.boundingBox.xmin);
     const double ballY = mean(brain->data->ball.boundingBox.ymax, brain->data->ball.boundingBox.ymin);
+    const auto verticalTarget = booster_soccer::ball_framing::calculateVerticalTarget(
+        static_cast<double>(brain->config->cameraImageHeight),
+        brain->data->ball.boundingBox.ymin,
+        brain->data->ball.boundingBox.ymax,
+        targetYRatio,
+        bottomMarginPx,
+        headDeadbandY);
     const auto ballTime = brain->data->ball.timePoint;
     const bool sameVisionFrame =
         _hasLastProcessedBallFrame &&
@@ -255,7 +290,7 @@ NodeStatus CamTrackBall::tick()
     }
 
     const double dx = ballX - xCenter;  // + means ball is right of image center
-    const double dy = ballY - yCenter;  // + means ball is below image center
+    const double dy = verticalTarget.errorY;  // + means ball is below its lower target
 
     const double settleZonePx = 20.0;
 
@@ -293,6 +328,9 @@ NodeStatus CamTrackBall::tick()
     }
     brain->data->lastBallPixelX.store(ballX, std::memory_order_relaxed);
     brain->data->lastBallPixelY.store(ballY, std::memory_order_relaxed);
+    brain->data->lastBallPixelYMax.store(
+        brain->data->ball.boundingBox.ymax,
+        std::memory_order_relaxed);
     brain->data->lastBallPixelDx.store(dx, std::memory_order_relaxed);
     brain->data->lastBallPixelDy.store(dy, std::memory_order_relaxed);
     brain->data->lastBallObservedHeadYaw.store(measuredHeadYaw, std::memory_order_relaxed);
@@ -309,11 +347,14 @@ NodeStatus CamTrackBall::tick()
         yaw += (dx > 0.0) ? -step : step;
     }
 
-    if (std::fabs(dy) > headDeadbandY)
-    {
-        const double step = std::fabs(dy) <= headDeadbandY + settleZonePx ? headSettleStep : headStep;
-        pitch += (dy > 0.0) ? step : -step;
-    }
+    pitch = booster_soccer::ball_framing::nextPitch(
+        measuredHeadPitch,
+        dy,
+        headDeadbandY,
+        headStep,
+        headSettleStep,
+        brain->config->get_head_pitch_limit_up(),
+        headPitchLimitDown);
 
     brain->client->moveHead(pitch, yaw);
     _lastProcessedBallTime = ballTime;
@@ -321,12 +362,16 @@ NodeStatus CamTrackBall::tick()
 
     brain->log->log(
         "CamTrackBall/direct_pixel",
-        format("ballX: %.1f ballY: %.1f dx: %.1f dy: %.1f headPitch: %.3f headYaw: %.3f depthX: %.3f depthY: %.3f ballYaw: %.3f pitchMultiplier: %.3f theta: %.3f source: %s visualSearchDirection: %d yawLossTrigger: %s pitchLossTrigger: %s trackTurnYawLimit: %.3f lossTurnPitchLimit: %.3f",
+        format("ballX: %.1f ballY: %.1f bboxYMax: %.1f targetY: %.1f bottomMarginPx: %.1f dx: %.1f dy: %.1f headPitch: %.3f commandedPitch: %.3f headYaw: %.3f depthX: %.3f depthY: %.3f ballYaw: %.3f pitchMultiplier: %.3f theta: %.3f source: %s visualSearchDirection: %d yawLossTrigger: %s pitchLossTrigger: %s trackTurnYawLimit: %.3f lossTurnPitchLimit: %.3f",
                ballX,
                ballY,
+               brain->data->ball.boundingBox.ymax,
+               verticalTarget.targetCenterY,
+               bottomMarginPx,
                dx,
                dy,
                measuredHeadPitch,
+               pitch,
                measuredHeadYaw,
                brain->data->ball.posToRobot.x,
                brain->data->ball.posToRobot.y,
@@ -354,7 +399,7 @@ NodeStatus CamFindBall::tick()
     auto curTime = brain->get_clock()->now();
     setOutput("theta", 0.0);
 
-    if (brain->data->ballDetected &&
+    if (brain->data->ballDetected.load(std::memory_order_acquire) &&
         brain->data->ballDepthAcquired.load(std::memory_order_acquire))
     {
         _searchInitialized = false;
@@ -375,12 +420,16 @@ NodeStatus CamFindBall::tick()
 
     double yawLimit, trackTurnYawLimit, lossTurnPitchLimit;
     double headSearchSpeed, bodySearchSpeed, cmdIntervalMsec;
+    double bottomEdgeMarginPx, bottomEdgePitchStepRad, bottomEdgePitchLimitRad;
     getInput("yaw_limit", yawLimit);
     getInput("track_turn_yaw_limit", trackTurnYawLimit);
     getInput("loss_turn_pitch_limit", lossTurnPitchLimit);
     getInput("head_search_speed", headSearchSpeed);
     getInput("body_search_speed", bodySearchSpeed);
     getInput("cmd_interval_msec", cmdIntervalMsec);
+    getInput("bottom_edge_margin_px", bottomEdgeMarginPx);
+    getInput("bottom_edge_pitch_step_rad", bottomEdgePitchStepRad);
+    getInput("bottom_edge_pitch_limit_rad", bottomEdgePitchLimitRad);
 
     yawLimit = std::fabs(yawLimit);
     trackTurnYawLimit = std::fabs(trackTurnYawLimit);
@@ -388,6 +437,11 @@ NodeStatus CamFindBall::tick()
     headSearchSpeed = std::fabs(headSearchSpeed);
     bodySearchSpeed = std::fabs(bodySearchSpeed);
     cmdIntervalMsec = std::max(20.0, cmdIntervalMsec);
+    bottomEdgeMarginPx = std::fabs(bottomEdgeMarginPx);
+    bottomEdgePitchStepRad = std::fabs(bottomEdgePitchStepRad);
+    bottomEdgePitchLimitRad = std::max(
+        brain->config->get_head_pitch_limit_up(),
+        std::fabs(bottomEdgePitchLimitRad));
 
     // Only a depth-confirmed RGB acquisition advances this generation.
     // RGB-only candidates do not stop CamFindBall or create a new episode.
@@ -430,6 +484,9 @@ NodeStatus CamFindBall::tick()
         const double lastBallPixelY = hasVisualObservation
             ? brain->data->lastBallPixelY.load(std::memory_order_relaxed)
             : 0.0;
+        const double lastBallPixelYMax = hasVisualObservation
+            ? brain->data->lastBallPixelYMax.load(std::memory_order_relaxed)
+            : 0.0;
         const double lastBallPixelDx = hasVisualObservation
             ? brain->data->lastBallPixelDx.load(std::memory_order_relaxed)
             : 0.0;
@@ -450,6 +507,12 @@ NodeStatus CamFindBall::tick()
         const bool pitchTurnTriggered =
             hasVisualObservation &&
             lastObservedHeadPitch >= lossTurnPitchLimit;
+        const bool bottomEdgeLoss =
+            hasVisualObservation && bottomEdgePitchStepRad > 0.0 &&
+            booster_soccer::ball_framing::touchesBottomEdge(
+                static_cast<double>(brain->config->cameraImageHeight),
+                lastBallPixelYMax,
+                bottomEdgeMarginPx);
         const bool fastTurnRequested =
             visualSearchDirection != 0 &&
             (yawTurnTriggered || pitchTurnTriggered);
@@ -520,23 +583,44 @@ NodeStatus CamFindBall::tick()
         _waitingForObservationLogged = false;
         _searchYaw = lastObservedHeadYaw;
         _searchPitch = lastObservedHeadPitch;
+        if (bottomEdgeLoss)
+        {
+            // One downward nudge is applied only when a generation-matched
+            // RGB bbox disappeared through the actual bottom edge. A normal
+            // loss elsewhere retains the previous pitch.
+            const double recoveryBasePitch = std::max(
+                lastObservedHeadPitch,
+                measuredHeadPitch);
+            const double effectiveLimit = std::max(
+                recoveryBasePitch,
+                bottomEdgePitchLimitRad);
+            _searchPitch = std::min(
+                recoveryBasePitch + bottomEdgePitchStepRad,
+                effectiveLimit);
+        }
         _searchInitialized = true;
         _timeLastCmd = rclcpp::Time(0, 0, RCL_ROS_TIME);
         _searchBallGeneration = ballTrackingGeneration;
 
         brain->log->log(
             "CamFindBall/start",
-            format("mode: %s source: %s direction: %.0f visualDirection: %d lastBallX: %.1f lastBallY: %.1f lastDx: %.1f lastDy: %.1f lastHeadYaw: %.3f lastHeadPitch: %.3f yawTriggered: %s pitchTriggered: %s trackTurnYawLimit: %.3f lossTurnPitchLimit: %.3f bodySearchSpeed: %.3f requestedTheta: %.3f searchYawLimit: %.3f ballTrackingGeneration: %llu",
+            format("mode: %s source: %s direction: %.0f visualDirection: %d lastBallX: %.1f lastBallY: %.1f lastBallYMax: %.1f lastDx: %.1f lastDy: %.1f lastHeadYaw: %.3f lastHeadPitch: %.3f searchPitch: %.3f bottomEdgeLoss: %s bottomEdgeMarginPx: %.1f bottomEdgePitchStepRad: %.3f bottomEdgePitchLimitRad: %.3f yawTriggered: %s pitchTriggered: %s trackTurnYawLimit: %.3f lossTurnPitchLimit: %.3f bodySearchSpeed: %.3f requestedTheta: %.3f searchYawLimit: %.3f ballTrackingGeneration: %llu",
                    _searchMode == SearchMode::CONTINUE_TURN ? "CONTINUE_TURN" : "HEAD_SCAN",
                    directionSource,
                    _searchDirection,
                    visualSearchDirection,
                    lastBallPixelX,
                    lastBallPixelY,
+                   lastBallPixelYMax,
                    lastBallPixelDx,
                    lastBallPixelDy,
                    lastObservedHeadYaw,
                    lastObservedHeadPitch,
+                   _searchPitch,
+                   bottomEdgeLoss ? "true" : "false",
+                   bottomEdgeMarginPx,
+                   bottomEdgePitchStepRad,
+                   bottomEdgePitchLimitRad,
                    yawTurnTriggered ? "true" : "false",
                    pitchTurnTriggered ? "true" : "false",
                    trackTurnYawLimit,
@@ -837,6 +921,165 @@ NodeStatus SimpleChase::tick()
 }
 
 
+NodeStatus ScoreBall::tick()
+{
+    bool active = false;
+    double scoreVx = 1.0;
+    double startMaxRange = 1.70;
+    double startMaxYaw = 0.12;
+    double ballMaxAgeMsec = 300.0;
+    double ballLostGraceMsec = 800.0;
+    double maxDurationMsec = 2500.0;
+    double headPitch = 0.45;
+    double headPitchLimitDown = 0.90;
+    double headYaw = 0.0;
+    getInput("active", active);
+    getInput("vx", scoreVx);
+    getInput("start_max_range", startMaxRange);
+    getInput("start_max_yaw", startMaxYaw);
+    getInput("ball_max_age_msec", ballMaxAgeMsec);
+    getInput("ball_lost_grace_msec", ballLostGraceMsec);
+    getInput("max_duration_msec", maxDurationMsec);
+    getInput("head_pitch", headPitch);
+    getInput("head_pitch_limit_down", headPitchLimitDown);
+    getInput("head_yaw", headYaw);
+
+    const bool scoreSettingsValid =
+        std::isfinite(scoreVx) && scoreVx > 0.0 &&
+        std::isfinite(startMaxRange) && startMaxRange > 0.0 &&
+        std::isfinite(startMaxYaw) && startMaxYaw >= 0.0 &&
+        std::isfinite(ballMaxAgeMsec) && ballMaxAgeMsec >= 0.0;
+    constexpr double absoluteHeadPitchLimitDown = 0.90;
+    double headPitchLimitUp = brain->config->get_head_pitch_limit_up();
+    if (!std::isfinite(headPitchLimitUp))
+    {
+        headPitchLimitUp = 0.45;
+    }
+    headPitchLimitUp = std::min(headPitchLimitUp, absoluteHeadPitchLimitDown);
+    if (!std::isfinite(headPitchLimitDown))
+    {
+        headPitchLimitDown = absoluteHeadPitchLimitDown;
+    }
+    headPitchLimitDown = std::clamp(
+        std::fabs(headPitchLimitDown),
+        headPitchLimitUp,
+        absoluteHeadPitchLimitDown);
+    if (!std::isfinite(headPitch))
+    {
+        headPitch = headPitchLimitUp;
+    }
+    headPitch = std::clamp(headPitch, headPitchLimitUp, headPitchLimitDown);
+    if (!std::isfinite(headYaw))
+    {
+        headYaw = 0.0;
+    }
+
+    setOutput("command_vx", 0.0);
+    setOutput("command_vy", 0.0);
+    setOutput("command_theta", 0.0);
+    setOutput("done", false);
+    setOutput("state", string("INACTIVE"));
+
+    const auto now = brain->get_clock()->now();
+    const auto snapshot = brain->data->getShootingVisionSnapshot();
+    const auto &ball = snapshot.ball;
+    const bool bboxValid =
+        std::isfinite(ball.boundingBox.xmin) &&
+        std::isfinite(ball.boundingBox.xmax) &&
+        std::isfinite(ball.boundingBox.ymin) &&
+        std::isfinite(ball.boundingBox.ymax) &&
+        ball.boundingBox.xmax > ball.boundingBox.xmin &&
+        ball.boundingBox.ymax > ball.boundingBox.ymin;
+    const double ballAgeMsec = brain->msecsSince(ball.timePoint);
+    const bool freshVisualBall =
+        snapshot.ballDetected && bboxValid &&
+        ballAgeMsec >= 0.0 && ballAgeMsec <= ballMaxAgeMsec;
+    const bool freshDepthBall =
+        scoreSettingsValid && freshVisualBall && ball.positionConfidence > 0 &&
+        std::isfinite(ball.range) && ball.range >= 0.0 &&
+        ball.range <= startMaxRange &&
+        std::isfinite(ball.posToRobot.x) &&
+        ball.posToRobot.x > 0.05 &&
+        std::isfinite(ball.posToRobot.y) &&
+        std::isfinite(ball.yawToRobot) &&
+        std::fabs(ball.yawToRobot) <= startMaxYaw;
+
+    auto commandForwardHead = [&]() {
+        const bool firstCommand = _lastHeadCommandTime.nanoseconds() <= 0;
+        const bool compatibleClock = firstCommand ||
+            now.get_clock_type() == _lastHeadCommandTime.get_clock_type();
+        const double sinceLastMsec = firstCommand
+            ? 0.0
+            : (compatibleClock
+                ? static_cast<double>((now - _lastHeadCommandTime).nanoseconds()) / 1e6
+                : -1.0);
+        if (firstCommand || !compatibleClock || sinceLastMsec < 0.0 ||
+            sinceLastMsec >= 200.0)
+        {
+            brain->client->moveHead(headPitch, headYaw);
+            _lastHeadCommandTime = now;
+        }
+    };
+
+    booster_soccer::score_run::Input controllerInput;
+    controllerInput.active = active;
+    controllerInput.entryEligible = freshDepthBall;
+    controllerInput.freshVisualBall = freshVisualBall;
+    controllerInput.nowNsec = now.nanoseconds();
+    controllerInput.observationNsec = ball.timePoint.nanoseconds();
+    controllerInput.nowClockDomain = static_cast<int>(now.get_clock_type());
+    controllerInput.observationClockDomain =
+        static_cast<int>(ball.timePoint.get_clock_type());
+
+    booster_soccer::score_run::Config controllerConfig;
+    controllerConfig.ballLostGraceMsec = ballLostGraceMsec;
+    controllerConfig.maxDurationMsec = maxDurationMsec;
+    controllerConfig.maxTickGapMsec = 300.0;
+    const auto scoreResult = _controller.update(controllerInput, controllerConfig);
+    const string state = booster_soccer::score_run::toString(scoreResult.state);
+
+    if (!active)
+    {
+        _lastHeadCommandTime = rclcpp::Time(0, 0, RCL_ROS_TIME);
+    }
+    if (scoreResult.running)
+    {
+        commandForwardHead();
+    }
+    if (scoreResult.drive)
+    {
+        setOutput("command_vx", scoreVx);
+    }
+    setOutput("done", scoreResult.done);
+    setOutput("state", state);
+
+    const bool logStateChanged = state != _lastState;
+    const double sinceLastLogMsec = _lastLogTime.nanoseconds() <= 0
+        ? 1000.0
+        : static_cast<double>((now - _lastLogTime).nanoseconds()) / 1e6;
+    if (logStateChanged || sinceLastLogMsec < 0.0 || sinceLastLogMsec >= 250.0)
+    {
+        brain->log->log(
+            "ScoreBall/vector",
+            format("state: %s active: %d freshVisualBall: %d freshDepthBall: %d ballRange: %.3f ballAgeMsec: %.1f elapsedMsec: %.1f lostMsec: %.1f vx: %.3f vy: 0.000 theta: 0.000 done: %d",
+                   state.c_str(),
+                   active,
+                   freshVisualBall,
+                   freshDepthBall,
+                   std::isfinite(ball.range) ? ball.range : 0.0,
+                   std::isfinite(ballAgeMsec) ? ballAgeMsec : -1.0,
+                   scoreResult.elapsedMsec,
+                   scoreResult.lostMsec,
+                   scoreResult.drive ? scoreVx : 0.0,
+                   scoreResult.done));
+        _lastState = state;
+        _lastLogTime = now;
+    }
+
+    return NodeStatus::SUCCESS;
+}
+
+
 NodeStatus ShootingAdjust::tick()
 {
     double targetRange, targetYOffset, thetaOffset;
@@ -846,6 +1089,11 @@ NodeStatus ShootingAdjust::tick()
     double turnFirstThreshold, fixedHeadYaw, maxBallRange, ballMaxAgeMsec;
     double goalAlignmentGain, goalAlignmentTolerancePx, goalAlignmentHysteresisPx;
     double goalMinPostSeparationPx, goalMaxAgeMsec, goalBallMaxSkewMsec;
+    double targetYRatio, bottomMarginPx, headStepRad, headSettleStepRad;
+    double headDeadbandYPx, headPitchLimitDown, readyMinMsec;
+    double readyDataMaxAgeMsec;
+    double resetEpoch;
+    int readySamples;
 
     getInput("target_range", targetRange);
     getInput("target_y_offset", targetYOffset);
@@ -869,6 +1117,16 @@ NodeStatus ShootingAdjust::tick()
     getInput("goal_min_post_separation_px", goalMinPostSeparationPx);
     getInput("goal_max_age_msec", goalMaxAgeMsec);
     getInput("goal_ball_max_skew_msec", goalBallMaxSkewMsec);
+    getInput("target_y_ratio", targetYRatio);
+    getInput("bottom_margin_px", bottomMarginPx);
+    getInput("head_step_rad", headStepRad);
+    getInput("head_settle_step_rad", headSettleStepRad);
+    getInput("head_deadband_y_px", headDeadbandYPx);
+    getInput("head_pitch_limit_down", headPitchLimitDown);
+    getInput("ready_samples", readySamples);
+    getInput("ready_min_msec", readyMinMsec);
+    getInput("ready_data_max_age_msec", readyDataMaxAgeMsec);
+    getInput("reset_epoch", resetEpoch);
 
     rangeTolerance = std::fabs(rangeTolerance);
     yTolerance = std::fabs(yTolerance);
@@ -888,6 +1146,16 @@ NodeStatus ShootingAdjust::tick()
     goalMinPostSeparationPx = std::fabs(goalMinPostSeparationPx);
     goalMaxAgeMsec = std::fabs(goalMaxAgeMsec);
     goalBallMaxSkewMsec = std::fabs(goalBallMaxSkewMsec);
+    bottomMarginPx = std::fabs(bottomMarginPx);
+    headStepRad = std::fabs(headStepRad);
+    headSettleStepRad = std::fabs(headSettleStepRad);
+    headDeadbandYPx = std::fabs(headDeadbandYPx);
+    headPitchLimitDown = std::max(
+        brain->config->get_head_pitch_limit_up(),
+        std::fabs(headPitchLimitDown));
+    readySamples = std::max(1, readySamples);
+    readyMinMsec = std::fabs(readyMinMsec);
+    readyDataMaxAgeMsec = std::fabs(readyDataMaxAgeMsec);
 
     double vx = 0.0;
     double vy = 0.0;
@@ -895,6 +1163,26 @@ NodeStatus ShootingAdjust::tick()
     setOutput("vx", vx);
     setOutput("vy", vy);
     setOutput("theta", theta);
+    setOutput("ready", false);
+
+    const auto now = brain->get_clock()->now();
+    auto resetReadiness = [this]() {
+        _readySampleCount = 0;
+        _readyLatched = false;
+        _readyStartTime = rclcpp::Time(0, 0, RCL_ROS_TIME);
+        _lastReadySampleBallTime = rclcpp::Time(0, 0, RCL_ROS_TIME);
+    };
+    const bool resetEpochChanged =
+        !_resetEpochInitialized || !std::isfinite(resetEpoch) ||
+        resetEpoch != _lastResetEpoch;
+    if (resetEpochChanged)
+    {
+        resetReadiness();
+        _goalAlignmentDeadband.reset();
+        _hasLastProcessedBallFrame = false;
+        _lastResetEpoch = std::isfinite(resetEpoch) ? resetEpoch : 0.0;
+        _resetEpochInitialized = true;
+    }
 
     const auto visionSnapshot = brain->data->getShootingVisionSnapshot();
     const auto &ball = visionSnapshot.ball;
@@ -912,6 +1200,9 @@ NodeStatus ShootingAdjust::tick()
     if (!visualBallUsable || !brain->data->headStateReceived.load(std::memory_order_acquire))
     {
         _goalAlignmentDeadband.reset();
+        _hasLastProcessedBallFrame = false;
+        resetReadiness();
+        _readyBallGeneration = 0;
         const auto finiteOrZero = [](double value) {
             return std::isfinite(value) ? value : 0.0;
         };
@@ -920,14 +1211,15 @@ NodeStatus ShootingAdjust::tick()
             : (!visualBallUsable ? "STALE_BALL" : "NO_HEAD");
         brain->log->log(
             "ShootingAdjust/vector",
-            format("ballX: %.3f ballY: %.3f ballRange: %.3f maxBallRange: %.3f ballYaw: %.3f rangeError: 0.000 yError: 0.000 thetaError: 0.000 goalCount: 0 goalCenterX: 0.000 alignmentErrorPx: 0.000 goalAligned: 0 lateralSource: NO_GOAL vx: 0.000 vy: 0.000 theta: 0.000 source: %s ballAgeMsec: %.1f",
+            format("ballX: %.3f ballY: %.3f ballRange: %.3f maxBallRange: %.3f ballYaw: %.3f rangeError: 0.000 yError: 0.000 thetaError: 0.000 goalCount: 0 goalCenterX: 0.000 alignmentErrorPx: 0.000 goalAligned: 0 lateralSource: NO_GOAL vx: 0.000 vy: 0.000 theta: 0.000 source: %s ballAgeMsec: %.1f readyCandidate: 0 readySamples: 0/%d ready: 0",
                    finiteOrZero(ball.posToRobot.x),
                    finiteOrZero(ball.posToRobot.y),
                    finiteOrZero(ball.range),
                    maxBallRange,
                    finiteOrZero(ball.yawToRobot),
                    unavailableSource,
-                   finiteOrZero(ballAgeMsec)));
+                   finiteOrZero(ballAgeMsec),
+                   readySamples));
         return NodeStatus::SUCCESS;
     }
 
@@ -940,9 +1232,15 @@ NodeStatus ShootingAdjust::tick()
         ball.boundingBox.ymax,
         ball.boundingBox.ymin);
     const double imageCenterX = brain->config->cameraImageWidth / 2.0;
-    const double imageCenterY = brain->config->cameraImageHeight / 2.0;
+    const auto verticalTarget = booster_soccer::ball_framing::calculateVerticalTarget(
+        static_cast<double>(brain->config->cameraImageHeight),
+        ball.boundingBox.ymin,
+        ball.boundingBox.ymax,
+        targetYRatio,
+        bottomMarginPx,
+        headDeadbandYPx);
     const double ballPixelDx = ballPixelX - imageCenterX;
-    const double ballPixelDy = ballPixelY - imageCenterY;
+    const double ballPixelDy = verticalTarget.errorY;
     int visualSearchDirection = 0;
     if (ballPixelX > imageCenterX)
     {
@@ -959,37 +1257,80 @@ NodeStatus ShootingAdjust::tick()
 
     const auto ballTrackingGeneration =
         brain->data->ballTrackingGeneration.load(std::memory_order_relaxed);
-    const auto previousVisualGeneration =
-        brain->data->lastBallSearchGeneration.load(std::memory_order_relaxed);
-    if (previousVisualGeneration != ballTrackingGeneration)
+    if (_readyBallGeneration != ballTrackingGeneration)
     {
-        brain->data->lastBallSearchDirection.store(0, std::memory_order_relaxed);
+        resetReadiness();
+        _readyBallGeneration = ballTrackingGeneration;
     }
-    if (visualSearchDirection != 0)
+    if (_lastReadySampleBallTime.nanoseconds() > 0)
     {
-        brain->data->lastBallSearchDirection.store(
-            visualSearchDirection,
-            std::memory_order_relaxed);
+        const bool readinessClockCompatible =
+            now.get_clock_type() == _lastReadySampleBallTime.get_clock_type();
+        const double readinessDataAgeMsec = readinessClockCompatible
+            ? static_cast<double>((now - _lastReadySampleBallTime).nanoseconds()) / 1e6
+            : -1.0;
+        if (!readinessClockCompatible || readinessDataAgeMsec < 0.0 ||
+            readinessDataAgeMsec > readyDataMaxAgeMsec)
+        {
+            resetReadiness();
+        }
     }
-    brain->data->lastBallPixelX.store(ballPixelX, std::memory_order_relaxed);
-    brain->data->lastBallPixelY.store(ballPixelY, std::memory_order_relaxed);
-    brain->data->lastBallPixelDx.store(ballPixelDx, std::memory_order_relaxed);
-    brain->data->lastBallPixelDy.store(ballPixelDy, std::memory_order_relaxed);
-    brain->data->lastBallObservedHeadYaw.store(measuredHeadYaw, std::memory_order_relaxed);
-    brain->data->lastBallObservedHeadPitch.store(measuredHeadPitch, std::memory_order_relaxed);
-    brain->data->lastBallSearchGeneration.store(
-        ballTrackingGeneration,
-        std::memory_order_release);
-
     const double hardwareYawLimit = fixedHeadYaw >= 0.0
         ? std::fabs(brain->config->get_head_yaw_limit_left())
         : std::fabs(brain->config->get_head_yaw_limit_right());
     const double commandedHeadYaw = cap(fixedHeadYaw, hardwareYawLimit, -hardwareYawLimit);
-    const bool fixedHeadCommandSent = ballTrackingGeneration != _fixedHeadCommandGeneration;
-    if (fixedHeadCommandSent)
+    const bool sameVisionFrame =
+        _hasLastProcessedBallFrame &&
+        ball.timePoint.nanoseconds() == _lastProcessedBallTime.nanoseconds();
+    bool headCommandSent = false;
+    double commandedHeadPitch = measuredHeadPitch;
+    if (!sameVisionFrame)
     {
-        brain->client->moveHead(measuredHeadPitch, commandedHeadYaw);
-        _fixedHeadCommandGeneration = ballTrackingGeneration;
+        const auto previousVisualGeneration =
+            brain->data->lastBallSearchGeneration.load(std::memory_order_relaxed);
+        if (previousVisualGeneration != ballTrackingGeneration)
+        {
+            brain->data->lastBallSearchDirection.store(0, std::memory_order_relaxed);
+        }
+        if (visualSearchDirection != 0)
+        {
+            brain->data->lastBallSearchDirection.store(
+                visualSearchDirection,
+                std::memory_order_relaxed);
+        }
+        brain->data->lastBallPixelX.store(ballPixelX, std::memory_order_relaxed);
+        brain->data->lastBallPixelY.store(ballPixelY, std::memory_order_relaxed);
+        brain->data->lastBallPixelYMax.store(
+            ball.boundingBox.ymax,
+            std::memory_order_relaxed);
+        brain->data->lastBallPixelDx.store(ballPixelDx, std::memory_order_relaxed);
+        brain->data->lastBallPixelDy.store(ballPixelDy, std::memory_order_relaxed);
+        brain->data->lastBallObservedHeadYaw.store(measuredHeadYaw, std::memory_order_relaxed);
+        brain->data->lastBallObservedHeadPitch.store(measuredHeadPitch, std::memory_order_relaxed);
+        brain->data->lastBallSearchGeneration.store(
+            ballTrackingGeneration,
+            std::memory_order_release);
+
+        commandedHeadPitch = booster_soccer::ball_framing::nextPitch(
+            measuredHeadPitch,
+            ballPixelDy,
+            headDeadbandYPx,
+            headStepRad,
+            headSettleStepRad,
+            brain->config->get_head_pitch_limit_up(),
+            headPitchLimitDown);
+        const bool pitchTrackingEnabled =
+            headStepRad > 0.0 || headSettleStepRad > 0.0;
+        const bool newHeadAcquisition =
+            ballTrackingGeneration != _fixedHeadCommandGeneration;
+        if (pitchTrackingEnabled || newHeadAcquisition)
+        {
+            brain->client->moveHead(commandedHeadPitch, commandedHeadYaw);
+            _fixedHeadCommandGeneration = ballTrackingGeneration;
+            headCommandSent = true;
+        }
+        _lastProcessedBallTime = ball.timePoint;
+        _hasLastProcessedBallFrame = true;
     }
 
     const double ballX = ball.posToRobot.x;
@@ -1114,9 +1455,50 @@ NodeStatus ShootingAdjust::tick()
     setOutput("vy", vy);
     setOutput("theta", theta);
 
+    const bool adjustmentCandidate =
+        bodyUsable && goalAligned &&
+        std::fabs(rangeError) <= rangeTolerance &&
+        std::fabs(yError) <= yTolerance &&
+        std::fabs(thetaError) <= stopAngle &&
+        std::fabs(vx) <= 1e-6 &&
+        std::fabs(vy) <= 1e-6 &&
+        std::fabs(theta) <= 1e-6;
+    if (!adjustmentCandidate)
+    {
+        resetReadiness();
+    }
+    else
+    {
+        const bool newReadyFrame =
+            _lastReadySampleBallTime.nanoseconds() <= 0 ||
+            ball.timePoint.nanoseconds() != _lastReadySampleBallTime.nanoseconds();
+        if (newReadyFrame)
+        {
+            if (_readySampleCount == 0)
+            {
+                _readyStartTime = now;
+            }
+            ++_readySampleCount;
+            _lastReadySampleBallTime = ball.timePoint;
+        }
+        const double readyElapsedMsec = _readyStartTime.nanoseconds() > 0
+            ? static_cast<double>((now - _readyStartTime).nanoseconds()) / 1e6
+            : 0.0;
+        if (readyElapsedMsec < 0.0)
+        {
+            resetReadiness();
+        }
+        else if (_readySampleCount >= readySamples &&
+                 readyElapsedMsec >= readyMinMsec)
+        {
+            _readyLatched = true;
+        }
+    }
+    setOutput("ready", _readyLatched);
+
     brain->log->log(
         "ShootingAdjust/vector",
-        format("ballX: %.3f ballY: %.3f ballRange: %.3f maxBallRange: %.3f ballYaw: %.3f rangeError: %.3f yError: %.3f thetaError: %.3f goalCount: %zu goalCenterX: %.3f alignmentErrorPx: %.3f goalAligned: %d lateralSource: %s vx: %.3f vy: %.3f theta: %.3f source: %s measuredHeadYaw: %.3f fixedHeadYaw: %.3f fixedHeadCommandSent: %d visualSearchDirection: %d goalPair: %s goalSeparationPx: %.3f ballAgeMsec: %.1f",
+        format("ballX: %.3f ballY: %.3f ballRange: %.3f maxBallRange: %.3f ballYaw: %.3f rangeError: %.3f yError: %.3f thetaError: %.3f goalCount: %zu goalCenterX: %.3f alignmentErrorPx: %.3f goalAligned: %d lateralSource: %s vx: %.3f vy: %.3f theta: %.3f source: %s measuredHeadPitch: %.3f commandedHeadPitch: %.3f targetY: %.1f bboxYMax: %.1f bottomMarginPx: %.1f measuredHeadYaw: %.3f fixedHeadYaw: %.3f headCommandSent: %d visualSearchDirection: %d goalPair: %s goalSeparationPx: %.3f ballAgeMsec: %.1f readyCandidate: %d readySamples: %d/%d ready: %d",
                ballX,
                ballY,
                ball.range,
@@ -1134,13 +1516,22 @@ NodeStatus ShootingAdjust::tick()
                vy,
                theta,
                thetaSource,
+               measuredHeadPitch,
+               commandedHeadPitch,
+               verticalTarget.targetCenterY,
+               ball.boundingBox.ymax,
+               bottomMarginPx,
                measuredHeadYaw,
                commandedHeadYaw,
-               fixedHeadCommandSent,
+               headCommandSent,
                visualSearchDirection,
                goalSelection.valid ? "LABELED" : "NONE",
                goalSelection.separationPx,
-               ballAgeMsec));
+               ballAgeMsec,
+               adjustmentCandidate,
+               _readySampleCount,
+               readySamples,
+               _readyLatched));
     return NodeStatus::SUCCESS;
 }
 
@@ -1588,7 +1979,7 @@ NodeStatus StrikerDecide::tick() {
             (angleGoodForKick && !brain->data->isFreekickKickingOff) 
             || reachedKickDir
         )
-        && brain->data->ballDetected
+        && brain->data->ballDetected.load(std::memory_order_acquire)
         && fabs(brain->data->ball.yawToRobot) < M_PI / 2.
         && !avoidKick
         && ball.range < 1.5
@@ -1770,7 +2161,8 @@ NodeStatus Kick::onRunning()
     if (
         enableAbort 
         && (
-            (brain->data->ballDetected && ballRange - _minRange > MOVE_RANGE_THRESHOLD) 
+            (brain->data->ballDetected.load(std::memory_order_acquire) &&
+             ballRange - _minRange > MOVE_RANGE_THRESHOLD)
             || brain->msecsSince(brain->data->ball.timePoint) > BALL_LOST_THRESHOLD 
         )
     ) {
@@ -1803,7 +2195,7 @@ NodeStatus Kick::onRunning()
     }
 
 
-    if (brain->data->ballDetected) { 
+    if (brain->data->ballDetected.load(std::memory_order_acquire)) {
         double angle = brain->data->ball.yawToRobot;
         double speed = getInput<double>("speed_limit").value();
         _speed += 0.1; 
@@ -1881,7 +2273,9 @@ NodeStatus RLVisionKick::onRunning()
     double minMsecKick = getInput<double>("min_msec_kick").value();
     
     // Check if ball is too far or cost is too high
-    bool ballTooFar = brain->data->ballDetected && brain->data->ball.range > 5.0;
+    bool ballTooFar =
+        brain->data->ballDetected.load(std::memory_order_acquire) &&
+        brain->data->ball.range > 5.0;
     bool shouldExit = (((ballTooFar || brain->data->tmMyCost > 8.0) && (elapsed > minMsecKick)) || brain->data->lose_ball || brain->tree->getEntry<bool>("ball_out"));
     
     if (shouldExit) {
@@ -1980,7 +2374,7 @@ void StandStill::onHalted()
 
 NodeStatus RobotFindBall::onStart()
 {
-    if (brain->data->ballDetected)
+    if (brain->data->ballDetected.load(std::memory_order_acquire))
     {
         brain->client->setVelocity(0, 0, 0);
         return NodeStatus::SUCCESS;
@@ -1992,7 +2386,7 @@ NodeStatus RobotFindBall::onStart()
 
 NodeStatus RobotFindBall::onRunning()
 {
-    if (brain->data->ballDetected)
+    if (brain->data->ballDetected.load(std::memory_order_acquire))
     {
         brain->client->setVelocity(0, 0, 0);
         return NodeStatus::SUCCESS;
@@ -2036,7 +2430,7 @@ NodeStatus CamFastScan::onRunning()
 NodeStatus TurnOnSpot::onStart()
 {
     _timeStart = brain->get_clock()->now();
-    _lastAngle = brain->data->robotPoseToOdom.theta;
+    _lastAngle = brain->data->getRobotPoseToOdom().theta;
     _cumAngle = 0.0;
 
     bool towardsBall = false;
@@ -2053,7 +2447,7 @@ NodeStatus TurnOnSpot::onStart()
 
 NodeStatus TurnOnSpot::onRunning()
 {
-    double curAngle = brain->data->robotPoseToOdom.theta;
+    double curAngle = brain->data->getRobotPoseToOdom().theta;
     double deltaAngle = toPInPI(curAngle - _lastAngle);
     _lastAngle = curAngle;
     _cumAngle += deltaAngle;

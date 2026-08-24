@@ -7,6 +7,7 @@
 #include <cstdint>
 
 #include "shooting_adjust_utils.h"
+#include "score_run_controller.h"
 #include "types.h"
 
 class Brain;
@@ -137,6 +138,9 @@ public:
             InputPort<double>("head_settle_step_rad", 0.02, "Head yaw/pitch step near the pixel deadband (rad)"),
             InputPort<double>("head_deadband_x_px", 35.0, "Horizontal head tracking deadband (px)"),
             InputPort<double>("head_deadband_y_px", 35.0, "Vertical head tracking deadband (px)"),
+            InputPort<double>("target_y_ratio", 0.50, "Vertical image ratio used as the nominal ball centre target"),
+            InputPort<double>("bottom_margin_px", 0.0, "Minimum pixels kept below the complete ball bounding box"),
+            InputPort<double>("head_pitch_limit_down", 0.90, "Maximum downward head pitch used by tracking (rad)"),
             OutputPort<double>("theta")
         };
     }
@@ -163,6 +167,9 @@ public:
             InputPort<double>("head_search_speed", 0.20, "Head yaw scan speed"),
             InputPort<double>("body_search_speed", 0.45, "Exact body yaw speed used for an RGB yaw/pitch-triggered turn after ball loss"),
             InputPort<double>("cmd_interval_msec", 100.0, "Minimum time between head commands"),
+            InputPort<double>("bottom_edge_margin_px", 10.0, "RGB bbox-bottom margin that identifies a loss through the bottom image edge"),
+            InputPort<double>("bottom_edge_pitch_step_rad", 0.0, "One-time downward pitch nudge after a bottom-edge loss; zero disables"),
+            InputPort<double>("bottom_edge_pitch_limit_rad", 0.85, "Maximum downward pitch for the bottom-edge recovery nudge"),
             OutputPort<double>("theta")
         };
     }
@@ -732,10 +739,54 @@ private:
 
 
 /**
+ * Bounded straight scoring run. This node only produces a desired velocity;
+ * the generated tree still routes it through ObstacleAvoidance before the
+ * single SetVelocity publisher.
+ */
+class ScoreBall : public SyncActionNode
+{
+public:
+    ScoreBall(const string &name, const NodeConfig &config, Brain *_brain)
+        : SyncActionNode(name, config), brain(_brain) {}
+
+    static PortsList providedPorts()
+    {
+        return {
+            InputPort<bool>("active", false, "Whether the one-shot scoring run is selected"),
+            InputPort<double>("vx", 1.0, "Straight forward scoring speed (m/s)"),
+            InputPort<double>("start_max_range", 1.70, "Maximum fresh ball range that permits score entry (m)"),
+            InputPort<double>("start_max_yaw", 0.12, "Maximum absolute forward ball yaw that permits score entry (rad)"),
+            InputPort<double>("ball_max_age_msec", 300.0, "Maximum ball age accepted at score entry and during the run"),
+            InputPort<double>("ball_lost_grace_msec", 800.0, "How long to continue after the ball passes below the camera"),
+            InputPort<double>("max_duration_msec", 2500.0, "Absolute scoring-run timeout"),
+            InputPort<double>("head_pitch", 0.45, "Forward-looking head pitch during score"),
+            InputPort<double>("head_pitch_limit_down", 0.90, "Maximum downward head pitch during score"),
+            InputPort<double>("head_yaw", 0.0, "Forward-looking head yaw during score"),
+            OutputPort<double>("command_vx"),
+            OutputPort<double>("command_vy"),
+            OutputPort<double>("command_theta"),
+            OutputPort<bool>("done"),
+            OutputPort<string>("state")
+        };
+    }
+
+    NodeStatus tick() override;
+
+private:
+    Brain *brain;
+    booster_soccer::score_run::Controller _controller;
+    rclcpp::Time _lastHeadCommandTime = rclcpp::Time(0, 0, RCL_ROS_TIME);
+    rclcpp::Time _lastLogTime = rclcpp::Time(0, 0, RCL_ROS_TIME);
+    string _lastState;
+};
+
+
+/**
  * @brief Fine robot-relative positioning for a shooting pose.
  *
- * Commands one fixed head yaw for each ball acquisition, then publishes vx,
- * vy, and theta outputs. The caller owns the single SetVelocity command.
+ * Keeps a fixed head yaw while optionally moving pitch toward a lower ball
+ * target, then publishes vx, vy, theta, and stable-readiness outputs. The
+ * caller owns the single SetVelocity command.
  */
 class ShootingAdjust : public SyncActionNode
 {
@@ -758,7 +809,7 @@ public:
             InputPort<double>("vy_limit", 0.4, "Lateral speed limit (m/s)"),
             InputPort<double>("vtheta_limit", 0.8, "Body yaw speed limit (rad/s)"),
             InputPort<double>("turn_first_threshold", 0.50, "Stop forward motion while yaw error exceeds this angle; lateral goal alignment continues (rad, zero disables)"),
-            InputPort<double>("fixed_head_yaw", 0.0, "Head yaw commanded once whenever the ball is acquired (rad)"),
+            InputPort<double>("fixed_head_yaw", 0.0, "Head yaw held while adjustment owns head tracking (rad)"),
             InputPort<double>("max_ball_range", 1.20, "Maximum depth range that enables shooting-adjustment body motion (m)"),
             InputPort<double>("ball_max_age_msec", 300.0, "Maximum age of the ball observation used for any body motion"),
             InputPort<double>("goal_alignment_gain", 1.0, "Lateral speed gain for normalized goal-center/ball pixel error"),
@@ -767,9 +818,20 @@ public:
             InputPort<double>("goal_min_post_separation_px", 40.0, "Minimum horizontal separation between the two goalposts used as a goal-center target"),
             InputPort<double>("goal_max_age_msec", 300.0, "Maximum age of a goalpost observation used for lateral alignment"),
             InputPort<double>("goal_ball_max_skew_msec", 100.0, "Maximum timestamp skew between ball and goalpost observations"),
+            InputPort<double>("target_y_ratio", 0.50, "Vertical image ratio used as the nominal ball centre target"),
+            InputPort<double>("bottom_margin_px", 0.0, "Minimum pixels kept below the complete ball bounding box"),
+            InputPort<double>("head_step_rad", 0.0, "Slow adjust-mode head pitch step per new RGB frame; zero preserves legacy fixed-pitch behavior"),
+            InputPort<double>("head_settle_step_rad", 0.0, "Adjust-mode head pitch step near the target deadband"),
+            InputPort<double>("head_deadband_y_px", 35.0, "Adjust-mode vertical target deadband"),
+            InputPort<double>("head_pitch_limit_down", 0.90, "Maximum downward adjust-mode head pitch"),
+            InputPort<int>("ready_samples", 10, "Consecutive fresh adjustment samples required before ready"),
+            InputPort<double>("ready_min_msec", 1000.0, "Minimum stable adjustment time before ready"),
+            InputPort<double>("ready_data_max_age_msec", 500.0, "Maximum gap between readiness evidence frames"),
+            InputPort<double>("reset_epoch", 0.0, "Blackboard epoch advanced whenever adjustment is re-entered or invalidated"),
             OutputPort<double>("vx"),
             OutputPort<double>("vy"),
-            OutputPort<double>("theta")
+            OutputPort<double>("theta"),
+            OutputPort<bool>("ready")
         };
     }
 
@@ -777,7 +839,16 @@ public:
 
 private:
     Brain *brain;
+    rclcpp::Time _lastProcessedBallTime = rclcpp::Time(0, 0, RCL_ROS_TIME);
+    bool _hasLastProcessedBallFrame = false;
+    rclcpp::Time _readyStartTime = rclcpp::Time(0, 0, RCL_ROS_TIME);
+    rclcpp::Time _lastReadySampleBallTime = rclcpp::Time(0, 0, RCL_ROS_TIME);
     std::uint64_t _fixedHeadCommandGeneration = 0;
+    std::uint64_t _readyBallGeneration = 0;
+    int _readySampleCount = 0;
+    bool _readyLatched = false;
+    double _lastResetEpoch = 0.0;
+    bool _resetEpochInitialized = false;
     shooting_adjust::AlignmentDeadband _goalAlignmentDeadband;
 };
 

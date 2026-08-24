@@ -1,5 +1,6 @@
 #pragma once
 
+#include <atomic>
 #include <string>
 #include <ostream>
 #include <rclcpp/rclcpp.hpp>
@@ -77,6 +78,7 @@ public:
 
     int get_depth_sample_step();
     double get_obstacle_min_height();
+    double get_obstacle_max_height();
     double get_grid_size();
     double get_max_x();
     double get_max_y();
@@ -89,6 +91,12 @@ public:
     double get_freekick_start_placing_safe_distance();
     double get_freekick_start_placing_avoid_secs();
     double get_obstacle_memory_msecs();
+    double get_obstacle_avoid_distance();
+    double get_obstacle_stop_distance();
+    double get_depth_stale_msecs();
+    double get_detection_stale_msecs();
+    double get_head_pose_tolerance_msecs();
+    double get_obstacle_angular_resolution_degrees();
     bool get_avoid_during_kick();
     double get_kick_ao_safe_dist();
     bool get_avoid_during_chase();
@@ -113,14 +121,17 @@ public:
     int cameraImageHeight = 720;
 
 
-    double depthCameraFovX = deg2rad(90);
-    double depthCameraFovY = deg2rad(65);
+    // CameraInfo can update these while the behavior tree selects a bounded
+    // head scan. Atomics keep the live calibration read coherent.
+    std::atomic<double> depthCameraFovX{deg2rad(90)};
+    std::atomic<double> depthCameraFovY{deg2rad(65)};
     double depthCameraFx = 643.898;
     double depthCameraFy = 643.216;
     double depthCameraCx = 649.038;
     double depthCameraCy = 357.21;
 
     Eigen::Matrix4d camToHead;
+    Eigen::Matrix4d headCompensation = Eigen::Matrix4d::Identity();
 
     void calcMapLines();
     void calcMapMarkings();

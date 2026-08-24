@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <cmath>
 #include "brain.h"
 #include <booster/robot/b1/b1_loco_api.hpp>
@@ -30,7 +31,13 @@ int RobotClient::call(booster_interface::msg::BoosterApiReqMsg msg)
 int RobotClient::moveHead(double pitch, double yaw)
 {
     yaw = cap(yaw, brain->config->get_head_yaw_limit_left(), brain->config->get_head_yaw_limit_right());
-    pitch = max(pitch, brain->config->get_head_pitch_limit_up());
+    constexpr double absolutePitchLimitDown = 0.90;
+    double pitchLimitUp = brain->config->get_head_pitch_limit_up();
+    if (!std::isfinite(pitchLimitUp)) pitchLimitUp = 0.45;
+    pitchLimitUp = std::min(pitchLimitUp, absolutePitchLimitDown);
+    pitch = std::isfinite(pitch)
+        ? std::clamp(pitch, pitchLimitUp, absolutePitchLimitDown)
+        : pitchLimitUp;
 
     brain->log->debug("move_head_2004", format("pitch: %.3f, yaw: %.3f", pitch, yaw));
 

@@ -84,11 +84,45 @@ install(DIRECTORY behavior_trees
   DESTINATION share/${PROJECT_NAME})
 
 if(BUILD_TESTING)
+  add_executable(ball_framing_utils_test test/ball_framing_utils_test.cpp)
+  target_include_directories(ball_framing_utils_test PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/include)
+  target_compile_features(ball_framing_utils_test PRIVATE cxx_std_17)
+  add_test(NAME ball_framing_utils_test COMMAND ball_framing_utils_test)
+
   add_executable(shooting_adjust_utils_test test/shooting_adjust_utils_test.cpp)
   target_include_directories(shooting_adjust_utils_test PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/include)
   target_compile_features(shooting_adjust_utils_test PRIVATE cxx_std_17)
   add_test(NAME shooting_adjust_utils_test COMMAND shooting_adjust_utils_test)
+
+  add_executable(score_run_controller_test test/score_run_controller_test.cpp)
+  target_include_directories(score_run_controller_test PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/include)
+  target_compile_features(score_run_controller_test PRIVATE cxx_std_17)
+  add_test(NAME score_run_controller_test COMMAND score_run_controller_test)
+
+  add_executable(obstacle_planner_test
+    test/obstacle_planner_test.cpp
+    src/obstacle_planner.cpp)
+  target_include_directories(obstacle_planner_test PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/include)
+  target_compile_features(obstacle_planner_test PRIVATE cxx_std_17)
+  add_test(NAME obstacle_planner_test COMMAND obstacle_planner_test)
+
+  add_executable(obstacle_perception_utils_test
+    test/obstacle_perception_utils_test.cpp)
+  target_include_directories(obstacle_perception_utils_test PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/include)
+  target_compile_features(obstacle_perception_utils_test PRIVATE cxx_std_17)
+  add_test(NAME obstacle_perception_utils_test COMMAND obstacle_perception_utils_test)
+
+  add_executable(ball_occlusion_utils_test
+    test/ball_occlusion_utils_test.cpp)
+  target_include_directories(ball_occlusion_utils_test PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/include)
+  target_compile_features(ball_occlusion_utils_test PRIVATE cxx_std_17)
+  add_test(NAME ball_occlusion_utils_test COMMAND ball_occlusion_utils_test)
 
   find_package(ament_lint_auto REQUIRED)
   # the following line skips the linter which checks for copyrights

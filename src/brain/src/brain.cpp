@@ -1,10 +1,14 @@
 #include <iostream>
+#include <algorithm>
 #include <cmath>
+#include <limits>
 #include <string>
+#include <utility>
 #include <fstream> 
 #include <yaml-cpp/yaml.h>
 
 #include "brain.h"
+#include "obstacle_perception_utils.h"
 #include "utils/print.h"
 #include "utils/math.h"
 #include "utils/misc.h"
@@ -91,23 +95,31 @@ Brain::Brain() : rclcpp::Node("brain_node")
     declare_parameter<bool>("strategy.cooperation.enable_role_switch", true);
     declare_parameter<double>("strategy.cooperation.ball_control_cost_threshold", 10.0);
 
-    declare_parameter<int>("obstacle_avoidance.depth_sample_step", 16);
-    declare_parameter<double>("obstacle_avoidance.obstacle_min_height", 0.15);
-    declare_parameter<double>("obstacle_avoidance.grid_size", 0.2);
-    declare_parameter<double>("obstacle_avoidance.max_x", 0.2);
-    declare_parameter<double>("obstacle_avoidance.max_y", 0.2);
-    declare_parameter<double>("obstacle_avoidance.exclusion_x", 0.25);
-    declare_parameter<double>("obstacle_avoidance.exclusion_y", 0.4);
-    declare_parameter<double>("obstacle_avoidance.ball_exclusion_radius", 0.3);
+    declare_parameter<bool>("obstacle_avoidance.enable", true);
+    declare_parameter<int>("obstacle_avoidance.depth_sample_step", 8);
+    declare_parameter<double>("obstacle_avoidance.obstacle_min_height", 0.12);
+    declare_parameter<double>("obstacle_avoidance.obstacle_max_height", 2.0);
+    declare_parameter<double>("obstacle_avoidance.grid_size", 0.1);
+    declare_parameter<double>("obstacle_avoidance.max_x", 3.0);
+    declare_parameter<double>("obstacle_avoidance.max_y", 5.0);
+    declare_parameter<double>("obstacle_avoidance.exclusion_x", 0.12);
+    declare_parameter<double>("obstacle_avoidance.exclusion_y", 0.18);
+    declare_parameter<double>("obstacle_avoidance.ball_exclusion_radius", 0.2);
     declare_parameter<double>("obstacle_avoidance.ball_exclusion_height", 0.3);
-    declare_parameter<double>("obstacle_avoidance.occupancy_threshold", 5.0);
-    declare_parameter<double>("obstacle_avoidance.collision_threshold", 0.5);
+    declare_parameter<double>("obstacle_avoidance.occupancy_threshold", 3.0);
+    declare_parameter<double>("obstacle_avoidance.collision_threshold", 0.4);
     declare_parameter<double>("obstacle_avoidance.safe_distance", 2.0);
     declare_parameter<double>("obstacle_avoidance.avoid_secs", 3.0);
     declare_parameter<bool>("obstacle_avoidance.enable_freekick_avoid", false);
     declare_parameter<double>("obstacle_avoidance.freekick_start_placing_safe_distance", 0.5);
     declare_parameter<double>("obstacle_avoidance.freekick_start_placing_avoid_secs", 1.5);
-    declare_parameter<double>("obstacle_avoidance.obstacle_memory_msecs", 500.0);
+    declare_parameter<double>("obstacle_avoidance.obstacle_memory_msecs", 300.0);
+    declare_parameter<double>("obstacle_avoidance.avoid_distance", 1.4);
+    declare_parameter<double>("obstacle_avoidance.stop_distance", 0.5);
+    declare_parameter<double>("obstacle_avoidance.depth_stale_msecs", 300.0);
+    declare_parameter<double>("obstacle_avoidance.detection_stale_msecs", 300.0);
+    declare_parameter<double>("obstacle_avoidance.head_pose_tolerance_msecs", 40.0);
+    declare_parameter<double>("obstacle_avoidance.angular_resolution_degrees", 5.0);
     declare_parameter<bool>("obstacle_avoidance.avoid_during_chase", false);
     declare_parameter<double>("obstacle_avoidance.chase_ao_safe_dist", 2.0);
     declare_parameter<bool>("obstacle_avoidance.avoid_during_kick", false);
@@ -289,6 +301,33 @@ void Brain::loadConfig()
             config->camToHead(i, j) = extrin[i][j].as<double>();
         }
     }
+
+    // Match vision's transform order exactly:
+    // head_to_base * headprime_to_head(compensation) * camera_to_head.
+    const auto cameraConfig = vConfig["camera"];
+    const double pitchCompensation = cameraConfig["pitch_compensation"]
+        ? cameraConfig["pitch_compensation"].as<double>() * M_PI / 180.0
+        : 0.0;
+    const double yawCompensation = cameraConfig["yaw_compensation"]
+        ? cameraConfig["yaw_compensation"].as<double>() * M_PI / 180.0
+        : 0.0;
+    const double zCompensation = cameraConfig["z_compensation"]
+        ? cameraConfig["z_compensation"].as<double>()
+        : 0.0;
+    Eigen::Matrix3d pitchRotation;
+    pitchRotation <<
+        cos(pitchCompensation), 0.0, sin(pitchCompensation),
+        0.0, 1.0, 0.0,
+        -sin(pitchCompensation), 0.0, cos(pitchCompensation);
+    Eigen::Matrix3d yawRotation;
+    yawRotation <<
+        cos(yawCompensation), -sin(yawCompensation), 0.0,
+        sin(yawCompensation), cos(yawCompensation), 0.0,
+        0.0, 0.0, 1.0;
+    config->headCompensation = Eigen::Matrix4d::Identity();
+    config->headCompensation.block<3, 3>(0, 0) = yawRotation * pitchRotation;
+    config->headCompensation(2, 3) = zCompensation;
+
     string str_cam2head = "camToHead: \n";
     for (int i = 0; i < 4; ++i) {
         for (int j = 0; j < 4; ++j) {
@@ -297,9 +336,66 @@ void Brain::loadConfig()
         str_cam2head += "\n";
     }
     prtDebug(str_cam2head);
+    prtDebug(format(
+        "camera compensation: pitch %.3f deg, yaw %.3f deg, z %.3f m",
+        pitchCompensation * 180.0 / M_PI,
+        yawCompensation * 180.0 / M_PI,
+        zCompensation));
 
 
     config->handle();
+
+    const double obstacleStopDistance = config->get_obstacle_stop_distance();
+    const double obstacleAvoidDistance = config->get_obstacle_avoid_distance();
+    const double obstacleDepthRange = config->get_max_x();
+    if (!(0.0 < obstacleStopDistance &&
+          obstacleStopDistance < obstacleAvoidDistance &&
+          obstacleAvoidDistance <= obstacleDepthRange)) {
+        throw invalid_argument(format(
+            "Obstacle distances must satisfy 0 < stop_distance < avoid_distance <= max_x; got %.3f < %.3f with max_x %.3f",
+            obstacleStopDistance,
+            obstacleAvoidDistance,
+            obstacleDepthRange));
+    }
+    if (config->get_depth_sample_step() <= 0 ||
+        !(config->get_grid_size() > 0.0) ||
+        !(config->get_max_y() > 0.0) ||
+        !(config->get_obstacle_min_height() >= 0.0) ||
+        !(config->get_obstacle_max_height() > config->get_obstacle_min_height()) ||
+        !(config->get_occupancy_threshold() >= 1.0) ||
+        !(config->get_collision_threshold() > 0.0) ||
+        !(config->get_collision_threshold() <= config->get_max_x()) ||
+        !(config->get_collision_threshold() <= config->get_max_y()) ||
+        !(config->get_obstacle_memory_msecs() >= 0.0) ||
+        !(config->get_depth_stale_msecs() > 0.0) ||
+        !(config->get_detection_stale_msecs() > 0.0) ||
+        !(config->get_head_pose_tolerance_msecs() >= 0.0) ||
+        !(config->get_obstacle_angular_resolution_degrees() >= 1.0) ||
+        !(config->get_obstacle_angular_resolution_degrees() <= 30.0) ||
+        !(config->get_ball_exclusion_radius() > 0.0) ||
+        !(config->get_ball_exclusion_height() >=
+            config->get_obstacle_min_height())) {
+        throw invalid_argument(
+            "Invalid obstacle_avoidance perception/safety configuration");
+    }
+    const double exclusionX = config->get_exclusion_x();
+    const double exclusionY = config->get_exclusion_y();
+    const double maximumSelfExclusionX = std::min(0.15, obstacleStopDistance * 0.75);
+    const double maximumSelfExclusionY = std::min(0.25, obstacleStopDistance * 0.75);
+    if (!(exclusionX >= 0.0) || exclusionX > maximumSelfExclusionX) {
+        throw invalid_argument(format(
+            "obstacle_avoidance.exclusion_x %.3f creates a blind zone inside stop_distance %.3f; maximum allowed is %.3f",
+            exclusionX,
+            obstacleStopDistance,
+            maximumSelfExclusionX));
+    }
+    if (!(exclusionY >= 0.0) || exclusionY > maximumSelfExclusionY) {
+        throw invalid_argument(format(
+            "obstacle_avoidance.exclusion_y %.3f creates a blind zone inside stop_distance %.3f; maximum allowed is %.3f",
+            exclusionY,
+            obstacleStopDistance,
+            maximumSelfExclusionY));
+    }
 
     // playerRole [striker, goal_keeper]
     string _playerRole = config->get_player_role();
@@ -316,6 +412,7 @@ void Brain::loadConfig()
 
 void Brain::tick()
 {
+    std::lock_guard<std::mutex> detectionTickLock(detectionTickMutex_);
     // Output debug & log related information
     logDebugInfo();
     logLags();
@@ -684,7 +781,7 @@ void Brain::updateKickoffMemory() {
     const double BALL_MOVE_THRESHOLD_FACTOR = 0.15; 
     const double BALL_MOVE_THRESHOLD_MIN = 0.3; 
     auto ballMoved = [=]() {
-        if (!data->ballDetected) return false; 
+        if (!data->ballDetected.load(std::memory_order_acquire)) return false;
         double range = data->ball.range;
         double threshold = max(range * BALL_MOVE_THRESHOLD_FACTOR, BALL_MOVE_THRESHOLD_MIN);
         double posChange = norm(data->ball.posToRobot.x - ballPos.x, data->ball.posToRobot.y - ballPos.y);
@@ -934,10 +1031,11 @@ bool Brain::isDefensing() {
 void Brain::calibrateOdom(double x, double y, double theta)
 {
 
+    const Pose2D robotPoseToOdom = data->getRobotPoseToOdom();
     double x_or, y_or, theta_or; // or = odom to robot
-    x_or = -cos(data->robotPoseToOdom.theta) * data->robotPoseToOdom.x - sin(data->robotPoseToOdom.theta) * data->robotPoseToOdom.y;
-    y_or = sin(data->robotPoseToOdom.theta) * data->robotPoseToOdom.x - cos(data->robotPoseToOdom.theta) * data->robotPoseToOdom.y;
-    theta_or = -data->robotPoseToOdom.theta;
+    x_or = -cos(robotPoseToOdom.theta) * robotPoseToOdom.x - sin(robotPoseToOdom.theta) * robotPoseToOdom.y;
+    y_or = sin(robotPoseToOdom.theta) * robotPoseToOdom.x - cos(robotPoseToOdom.theta) * robotPoseToOdom.y;
+    theta_or = -robotPoseToOdom.theta;
 
     
     transCoord(x_or, y_or, theta_or,
@@ -946,7 +1044,7 @@ void Brain::calibrateOdom(double x, double y, double theta)
 
 
     transCoord(
-        data->robotPoseToOdom.x, data->robotPoseToOdom.y, data->robotPoseToOdom.theta,
+        robotPoseToOdom.x, robotPoseToOdom.y, robotPoseToOdom.theta,
         data->odomToField.x, data->odomToField.y, data->odomToField.theta,
         data->robotPoseToField.x, data->robotPoseToField.y, data->robotPoseToField.theta);
 
@@ -980,7 +1078,9 @@ void Brain::calibrateOdom(double x, double y, double theta)
 
     // relog
     vector<GameObject> gameObjects = {};
-    if(data->ballDetected) gameObjects.push_back(data->ball);
+    if (data->ballDetected.load(std::memory_order_acquire)) {
+        gameObjects.push_back(data->ball);
+    }
     for (int i = 0; i < markings.size(); i++) gameObjects.push_back(markings[i]);
     for (int i = 0; i < robots.size(); i++) gameObjects.push_back(robots[i]);
     for (int i = 0; i < goalposts.size(); i++) gameObjects.push_back(goalposts[i]);
@@ -989,7 +1089,7 @@ void Brain::calibrateOdom(double x, double y, double theta)
 
 void Brain::pubKickMsg() {
     if (!pubKickBall) return;
-    if (!data->ballDetected) return;
+    if (!data->ballDetected.load(std::memory_order_acquire)) return;
     brain::msg::Kick kickMsg;
     kickMsg.header.stamp = get_clock()->now();
     kickMsg.x = data->ball.posToRobot.x;
@@ -1102,6 +1202,7 @@ void Brain::gameControlCallback(const game_controller_interface::msg::GameContro
         prtWarn("Agent mode, ignore game control");
         return;
     };
+    std::lock_guard<std::mutex> detectionTickLock(detectionTickMutex_);
     data->timeLastGamecontrolMsg = get_clock()->now();
 
     // Handle primary game state
@@ -1116,7 +1217,42 @@ void Brain::gameControlCallback(const game_controller_interface::msg::GameContro
 
     int teamId = config->get_team_id();
     int playerId = config->get_player_id();
+    if (msg.teams[0].team_number != teamId &&
+        msg.teams[1].team_number != teamId) {
+        prtErr(format(
+            "received invalid game controller message team0 %d, team1 %d, teamId %d",
+            msg.teams[0].team_number,
+            msg.teams[1].team_number,
+            teamId));
+        return;
+    }
     string gameState = gameStateMap[static_cast<int>(msg.state)];
+
+    const bool scoreWasActive =
+        tree->getEntry<bool>("autonomy_score_active") ||
+        tree->getEntry<string>("autonomy_manual_mode") == "score" ||
+        tree->getEntry<string>("autonomy_striker_phase") == "score";
+    if (gameState != "PLAY" &&
+        (lastGameState != gameState || scoreWasActive)) {
+        tree->setEntry<bool>("autonomy_adjust_ready", false);
+        const double previousEpoch = tree->getEntry<double>("autonomy_adjust_epoch");
+        tree->setEntry<double>(
+            "autonomy_adjust_epoch",
+            std::isfinite(previousEpoch) ? previousEpoch + 1.0 : 0.0);
+        tree->setEntry<bool>("autonomy_score_active", false);
+        if (tree->getEntry<string>("autonomy_manual_mode") == "score") {
+            tree->setEntry<string>("autonomy_manual_mode", "track");
+        }
+        if (tree->getEntry<string>("autonomy_striker_phase") == "score") {
+            tree->setEntry<string>("autonomy_striker_phase", "track");
+        }
+        if (lastGameState == "PLAY" || scoreWasActive) {
+            tree->setEntry<double>("autonomy_command_vx", 0.0);
+            tree->setEntry<double>("autonomy_command_vy", 0.0);
+            tree->setEntry<double>("autonomy_command_theta", 0.0);
+            client->setVelocity(0.0, 0.0, 0.0);
+        }
+    }
     tree->setEntry<string>("gc_game_state", gameState);
     bool isKickOffSide = (msg.kick_off_team == teamId); // Whether our team is the kickoff side
     tree->setEntry<bool>("gc_is_kickoff_side", isKickOffSide);
@@ -1229,6 +1365,7 @@ void Brain::gameControlCallback(const game_controller_interface::msg::GameContro
 
 void Brain::detectionsCallback(const vision_interface::msg::Detections &msg)
 {
+    std::lock_guard<std::mutex> detectionTickLock(detectionTickMutex_);
     // std::lock_guard<std::mutex> guard(data->brainMutex);
     
     // auto detection_time_stamp = msg.header.stamp;
@@ -1237,6 +1374,7 @@ void Brain::detectionsCallback(const vision_interface::msg::Detections &msg)
     auto timePoint = timePointFromHeader(msg.header);
 
     auto now = get_clock()->now();
+    data->markDetectionFrameReceived(timePoint, now);
     data->timeLastDet = timePoint; // Used to output delay information during debugging
 
     auto gameObjects = getGameObjects(msg);
@@ -1265,10 +1403,18 @@ void Brain::detectionsCallback(const vision_interface::msg::Detections &msg)
     }
 
     // Process the grouped objects separately
-    const auto shootingBall = detectProcessBalls(balls);
+    const auto shootingBall = detectProcessBalls(balls, now);
     detectProcessGoalposts(goalposts);
     detectProcessMarkings(markings);
     detectProcessRobots(robots);
+
+    // Depth remains the authority for collision geometry. These fresh labels
+    // only enrich a spatially matching physical component.
+    vector<GameObject> semanticObstacles = persons;
+    for (const auto &robot : robots) {
+        if (robot.label == "Opponent") semanticObstacles.push_back(robot);
+    }
+    data->setSemanticObstacles(semanticObstacles);
 
     // Handle and record vision information
     detectProcessVisionBox(msg);
@@ -1329,18 +1475,25 @@ void Brain::fieldLineCallback(const vision_interface::msg::LineSegments &msg)
 
 void Brain::odometerCallback(const booster_interface::msg::Odometer &msg)
 {
-
-    data->robotPoseToOdom.x = msg.x * config->get_robot_odom_factor();
-    data->robotPoseToOdom.y = msg.y * config->get_robot_odom_factor();
-    data->robotPoseToOdom.theta = msg.theta;
+    const Pose2D robotPoseToOdom{
+        msg.x * config->get_robot_odom_factor(),
+        msg.y * config->get_robot_odom_factor(),
+        msg.theta};
+    if (!std::isfinite(robotPoseToOdom.x) ||
+        !std::isfinite(robotPoseToOdom.y) ||
+        !std::isfinite(robotPoseToOdom.theta)) {
+        RCLCPP_WARN(get_logger(), "Ignoring invalid odometry pose");
+        return;
+    }
+    data->setRobotPoseToOdom(robotPoseToOdom);
 
     // Based on Odom information, update the robot's position in the Field coordinate system
     transCoord(
-        data->robotPoseToOdom.x, data->robotPoseToOdom.y, data->robotPoseToOdom.theta,
+        robotPoseToOdom.x, robotPoseToOdom.y, robotPoseToOdom.theta,
         data->odomToField.x, data->odomToField.y, data->odomToField.theta,
         data->robotPoseToField.x, data->robotPoseToField.y, data->robotPoseToField.theta);
 
-    log->debug("odom_callback", format("x: %.1f, y: %.1f, z: %.1f", data->robotPoseToOdom.x, data->robotPoseToOdom.y, data->robotPoseToOdom.theta));
+    log->debug("odom_callback", format("x: %.1f, y: %.1f, z: %.1f", robotPoseToOdom.x, robotPoseToOdom.y, robotPoseToOdom.theta));
 }
 
 void Brain::lowStateCallback(const booster_interface::msg::LowState &msg)
@@ -1355,12 +1508,15 @@ void Brain::lowStateCallback(const booster_interface::msg::LowState &msg)
 
 void Brain::imageCameraInfoCallback(const sensor_msgs::msg::CameraInfo::SharedPtr msg)
 {
+    std::lock_guard<std::mutex> detectionTickLock(detectionTickMutex_);
     config->cameraImageWidth = msg->width;
     config->cameraImageHeight = msg->height;
 }
 
 void Brain::depthCameraInfoCallback(const sensor_msgs::msg::CameraInfo::SharedPtr msg)
 {
+    std::lock_guard<std::mutex> detectionTickLock(detectionTickMutex_);
+    std::lock_guard<std::mutex> cameraInfoLock(depthCameraInfoMutex_);
 
     // Using CameraInfo, calculate the camera's fovx and fovy
     config->depthCameraFx = static_cast<double>(msg->k[0]);
@@ -1369,8 +1525,12 @@ void Brain::depthCameraInfoCallback(const sensor_msgs::msg::CameraInfo::SharedPt
     config->depthCameraCy = static_cast<double>(msg->k[5]);
     double w = static_cast<double>(msg->width);
     double h = static_cast<double>(msg->height);
-    config->depthCameraFovX = 2.0 * atan(w / (2.0 * config->depthCameraFx));
-    config->depthCameraFovY = 2.0 * atan(h / (2.0 * config->depthCameraFy));
+    config->depthCameraFovX.store(
+        2.0 * atan(w / (2.0 * config->depthCameraFx)),
+        std::memory_order_release);
+    config->depthCameraFovY.store(
+        2.0 * atan(h / (2.0 * config->depthCameraFy)),
+        std::memory_order_release);
 }
 
 void Brain::headPoseCallback(const geometry_msgs::msg::Pose& msg)
@@ -1385,6 +1545,16 @@ void Brain::headPoseCallback(const geometry_msgs::msg::Pose& msg)
         msg.orientation.y,
         msg.orientation.z
     );
+    if (!std::isfinite(q.w()) || !std::isfinite(q.x()) ||
+        !std::isfinite(q.y()) || !std::isfinite(q.z()) ||
+        q.norm() < 1e-6 ||
+        !std::isfinite(msg.position.x) ||
+        !std::isfinite(msg.position.y) ||
+        !std::isfinite(msg.position.z)) {
+        RCLCPP_WARN(get_logger(), "Ignoring invalid head pose");
+        return;
+    }
+    q.normalize();
     headToBase.block<3,3>(0,0) = q.toRotationMatrix();
     
     // Set translation vector
@@ -1394,8 +1564,44 @@ void Brain::headPoseCallback(const geometry_msgs::msg::Pose& msg)
         msg.position.z
     );
 
-    // Calculate cam_to_base matrix and store it
-    data->camToRobot = headToBase * config->camToHead;
+    // Calculate the compensated camera-to-base transform with the same order
+    // used by vision, then retain receive-timestamped samples for depth sync.
+    const Eigen::Matrix4d camToRobot =
+        headToBase * config->headCompensation * config->camToHead;
+    data->camToRobot = camToRobot; // Legacy consumers use the latest pose.
+
+    const auto receivedAt = get_clock()->now();
+    std::lock_guard<std::mutex> lock(headPoseBufferMutex_);
+    headPoseBuffer_.push_back(HeadPoseSample{receivedAt, camToRobot});
+    while (headPoseBuffer_.size() > 32) {
+        headPoseBuffer_.pop_front();
+    }
+}
+
+bool Brain::selectDepthHeadPose(
+    const rclcpp::Time &depthReceivedAt,
+    Eigen::Matrix4d &camToRobot) const
+{
+    std::lock_guard<std::mutex> lock(headPoseBufferMutex_);
+    const double toleranceMsecs = config->get_head_pose_tolerance_msecs();
+    for (auto it = headPoseBuffer_.rbegin(); it != headPoseBuffer_.rend(); ++it) {
+        if (it->receivedAt.get_clock_type() != depthReceivedAt.get_clock_type()) {
+            continue;
+        }
+        const double ageMsecs =
+            static_cast<double>((depthReceivedAt - it->receivedAt).nanoseconds()) / 1e6;
+        if (ageMsecs < 0.0) {
+            continue;
+        }
+        if (booster_soccer::perception::headPoseAgeAccepted(
+                ageMsecs, toleranceMsecs)) {
+            camToRobot = it->camToRobot;
+            return true;
+        }
+        // Samples are ordered newest-first, so earlier ones will only be older.
+        break;
+    }
+    return false;
 }
 
 void Brain::recoveryStateCallback(const booster_interface::msg::RawBytesMsg &msg)
@@ -1732,7 +1938,9 @@ vector<GameObject> Brain::getGameObjects(const vision_interface::msg::Detections
     return res;
 }
 
-std::optional<GameObject> Brain::detectProcessBalls(const vector<GameObject> &ballObjs)
+std::optional<GameObject> Brain::detectProcessBalls(
+    const vector<GameObject> &ballObjs,
+    const rclcpp::Time &receivedAt)
 {
     static rclcpp::Time lastSeenRealBallTime;
     const bool wasDepthAcquired =
@@ -1767,18 +1975,17 @@ std::optional<GameObject> Brain::detectProcessBalls(const vector<GameObject> &ba
         }
     }
 
-    auto now = this->get_clock()->now();
+    const auto now = receivedAt;
     std::optional<GameObject> shootingBall;
 
     if (indexRealBall >= 0)
     { // Ball detected
-        data->ballDetected = true;
-        tree->setEntry<bool>("ball_visible", true);
-
         GameObject selectedBall = ballObjs[indexRealBall];
         selectedBall.confidence = bestConfidence;
         shootingBall = selectedBall;
         data->ball = selectedBall;
+        data->ballDetected.store(true, std::memory_order_release);
+        tree->setEntry<bool>("ball_visible", true);
         if (!wasDepthAcquired && bestHasDepth)
         {
             data->ballDepthAcquired.store(true, std::memory_order_release);
@@ -1803,7 +2010,7 @@ std::optional<GameObject> Brain::detectProcessBalls(const vector<GameObject> &ba
     }
     else
     { // No ball detected
-        data->ballDetected = false;
+        data->ballDetected.store(false, std::memory_order_release);
         data->ballDepthAcquired.store(false, std::memory_order_release);
         tree->setEntry<bool>("ball_visible", false);
         tree->setEntry<bool>("ball_location_known", false);
@@ -1827,6 +2034,23 @@ std::optional<GameObject> Brain::detectProcessBalls(const vector<GameObject> &ba
 
     // Calculate the vector from the robot to the ball in the field coordinate system
     data->robotBallAngleToField = atan2(data->ball.posToField.y - data->robotPoseToField.y, data->ball.posToField.x - data->robotPoseToField.x);
+    BallDepthObservation ballObservation;
+    ballObservation.visible = indexRealBall >= 0;
+    ballObservation.depth_confirmed = indexRealBall >= 0 && bestHasDepth;
+    ballObservation.stamp = data->getLastDetectionSensorStamp();
+    // Tie the evidence payload to the exact receive marker published at the
+    // start of this detection callback so readers can reject half-updated
+    // callback state without relying on approximate timestamps.
+    ballObservation.received_at = receivedAt;
+    ballObservation.image_width = config->cameraImageWidth;
+    ballObservation.image_height = config->cameraImageHeight;
+    ballObservation.robot_pose_to_odom = data->getRobotPoseToOdom();
+    if (ballObservation.depth_confirmed) {
+        const auto &observedBall = ballObjs[indexRealBall];
+        ballObservation.position_to_robot = observedBall.posToRobot;
+        ballObservation.bounding_box = observedBall.boundingBox;
+    }
+    data->setBallDepthObservation(ballObservation);
     return shootingBall;
 }
 
@@ -1936,7 +2160,9 @@ void Brain::detectProcessVisionBox(const vision_interface::msg::Detections &msg)
 void Brain::logDepth(int grid_x_count, int grid_y_count, vector<vector<int>> &grid_occupied, vector<std::array<float, 3>> &points_robot) {
     // time is set on the outside
     const double grid_size = config->get_grid_size();  // Grid size
-    const double x_min = 0.0, x_max = config->get_max_x();
+    const double x_min = booster_soccer::perception::obstacleGridMinimumX(
+        config->get_max_x());
+    const double x_max = config->get_max_x();
     const double y_min = -config->get_max_y();
     const double y_max = -y_min;
 
@@ -1946,7 +2172,7 @@ void Brain::logDepth(int grid_x_count, int grid_y_count, vector<vector<int>> &gr
     for (const auto &point : points_robot) {
         cloud_points.emplace_back(point[0], point[1], point[2]);
     }
-    visualizer->publishPointCloud(cloud_points, "odom");
+    visualizer->publishPointCloud(cloud_points, "base_link");
     
     // Publish obstacle grid to ROS2 topic
     // ROS OccupancyGrid uses row-major format: index = y * width + x
@@ -1964,15 +2190,19 @@ void Brain::logDepth(int grid_x_count, int grid_y_count, vector<vector<int>> &gr
             }
         }
     }
-    visualizer->publishObstacleGrid(grid_data, grid_x_count, grid_y_count, 
-                                   grid_size, x_min, y_min, "odom");
+    visualizer->publishObstacleGrid(grid_data, grid_x_count, grid_y_count,
+                                   grid_size, x_min, y_min, "base_link");
 
     // Log ball exclusion box
-    double r = config->get_ball_exclusion_radius();
-    double h = config->get_ball_exclusion_height();
+    const double r = config->get_ball_exclusion_radius();
+    const auto ballObservation = data->getBallDepthObservation();
     log->debug(
         "depth/ball_exclusion_box",
-        format("Ball exclusion box at (%.2f, %.2f) with radius %.2f", data->ball.posToRobot.x, data->ball.posToRobot.y, r)
+        format(
+            "Ball exclusion box at (%.2f, %.2f) with radius %.2f",
+            ballObservation.position_to_robot.x,
+            ballObservation.position_to_robot.y,
+            r)
     );
 }
 
@@ -1985,7 +2215,8 @@ void Brain::logDebugInfo() {
     string gameSubStateType = tree->getEntry<string>("gc_game_sub_state_type");
     string isLead = data->tmImLead ? "ON" : "OFF";
     string ballOut = tree->getEntry<bool>("ball_out") ? "YES" : "NO";
-    string ballDetected = data->ballDetected ? "YES" : "NO";
+    string ballDetected =
+        data->ballDetected.load(std::memory_order_acquire) ? "YES" : "NO";
     string decision = tree->getEntry<string>("decision");
     string freeKickKickingOff = data->isFreekickKickingOff ? "YES" : "NO";
     string directShoot = data->isDirectShoot ? "YES" : "NO";
@@ -2025,6 +2256,7 @@ void Brain::updateFieldPos(GameObject &obj) {
 
 void Brain::compressedDepthImageCallback(const sensor_msgs::msg::CompressedImage::SharedPtr msg)
 {
+    const auto receivedAt = get_clock()->now();
     try {
         // Decode compressed image
         cv::Mat compressed_data = cv::Mat(msg->data);
@@ -2047,7 +2279,8 @@ void Brain::compressedDepthImageCallback(const sensor_msgs::msg::CompressedImage
         }
         
         // Call the unified depth image processing function
-        processDepthImage(depthFloat, depth_decoded.cols, depth_decoded.rows, msg->header);
+        processDepthImage(
+            depthFloat, depth_decoded.cols, depth_decoded.rows, msg->header, receivedAt);
     } catch (const std::exception &e) {
         RCLCPP_ERROR(get_logger(), "Error in compressedDepthImageCallback: %s", e.what());
     }
@@ -2055,6 +2288,7 @@ void Brain::compressedDepthImageCallback(const sensor_msgs::msg::CompressedImage
 
 void Brain::depthImageCallback(const sensor_msgs::msg::Image::ConstSharedPtr &msg)
 {
+    const auto receivedAt = get_clock()->now();
     try {
         // Check if the image data is valid
         if (msg->data.empty() || msg->height == 0 || msg->width == 0) {
@@ -2092,147 +2326,769 @@ void Brain::depthImageCallback(const sensor_msgs::msg::Image::ConstSharedPtr &ms
         }
 
         // Call the unified depth image processing function
-        processDepthImage(depthFloat, msg->width, msg->height, msg->header);
+        processDepthImage(depthFloat, msg->width, msg->height, msg->header, receivedAt);
 
     } catch (const std::exception& e) {
         RCLCPP_ERROR(get_logger(), "Exception in depth image callback: %s", e.what());
     }
 }
 
-void Brain::processDepthImage(const cv::Mat &depthFloat, int width, int height, const std_msgs::msg::Header &header)
+void Brain::processDepthImage(
+    const cv::Mat &depthFloat,
+    int width,
+    int height,
+    const std_msgs::msg::Header &header,
+    const rclcpp::Time &receivedAt)
 {
+    // Raw and compressed depth subscriptions may coexist. Build/publish one
+    // snapshot at a time so component IDs, memory, and coverage history form a
+    // single ordered stream.
+    std::lock_guard<std::mutex> processingLock(depthProcessingMutex_);
     try {
-        vector<std::array<float, 3>> points_robot;  // for log
+        if (depthFloat.empty() || depthFloat.type() != CV_32FC1 ||
+            width <= 0 || height <= 0 ||
+            depthFloat.cols < width || depthFloat.rows < height) {
+            RCLCPP_WARN(get_logger(), "Ignoring invalid decoded depth frame");
+            return;
+        }
 
-        const double fx = config->depthCameraFx;
-        const double fy = config->depthCameraFy;
-        const double cx = config->depthCameraCx;
-        const double cy = config->depthCameraCy;
-        
-        // Define grid parameters
-        const double grid_size = config->get_grid_size();  // Grid size
-        const double x_min = 0.0, x_max = config->get_max_x();
+        double fx = 0.0;
+        double fy = 0.0;
+        double cx = 0.0;
+        double cy = 0.0;
+        {
+            std::lock_guard<std::mutex> cameraInfoLock(depthCameraInfoMutex_);
+            fx = config->depthCameraFx;
+            fy = config->depthCameraFy;
+            cx = config->depthCameraCx;
+            cy = config->depthCameraCy;
+        }
+        if (!std::isfinite(fx) || !std::isfinite(fy) ||
+            !std::isfinite(cx) || !std::isfinite(cy) ||
+            fx <= 0.0 || fy <= 0.0) {
+            RCLCPP_WARN(get_logger(), "Ignoring depth frame until camera intrinsics are valid");
+            return;
+        }
+
+        Eigen::Matrix4d camToRobot;
+        if (!selectDepthHeadPose(receivedAt, camToRobot)) {
+            RCLCPP_WARN_THROTTLE(
+                get_logger(), *get_clock(), 1000,
+                "Ignoring depth frame: no head pose within %.0f ms",
+                config->get_head_pose_tolerance_msecs());
+            return;
+        }
+        if (!camToRobot.allFinite()) {
+            RCLCPP_WARN(get_logger(), "Ignoring depth frame with invalid camera transform");
+            return;
+        }
+        const Pose2D depthRobotPose = data->getRobotPoseToOdom();
+        if (!std::isfinite(depthRobotPose.x) || !std::isfinite(depthRobotPose.y) ||
+            !std::isfinite(depthRobotPose.theta)) {
+            RCLCPP_WARN(get_logger(), "Ignoring depth frame with invalid odometry pose");
+            return;
+        }
+
+        vector<std::array<float, 3>> points_robot;
+        const double grid_size = config->get_grid_size();
+        // Keep the full observable rear-side horizon. A moving person outside
+        // the current footprint can enter a lateral route within the planner's
+        // one-second prediction sweep.
+        const double x_min = booster_soccer::perception::obstacleGridMinimumX(
+            config->get_max_x());
+        const double x_max = config->get_max_x();
         const double y_min = -config->get_max_y();
         const double y_max = -y_min;
-        const int grid_x_count = static_cast<int>((x_max - x_min) / grid_size);
-        const int grid_y_count = static_cast<int>((y_max - y_min) / grid_size);
-        
-        // Create grid occupancy array
+        if (!std::isfinite(grid_size) || grid_size <= 0.0 ||
+            x_max <= x_min || y_max <= y_min) {
+            RCLCPP_ERROR(get_logger(), "Invalid obstacle grid configuration");
+            return;
+        }
+        const int grid_x_count = static_cast<int>(std::ceil((x_max - x_min) / grid_size));
+        const int grid_y_count = static_cast<int>(std::ceil((y_max - y_min) / grid_size));
         vector<vector<int>> grid_occupied(grid_x_count, vector<int>(grid_y_count, 0));
-        
-        // Process depth image points
-        const int sampleStep = config->get_depth_sample_step();
+        vector<vector<int>> grid_ball_candidates(
+            grid_x_count, vector<int>(grid_y_count, 0));
+
+        const int sampleStep = std::max(1, config->get_depth_sample_step());
+        const int sampledColumnCount =
+            (width + sampleStep - 1) / sampleStep;
+        const double angularResolution = std::max(
+            deg2rad(1.0), deg2rad(config->get_obstacle_angular_resolution_degrees()));
+        const int angularBinCount = std::max(
+            1, static_cast<int>(std::ceil(2.0 * M_PI / angularResolution)));
+        const int minimumAngularObservations = std::max(
+            3,
+            static_cast<int>(std::ceil(config->get_occupancy_threshold())));
+        vector<int> angularObservations(angularBinCount, 0);
+        vector<vector<bool>> angularObservedColumns(
+            angularBinCount,
+            vector<bool>(sampledColumnCount, false));
+        vector<double> angularFreeRange(angularBinCount, 0.0);
+        auto angleToBin = [&](double angle) {
+            const double normalized = toPInPI(angle);
+            int bin = static_cast<int>(std::floor((normalized + M_PI) / (2.0 * M_PI) * angularBinCount));
+            return std::clamp(bin, 0, angularBinCount - 1);
+        };
+        auto binToAngle = [&](int bin) {
+            return -M_PI + (static_cast<double>(bin) + 0.5) *
+                (2.0 * M_PI / static_cast<double>(angularBinCount));
+        };
+
+        const BallDepthObservation ballObservation = data->getBallDepthObservation();
+        // Use the same fail-closed receive/sensor timestamp policy as the
+        // planner. A frozen, future, or corrupt detector timestamp must never
+        // authorize removal of physical depth samples.
+        const double ballAgeMsecs = data->detectionAgeMsecs(receivedAt);
+        const bool bboxValid =
+            ballObservation.bounding_box.xmax > ballObservation.bounding_box.xmin &&
+            ballObservation.bounding_box.ymax > ballObservation.bounding_box.ymin;
+        const bool useBallMask =
+            ballObservation.visible && ballObservation.depth_confirmed && bboxValid &&
+            ballAgeMsecs >= 0.0 &&
+            ballAgeMsecs <= config->get_detection_stale_msecs() &&
+            std::hypot(
+                ballObservation.position_to_robot.x,
+                ballObservation.position_to_robot.y) > 0.01;
+        const double bboxScaleX = ballObservation.image_width > 0
+            ? static_cast<double>(width) / ballObservation.image_width
+            : 1.0;
+        const double bboxScaleY = ballObservation.image_height > 0
+            ? static_cast<double>(height) / ballObservation.image_height
+            : 1.0;
+        const double ballBoxXMin = ballObservation.bounding_box.xmin * bboxScaleX - 2.0;
+        const double ballBoxXMax = ballObservation.bounding_box.xmax * bboxScaleX + 2.0;
+        const double ballBoxYMin = ballObservation.bounding_box.ymin * bboxScaleY - 2.0;
+        const double ballBoxYMax = ballObservation.bounding_box.ymax * bboxScaleY + 2.0;
+
+        const int totalSampleSlots =
+            ((width + sampleStep - 1) / sampleStep) *
+            ((height + sampleStep - 1) / sampleStep);
+        int validDepthSamples = 0;
+        const double minObstacleHeight = config->get_obstacle_min_height();
+        const double maxObstacleHeight = config->get_obstacle_max_height();
+        const double excludeX = config->get_exclusion_x();
+        const double excludeY = config->get_exclusion_y();
+        const double ballRadius = config->get_ball_exclusion_radius();
+        const double ballHeight = config->get_ball_exclusion_height();
+        const double cameraOriginX = camToRobot(0, 3);
+        const double cameraOriginY = camToRobot(1, 3);
+        if (!std::isfinite(cameraOriginX) || !std::isfinite(cameraOriginY)) {
+            RCLCPP_WARN(get_logger(), "Ignoring depth frame with invalid camera origin");
+            return;
+        }
+
         for (int y = 0; y < height; y += sampleStep)
         {
             for (int x = 0; x < width; x += sampleStep)
             {
-                float depth = depthFloat.at<float>(y, x);
-                if (depth > 0)
-                {
-                    // Convert to camera coordinate system
-                    double x_cam = (x - cx) * depth / fx;
-                    double y_cam = (y - cy) * depth / fy;
-                    double z_cam = depth;
+                const float depth = depthFloat.at<float>(y, x);
+                if (!std::isfinite(depth) || depth <= 0.05f || depth > 20.0f) {
+                    continue;
+                }
 
-                    // Convert to robot coordinate system
-                    Eigen::Vector4d point_cam(x_cam, y_cam, z_cam, 1.0);
-                    Eigen::Vector4d point_robot = data->camToRobot * point_cam;
-                    
-                    // Record points for visualization
-                    points_robot.push_back({static_cast<float>(point_robot(0)), static_cast<float>(point_robot(1)), static_cast<float>(point_robot(2))});
-                    
-                    // Update grid occupancy
-                    const double Z_THRESHOLD = config->get_obstacle_min_height();
-                    const double EXCLUDE_MAX_X = config->get_exclusion_x(); // Exclude robot's own body
-                    const double EXCLUDE_MIN_X = -EXCLUDE_MAX_X;
-                    const double EXCLUDE_MAX_Y = config->get_exclusion_y(); // Exclude robot's own body
-                    const double EXCLUDE_MIN_Y = -EXCLUDE_MAX_Y;
+                const Eigen::Vector4d pointCam(
+                    (x - cx) * depth / fx,
+                    (y - cy) * depth / fy,
+                    depth,
+                    1.0);
+                const Eigen::Vector4d pointRobot = camToRobot * pointCam;
+                if (!pointRobot.allFinite()) {
+                    continue;
+                }
+                validDepthSamples++;
+                points_robot.push_back({
+                    static_cast<float>(pointRobot(0)),
+                    static_cast<float>(pointRobot(1)),
+                    static_cast<float>(pointRobot(2))});
 
-                    auto isInRange = [&]() {
-                        return point_robot(0) >= x_min && point_robot(0) < x_max
-                            && point_robot(1) >= y_min && point_robot(1) < y_max;
-                    };
-                    auto isSelfBody = [&]() {
-                        return point_robot(0) >= EXCLUDE_MIN_X && point_robot(0) <= EXCLUDE_MAX_X
-                            && point_robot(1) >= EXCLUDE_MIN_Y && point_robot(1) <= EXCLUDE_MAX_Y;
-                    };
-                    auto isBall = [&]() {
-                        double r = config->get_ball_exclusion_radius();
-                        double h = config->get_ball_exclusion_height();
-                        return fabs(point_robot(0) - data->ball.posToRobot.x) < r 
-                            && fabs(point_robot(1) - data->ball.posToRobot.y) < r
-                            && point_robot(2) < h;
-                    };
+                double rayBearing = 0.0;
+                double rayRange = 0.0;
+                if (booster_soccer::perception::planarRayFromCameraOrigin(
+                        pointRobot(0), pointRobot(1),
+                        cameraOriginX, cameraOriginY,
+                        rayBearing, rayRange)) {
+                    const int angularBin = angleToBin(rayBearing);
+                    // Several valid pixels down one image column are still a
+                    // single narrow ray, not evidence for a complete angular
+                    // wedge. Require distinct sampled columns before a bin can
+                    // authorize motion through otherwise unknown space.
+                    const int sampledColumn = std::clamp(
+                        x / sampleStep, 0, sampledColumnCount - 1);
+                    if (!angularObservedColumns[angularBin][sampledColumn]) {
+                        angularObservedColumns[angularBin][sampledColumn] = true;
+                        angularObservations[angularBin]++;
+                    }
+                    angularFreeRange[angularBin] = std::max(
+                        angularFreeRange[angularBin], std::min(rayRange, x_max));
+                }
 
-                    if (
-                        point_robot(2) > Z_THRESHOLD 
-                        && isInRange()
-                        &&!isSelfBody() 
-                        &&!isBall()
-                    )
-                    {
-                        int grid_x = static_cast<int>((point_robot(0) - x_min) / grid_size);
-                        int grid_y = static_cast<int>((point_robot(1) - y_min) / grid_size);
-                        
-                        // Add boundary check to prevent out-of-bounds
-                        if (grid_x >= 0 && grid_x < grid_x_count && grid_y >= 0 && grid_y < grid_y_count) {
-                            grid_occupied[grid_x][grid_y] += 1;
+                const bool inGrid = booster_soccer::perception::obstacleGridContains(
+                    pointRobot(0), pointRobot(1),
+                    x_min, x_max, y_min, y_max);
+                const bool isSelfBody =
+                    pointRobot(0) >= -excludeX && pointRobot(0) <= excludeX &&
+                    pointRobot(1) >= -excludeY && pointRobot(1) <= excludeY;
+                const bool isPhysicalBallCandidate =
+                    booster_soccer::perception::physicalBallSample(
+                        useBallMask,
+                        x, y,
+                        ballBoxXMin, ballBoxXMax,
+                        ballBoxYMin, ballBoxYMax,
+                        pointRobot(0), pointRobot(1), pointRobot(2),
+                        ballObservation.position_to_robot.x,
+                        ballObservation.position_to_robot.y,
+                        ballRadius, ballHeight);
+
+                if (booster_soccer::perception::obstacleHeightAccepted(
+                        pointRobot(2), minObstacleHeight, maxObstacleHeight) &&
+                    inGrid && !isSelfBody) {
+                    const int gridX = static_cast<int>((pointRobot(0) - x_min) / grid_size);
+                    const int gridY = static_cast<int>((pointRobot(1) - y_min) / grid_size);
+                    if (gridX >= 0 && gridX < grid_x_count &&
+                        gridY >= 0 && gridY < grid_y_count) {
+                        grid_occupied[gridX][gridY]++;
+                        if (isPhysicalBallCandidate) {
+                            grid_ball_candidates[gridX][gridY]++;
                         }
                     }
                 }
             }
         }
 
-        auto obs_old = data->getObstacles();
-        vector<GameObject> obs_new = {};
+        // A frame with almost no valid measurements is not evidence that the
+        // world is clear. Preserve the preceding snapshot and let it age out.
+        if (!booster_soccer::perception::depthFrameHasEnoughSamples(
+                validDepthSamples, totalSampleSlots)) {
+            RCLCPP_WARN_THROTTLE(
+                get_logger(), *get_clock(), 1000,
+                "Ignoring sparse depth frame (%d/%d valid samples)",
+                validDepthSamples, totalSampleSlots);
+            return;
+        }
 
-        // Record newly seen obstacles
-        for (int i = 0; i < grid_x_count; i++) {
-            for (int j = 0; j < grid_y_count; j++) {
-                if (grid_occupied[i][j] > 0) {
-                    GameObject obj;
-                    obj.label = "Obstacle";
-                    obj.timePoint = get_clock()->now();
-                    obj.posToRobot.x = x_min + (i + 0.5) * grid_size;
-                    obj.posToRobot.y = y_min + (j + 0.5) * grid_size;
-                    obj.confidence = grid_occupied[i][j];
-                    updateFieldPos(obj);
-                    obs_new.push_back(obj);
+        struct GridCell { int x; int y; };
+        vector<vector<bool>> visited(grid_x_count, vector<bool>(grid_y_count, false));
+        vector<vector<int>> filteredGrid(grid_x_count, vector<int>(grid_y_count, 0));
+        vector<GameObject> obstacles;
+        vector<ObstacleComponent> components;
+        vector<int> matchedOldComponentIds;
+        const auto previousSnapshot = data->getObstacleSnapshot();
+        const vector<GameObject> semanticObstacles =
+            data->detectionAgeMsecs(receivedAt) <= config->get_detection_stale_msecs()
+                ? data->getSemanticObstacles()
+                : vector<GameObject>{};
+        const int strongCellThreshold = std::max(
+            1, static_cast<int>(std::ceil(config->get_occupancy_threshold())));
+
+        // A bounding-box match is only a candidate.  Confirm one complete,
+        // connected, ball-sized low component before subtracting its samples
+        // from occupancy. Other low clusters in the same box/radius (for
+        // example a leg or box behind the ball) remain physical obstacles.
+        if (useBallMask) {
+            vector<vector<bool>> candidateVisited(
+                grid_x_count, vector<bool>(grid_y_count, false));
+            vector<GridCell> bestBallCells;
+            double bestBallScore = std::numeric_limits<double>::infinity();
+
+            for (int startX = 0; startX < grid_x_count; ++startX) {
+                for (int startY = 0; startY < grid_y_count; ++startY) {
+                    if (candidateVisited[startX][startY] ||
+                        grid_ball_candidates[startX][startY] <= 0) {
+                        continue;
+                    }
+
+                    vector<GridCell> pending{{startX, startY}};
+                    vector<GridCell> candidateCells;
+                    candidateVisited[startX][startY] = true;
+                    int candidateSamples = 0;
+                    int strongestCellSamples = 0;
+                    double weightedX = 0.0;
+                    double weightedY = 0.0;
+                    double candidateMinX = std::numeric_limits<double>::infinity();
+                    double candidateMaxX = -std::numeric_limits<double>::infinity();
+                    double candidateMinY = std::numeric_limits<double>::infinity();
+                    double candidateMaxY = -std::numeric_limits<double>::infinity();
+
+                    while (!pending.empty()) {
+                        const GridCell cell = pending.back();
+                        pending.pop_back();
+                        candidateCells.push_back(cell);
+                        const int count = grid_ball_candidates[cell.x][cell.y];
+                        candidateSamples += count;
+                        strongestCellSamples = std::max(strongestCellSamples, count);
+                        const double cellX = x_min + (cell.x + 0.5) * grid_size;
+                        const double cellY = y_min + (cell.y + 0.5) * grid_size;
+                        weightedX += cellX * count;
+                        weightedY += cellY * count;
+                        candidateMinX = std::min(candidateMinX, cellX - 0.5 * grid_size);
+                        candidateMaxX = std::max(candidateMaxX, cellX + 0.5 * grid_size);
+                        candidateMinY = std::min(candidateMinY, cellY - 0.5 * grid_size);
+                        candidateMaxY = std::max(candidateMaxY, cellY + 0.5 * grid_size);
+
+                        for (int dx = -1; dx <= 1; ++dx) {
+                            for (int dy = -1; dy <= 1; ++dy) {
+                                const int nx = cell.x + dx;
+                                const int ny = cell.y + dy;
+                                if ((dx == 0 && dy == 0) || nx < 0 || ny < 0 ||
+                                    nx >= grid_x_count || ny >= grid_y_count ||
+                                    candidateVisited[nx][ny] ||
+                                    grid_ball_candidates[nx][ny] <= 0) {
+                                    continue;
+                                }
+                                candidateVisited[nx][ny] = true;
+                                pending.push_back(GridCell{nx, ny});
+                            }
+                        }
+                    }
+
+                    if (candidateSamples <= 0) continue;
+                    const double candidateX = weightedX / candidateSamples;
+                    const double candidateY = weightedY / candidateSamples;
+                    double candidateRadius = 0.0;
+                    for (const double cornerX : {candidateMinX, candidateMaxX}) {
+                        for (const double cornerY : {candidateMinY, candidateMaxY}) {
+                            candidateRadius = std::max(
+                                candidateRadius,
+                                std::hypot(cornerX - candidateX, cornerY - candidateY));
+                        }
+                    }
+                    const double centerError = std::hypot(
+                        candidateX - ballObservation.position_to_robot.x,
+                        candidateY - ballObservation.position_to_robot.y);
+                    if (!booster_soccer::perception::physicalBallComponent(
+                            true,
+                            candidateCells.size(),
+                            strongestCellSamples,
+                            strongCellThreshold,
+                            candidateRadius,
+                            centerError,
+                            ballRadius,
+                            grid_size / std::sqrt(2.0))) {
+                        continue;
+                    }
+
+                    const double score = centerError + 0.1 * candidateRadius;
+                    if (score < bestBallScore) {
+                        bestBallScore = score;
+                        bestBallCells = std::move(candidateCells);
+                    }
+                }
+            }
+
+            for (const GridCell &cell : bestBallCells) {
+                grid_occupied[cell.x][cell.y] = std::max(
+                    0,
+                    grid_occupied[cell.x][cell.y] -
+                        grid_ball_candidates[cell.x][cell.y]);
+            }
+        }
+
+        for (int startX = 0; startX < grid_x_count; ++startX) {
+            for (int startY = 0; startY < grid_y_count; ++startY) {
+                if (visited[startX][startY] || grid_occupied[startX][startY] <= 0) {
+                    continue;
+                }
+
+                vector<GridCell> pending{{startX, startY}};
+                vector<GridCell> cells;
+                visited[startX][startY] = true;
+                int sampleCount = 0;
+                int maxCellCount = 0;
+                while (!pending.empty()) {
+                    const auto cell = pending.back();
+                    pending.pop_back();
+                    cells.push_back(cell);
+                    const int count = grid_occupied[cell.x][cell.y];
+                    sampleCount += count;
+                    maxCellCount = std::max(maxCellCount, count);
+                    for (int dx = -1; dx <= 1; ++dx) {
+                        for (int dy = -1; dy <= 1; ++dy) {
+                            const int nx = cell.x + dx;
+                            const int ny = cell.y + dy;
+                            if ((dx == 0 && dy == 0) || nx < 0 || ny < 0 ||
+                                nx >= grid_x_count || ny >= grid_y_count ||
+                                visited[nx][ny] || grid_occupied[nx][ny] <= 0) {
+                                continue;
+                            }
+                            visited[nx][ny] = true;
+                            pending.push_back(GridCell{nx, ny});
+                        }
+                    }
+                }
+
+                // Preserve thin structures represented by adjacent cells, but
+                // demand stronger evidence for an isolated cell.
+                if (!booster_soccer::perception::componentEvidenceAccepted(
+                        cells.size(), maxCellCount, strongCellThreshold)) {
+                    continue;
+                }
+
+                ObstacleComponent component;
+                component.id = nextObstacleComponentId_++;
+                component.min_x = std::numeric_limits<double>::infinity();
+                component.max_x = -std::numeric_limits<double>::infinity();
+                component.min_y = std::numeric_limits<double>::infinity();
+                component.max_y = -std::numeric_limits<double>::infinity();
+                component.nearest_distance = std::numeric_limits<double>::infinity();
+                component.occupied_cell_count = static_cast<int>(cells.size());
+                component.sample_count = sampleCount;
+                component.confidence = sampleCount;
+                component.last_seen_at = receivedAt;
+                component.carried = false;
+                double weightedX = 0.0;
+                double weightedY = 0.0;
+
+                for (const auto &cell : cells) {
+                    const int count = grid_occupied[cell.x][cell.y];
+                    filteredGrid[cell.x][cell.y] = count;
+                    const double cellX = x_min + (cell.x + 0.5) * grid_size;
+                    const double cellY = y_min + (cell.y + 0.5) * grid_size;
+                    weightedX += cellX * count;
+                    weightedY += cellY * count;
+                    component.min_x = std::min(component.min_x, cellX - 0.5 * grid_size);
+                    component.max_x = std::max(component.max_x, cellX + 0.5 * grid_size);
+                    component.min_y = std::min(component.min_y, cellY - 0.5 * grid_size);
+                    component.max_y = std::max(component.max_y, cellY + 0.5 * grid_size);
+                    component.nearest_distance = std::min(
+                        component.nearest_distance,
+                        std::max(0.0, std::hypot(cellX, cellY) - grid_size / std::sqrt(2.0)));
+
+                    GameObject obstacle{};
+                    obstacle.label = "Obstacle";
+                    obstacle.timePoint = receivedAt;
+                    obstacle.posToRobot.x = cellX;
+                    obstacle.posToRobot.y = cellY;
+                    obstacle.posToRobot.z = 0.0;
+                    obstacle.confidence = count;
+                    updateFieldPos(obstacle);
+                    obstacles.push_back(obstacle);
+                }
+
+                component.x = weightedX / std::max(1, sampleCount);
+                component.y = weightedY / std::max(1, sampleCount);
+                component.bearing = atan2(component.y, component.x);
+                component.radius = 0.0;
+                for (const double cornerX : {component.min_x, component.max_x}) {
+                    for (const double cornerY : {component.min_y, component.max_y}) {
+                        component.radius = std::max(
+                            component.radius,
+                            std::hypot(cornerX - component.x, cornerY - component.y));
+                    }
+                }
+
+                const GameObject *nearestSemantic = nullptr;
+                double nearestSemanticDistance = std::numeric_limits<double>::infinity();
+                for (const auto &semantic : semanticObstacles) {
+                    if (semantic.label != "Person" && semantic.label != "Opponent") continue;
+                    if (!std::isfinite(semantic.posToRobot.x) ||
+                        !std::isfinite(semantic.posToRobot.y) ||
+                        std::hypot(semantic.posToRobot.x, semantic.posToRobot.y) <= 0.05) continue;
+                    const double associationDistance = std::hypot(
+                        component.x - semantic.posToRobot.x,
+                        component.y - semantic.posToRobot.y);
+                    if (associationDistance < nearestSemanticDistance &&
+                        associationDistance <= std::max(0.45, component.radius + 0.25)) {
+                        nearestSemantic = &semantic;
+                        nearestSemanticDistance = associationDistance;
+                    }
+                }
+                if (nearestSemantic != nullptr) component.label = nearestSemantic->label;
+
+                if (previousSnapshot.ready &&
+                    previousSnapshot.received_at.get_clock_type() == receivedAt.get_clock_type()) {
+                    const double dt = static_cast<double>(
+                        (receivedAt - previousSnapshot.received_at).nanoseconds()) / 1e9;
+                    if (dt > 0.005 && dt <= 0.5) {
+                        const ObstacleComponent *nearest = nullptr;
+                        double nearestDistance = std::numeric_limits<double>::infinity();
+                        double nearestProjectedX = 0.0;
+                        double nearestProjectedY = 0.0;
+                        for (const auto &oldComponent : previousSnapshot.components) {
+                            if (std::find(
+                                    matchedOldComponentIds.begin(),
+                                    matchedOldComponentIds.end(),
+                                    oldComponent.id) != matchedOldComponentIds.end()) {
+                                continue;
+                            }
+                            const double oldTheta = previousSnapshot.robot_pose_to_odom.theta;
+                            const double currentTheta = depthRobotPose.theta;
+                            const double worldX = previousSnapshot.robot_pose_to_odom.x +
+                                cos(oldTheta) * oldComponent.x - sin(oldTheta) * oldComponent.y;
+                            const double worldY = previousSnapshot.robot_pose_to_odom.y +
+                                sin(oldTheta) * oldComponent.x + cos(oldTheta) * oldComponent.y;
+                            const double deltaWorldX = worldX - depthRobotPose.x;
+                            const double deltaWorldY = worldY - depthRobotPose.y;
+                            const double projectedX =
+                                cos(currentTheta) * deltaWorldX + sin(currentTheta) * deltaWorldY;
+                            const double projectedY =
+                                -sin(currentTheta) * deltaWorldX + cos(currentTheta) * deltaWorldY;
+                            const double frameRotation = oldTheta - currentTheta;
+                            const double oldVxInCurrent =
+                                cos(frameRotation) * oldComponent.vx -
+                                sin(frameRotation) * oldComponent.vy;
+                            const double oldVyInCurrent =
+                                sin(frameRotation) * oldComponent.vx +
+                                cos(frameRotation) * oldComponent.vy;
+                            const double distance = std::hypot(
+                                component.x - (projectedX + oldVxInCurrent * dt),
+                                component.y - (projectedY + oldVyInCurrent * dt));
+                            if (distance < nearestDistance) {
+                                nearestDistance = distance;
+                                nearest = &oldComponent;
+                                nearestProjectedX = projectedX;
+                                nearestProjectedY = projectedY;
+                            }
+                        }
+                        if (nearest != nullptr &&
+                            nearestDistance <= std::max(0.75, component.radius + nearest->radius + 0.30)) {
+                            component.id = nearest->id;
+                            matchedOldComponentIds.push_back(nearest->id);
+                            const double frameRotation =
+                                previousSnapshot.robot_pose_to_odom.theta - depthRobotPose.theta;
+                            const double oldVxInCurrent =
+                                cos(frameRotation) * nearest->vx - sin(frameRotation) * nearest->vy;
+                            const double oldVyInCurrent =
+                                sin(frameRotation) * nearest->vx + cos(frameRotation) * nearest->vy;
+                            component.vx = 0.5 * oldVxInCurrent +
+                                0.5 * (component.x - nearestProjectedX) / dt;
+                            component.vy = 0.5 * oldVyInCurrent +
+                                0.5 * (component.y - nearestProjectedY) / dt;
+                            const double speed = std::hypot(component.vx, component.vy);
+                            if (speed > 3.0) {
+                                component.vx *= 3.0 / speed;
+                                component.vy *= 3.0 / speed;
+                            }
+                        }
+                    }
+                }
+                components.push_back(component);
+            }
+        }
+
+        // Keep briefly occluded or intermittently missed obstacles alive across
+        // otherwise valid frames. Positions/bounds are transformed through odom
+        // and advanced using the component's measured velocity; last_seen_at is
+        // deliberately not refreshed until depth observes the component again.
+        if (previousSnapshot.ready &&
+            previousSnapshot.received_at.get_clock_type() == receivedAt.get_clock_type()) {
+            const double frameDt = static_cast<double>(
+                (receivedAt - previousSnapshot.received_at).nanoseconds()) / 1e9;
+            const double memoryMsecs = std::max(0.0, config->get_obstacle_memory_msecs());
+            const double oldTheta = previousSnapshot.robot_pose_to_odom.theta;
+            const double currentTheta = depthRobotPose.theta;
+            const double frameRotation = oldTheta - currentTheta;
+
+            auto previousPointToCurrent = [&](double oldX, double oldY) {
+                const double worldX = previousSnapshot.robot_pose_to_odom.x +
+                    cos(oldTheta) * oldX - sin(oldTheta) * oldY;
+                const double worldY = previousSnapshot.robot_pose_to_odom.y +
+                    sin(oldTheta) * oldX + cos(oldTheta) * oldY;
+                const double deltaWorldX = worldX - depthRobotPose.x;
+                const double deltaWorldY = worldY - depthRobotPose.y;
+                return Point2D{
+                    cos(currentTheta) * deltaWorldX + sin(currentTheta) * deltaWorldY,
+                    -sin(currentTheta) * deltaWorldX + cos(currentTheta) * deltaWorldY};
+            };
+
+            for (const auto &oldComponent : previousSnapshot.components) {
+                if (oldComponent.label == "Ball" ||
+                    std::find(
+                        matchedOldComponentIds.begin(),
+                        matchedOldComponentIds.end(),
+                        oldComponent.id) != matchedOldComponentIds.end()) {
+                    continue;
+                }
+
+                const rclcpp::Time lastSeenAt = oldComponent.last_seen_at.nanoseconds() > 0
+                    ? oldComponent.last_seen_at
+                    : previousSnapshot.received_at;
+                if (lastSeenAt.get_clock_type() != receivedAt.get_clock_type()) {
+                    continue;
+                }
+                const double unseenMsecs = static_cast<double>(
+                    (receivedAt - lastSeenAt).nanoseconds()) / 1e6;
+                if (frameDt < 0.0 || unseenMsecs < 0.0 || unseenMsecs > memoryMsecs) {
+                    continue;
+                }
+
+                const double carriedVx =
+                    cos(frameRotation) * oldComponent.vx -
+                    sin(frameRotation) * oldComponent.vy;
+                const double carriedVy =
+                    sin(frameRotation) * oldComponent.vx +
+                    cos(frameRotation) * oldComponent.vy;
+                const Point2D staticCenter =
+                    previousPointToCurrent(oldComponent.x, oldComponent.y);
+
+                ObstacleComponent carried = oldComponent;
+                carried.x = staticCenter.x + carriedVx * frameDt;
+                carried.y = staticCenter.y + carriedVy * frameDt;
+                carried.vx = carriedVx;
+                carried.vy = carriedVy;
+                carried.last_seen_at = lastSeenAt;
+                carried.carried = true;
+
+                carried.min_x = std::numeric_limits<double>::infinity();
+                carried.max_x = -std::numeric_limits<double>::infinity();
+                carried.min_y = std::numeric_limits<double>::infinity();
+                carried.max_y = -std::numeric_limits<double>::infinity();
+                for (const double cornerX : {oldComponent.min_x, oldComponent.max_x}) {
+                    for (const double cornerY : {oldComponent.min_y, oldComponent.max_y}) {
+                        const Point2D transformed = previousPointToCurrent(cornerX, cornerY);
+                        const double predictedX = transformed.x + carriedVx * frameDt;
+                        const double predictedY = transformed.y + carriedVy * frameDt;
+                        carried.min_x = std::min(carried.min_x, predictedX);
+                        carried.max_x = std::max(carried.max_x, predictedX);
+                        carried.min_y = std::min(carried.min_y, predictedY);
+                        carried.max_y = std::max(carried.max_y, predictedY);
+                    }
+                }
+                carried.radius = 0.0;
+                for (const double cornerX : {carried.min_x, carried.max_x}) {
+                    for (const double cornerY : {carried.min_y, carried.max_y}) {
+                        carried.radius = std::max(
+                            carried.radius,
+                            std::hypot(cornerX - carried.x, cornerY - carried.y));
+                    }
+                }
+                carried.bearing = atan2(carried.y, carried.x);
+                carried.nearest_distance = std::max(
+                    0.0, std::hypot(carried.x, carried.y) - carried.radius);
+
+                if (!std::isfinite(carried.x) || !std::isfinite(carried.y) ||
+                    !std::isfinite(carried.radius) || carried.radius < 0.0) {
+                    continue;
+                }
+
+                components.push_back(carried);
+                matchedOldComponentIds.push_back(carried.id);
+
+                // Keep legacy distance queries conservative without drawing
+                // carried memory into the current-frame occupancy grid.
+                GameObject carriedObstacle{};
+                carriedObstacle.label = "Obstacle";
+                carriedObstacle.timePoint = lastSeenAt;
+                carriedObstacle.posToRobot.x = carried.x;
+                carriedObstacle.posToRobot.y = carried.y;
+                carriedObstacle.posToRobot.z = 0.0;
+                carriedObstacle.confidence = std::max(
+                    carried.confidence, config->get_occupancy_threshold());
+                updateFieldPos(carriedObstacle);
+                obstacles.push_back(carriedObstacle);
+            }
+        }
+
+        // Convert valid directional measurements to an explicit coverage map.
+        // Components may shorten only bins observed by current-frame depth
+        // rays. Neither a current component's geometric extent nor carried
+        // memory is evidence that an otherwise-unobserved direction is clear.
+        for (const auto &component : components) {
+            const double centerRange = std::hypot(component.x, component.y);
+            const double halfAngle = centerRange > component.radius
+                ? asin(std::clamp(component.radius / centerRange, 0.0, 1.0))
+                : M_PI / 2.0;
+            for (int bin = 0; bin < angularBinCount; ++bin) {
+                if (booster_soccer::perception::angularBinObserved(
+                        angularObservations[bin], minimumAngularObservations) &&
+                    fabs(toPInPI(binToAngle(bin) - component.bearing)) <= halfAngle) {
+                    const double obstacleFreeRange = std::max(0.0, component.nearest_distance);
+                    angularFreeRange[bin] = angularFreeRange[bin] > 0.0
+                        ? std::min(angularFreeRange[bin], obstacleFreeRange)
+                        : obstacleFreeRange;
                 }
             }
         }
 
-        // Clean up old obstacles
-        for (int i = 0; i < obs_old.size(); i++) {
-           // First, clear old obstacles within the current field of view. Note that the angle is only roughly calculated, and the range is appropriately expanded using an offset.
-            const double headYaw = data->headYaw.load(std::memory_order_relaxed);
-            double visionLeft = headYaw + config->depthCameraFovX / 2;
-            double visionRight = headYaw - config->depthCameraFovX / 2;
-            auto obs = obs_old[i];
-            const double offset = 0.20;
-            double obsYawLeft = atan2(obs.posToRobot.y - offset, obs.posToRobot.x + offset);
-            double obsYawRight = atan2(obs.posToRobot.y + offset, obs.posToRobot.x + offset);
-            if (obsYawLeft < visionLeft && obsYawRight > visionRight) continue; 
-
-            // If the old obstacle is too close to the new obstacle, it is considered no longer present to prevent accumulation at the boundaries.
-            bool found = false;
-            for (int j = 0; j < obs_new.size(); j++) {
-                auto obs_n = obs_new[j];
-                double dist = norm(obs.posToRobot.x - obs_n.posToRobot.x, obs.posToRobot.y - obs_n.posToRobot.y);
-                if (dist < 0.5 * grid_size) {
-                    found = true;
-                    break;
-                }
-            }
-            if (found) continue;
-
-            // else
-            obs_new.push_back(obs);
+        ObstacleSnapshot snapshot;
+        snapshot.ready = true;
+        snapshot.stamp = timePointFromHeader(header);
+        snapshot.received_at = receivedAt;
+        snapshot.robot_pose_to_odom = depthRobotPose;
+        snapshot.obstacles = obstacles;
+        snapshot.components = components;
+        snapshot.coverage.reserve(
+            angularBinCount +
+            (previousSnapshot.ready ? previousSnapshot.coverage.size() : 0));
+        for (int bin = 0; bin < angularBinCount; ++bin) {
+            snapshot.coverage.push_back(ObstacleAngularCoverage{
+                binToAngle(bin),
+                booster_soccer::perception::angularBinObserved(
+                    angularObservations[bin], minimumAngularObservations),
+                booster_soccer::perception::angularBinObserved(
+                    angularObservations[bin], minimumAngularObservations)
+                    ? angularFreeRange[bin]
+                    : 0.0,
+                cameraOriginX,
+                cameraOriginY,
+                receivedAt});
         }
 
-        
-        data->setObstacles(obs_new); // note: Old obstacles that have timed out are not cleared here, but in the tick function
-        logDepth(grid_x_count, grid_y_count, grid_occupied, points_robot);
+        // Retain a short, odometry-anchored union of rays gathered while the
+        // head looks from the ball toward a candidate gap. Each ray keeps its
+        // own origin, so later planning does not pretend it came from the most
+        // recent camera pose. Moving components remain separately predicted.
+        if (previousSnapshot.ready &&
+            previousSnapshot.received_at.get_clock_type() == receivedAt.get_clock_type() &&
+            std::isfinite(previousSnapshot.robot_pose_to_odom.x) &&
+            std::isfinite(previousSnapshot.robot_pose_to_odom.y) &&
+            std::isfinite(previousSnapshot.robot_pose_to_odom.theta) &&
+            std::isfinite(snapshot.robot_pose_to_odom.x) &&
+            std::isfinite(snapshot.robot_pose_to_odom.y) &&
+            std::isfinite(snapshot.robot_pose_to_odom.theta)) {
+            const double oldTheta = previousSnapshot.robot_pose_to_odom.theta;
+            const double currentTheta = snapshot.robot_pose_to_odom.theta;
+            const double memoryMsecs = std::max(
+                0.0, config->get_obstacle_memory_msecs());
+            for (const auto &oldCoverage : previousSnapshot.coverage) {
+                if (!oldCoverage.observed ||
+                    !std::isfinite(oldCoverage.free_range) ||
+                    oldCoverage.free_range <= 0.0) {
+                    continue;
+                }
+                const rclcpp::Time observedAt =
+                    oldCoverage.observed_at.nanoseconds() > 0
+                        ? oldCoverage.observed_at
+                        : previousSnapshot.received_at;
+                if (observedAt.get_clock_type() != receivedAt.get_clock_type()) {
+                    continue;
+                }
+                const double ageMsecs = static_cast<double>(
+                    (receivedAt - observedAt).nanoseconds()) / 1e6;
+                if (ageMsecs < 0.0 || ageMsecs > memoryMsecs) continue;
+
+                const double originOdomX = previousSnapshot.robot_pose_to_odom.x +
+                    cos(oldTheta) * oldCoverage.origin_x -
+                    sin(oldTheta) * oldCoverage.origin_y;
+                const double originOdomY = previousSnapshot.robot_pose_to_odom.y +
+                    sin(oldTheta) * oldCoverage.origin_x +
+                    cos(oldTheta) * oldCoverage.origin_y;
+                const double deltaOriginX =
+                    originOdomX - snapshot.robot_pose_to_odom.x;
+                const double deltaOriginY =
+                    originOdomY - snapshot.robot_pose_to_odom.y;
+                const double originCurrentX =
+                    cos(currentTheta) * deltaOriginX +
+                    sin(currentTheta) * deltaOriginY;
+                const double originCurrentY =
+                    -sin(currentTheta) * deltaOriginX +
+                    cos(currentTheta) * deltaOriginY;
+                snapshot.coverage.push_back(ObstacleAngularCoverage{
+                    toPInPI(oldCoverage.angle + oldTheta - currentTheta),
+                    true,
+                    oldCoverage.free_range,
+                    originCurrentX,
+                    originCurrentY,
+                    observedAt});
+            }
+        }
+
+        // Publish the complete snapshot atomically only after every validation
+        // and transformation step succeeds. Invalid frames leave the old map.
+        data->setObstacleSnapshot(snapshot);
+        data->setObstacles(obstacles);
+        data->markDepthFrameReceived(snapshot.stamp, receivedAt);
+        logDepth(grid_x_count, grid_y_count, filteredGrid, points_robot);
 
     } catch (const std::exception& e) {
         RCLCPP_ERROR(get_logger(), "Exception in depth image processing: %s", e.what());
@@ -2240,13 +3096,17 @@ void Brain::processDepthImage(const cv::Mat &depthFloat, int width, int height, 
 }
 
 double Brain::distToObstacle(double angle) {
-    auto obs = data->getObstacles();
+    const auto snapshot = data->getObstacleSnapshot();
+    const auto obs = snapshot.ready ? snapshot.obstacles : data->getObstacles();
     double minDist = 1e9;
     double obstacleThreshold = config->get_occupancy_threshold();
     double collisionThreshold = config->get_collision_threshold();
 
     for (int i = 0; i < obs.size(); i++) {
-        if (obs[i].confidence < obstacleThreshold) continue;
+        // Semantic balls may be inserted into the legacy obstacle list during
+        // READY/free-kick handling. A ball is never a collision obstacle.
+        if (obs[i].label == "Ball") continue;
+        if (!snapshot.ready && obs[i].confidence < obstacleThreshold) continue;
 
         auto o = obs[i];
         Line line = {
@@ -2457,9 +3317,26 @@ bool Brain::isFreekickStartPlacing() {
 
 void Brain::agentCommandCallback(const std_msgs::msg::String::SharedPtr msg) {
     RCLCPP_INFO(get_logger(), "Received agent command: %s", msg->data.c_str());
+    std::lock_guard<std::mutex> detectionTickLock(detectionTickMutex_);
+
+    auto resetAutonomyAdjustReadiness = [this]() {
+        tree->setEntry<bool>("autonomy_adjust_ready", false);
+        const double previousEpoch = tree->getEntry<double>("autonomy_adjust_epoch");
+        tree->setEntry<double>(
+            "autonomy_adjust_epoch",
+            std::isfinite(previousEpoch) ? previousEpoch + 1.0 : 0.0);
+    };
 
     if (msg->data == "autonomy_stop") {
         tree->setEntry<bool>("autonomy_enabled", false);
+        resetAutonomyAdjustReadiness();
+        tree->setEntry<bool>("autonomy_score_active", false);
+        if (tree->getEntry<string>("autonomy_manual_mode") == "score") {
+            tree->setEntry<string>("autonomy_manual_mode", "track");
+        }
+        if (tree->getEntry<string>("autonomy_striker_phase") == "score") {
+            tree->setEntry<string>("autonomy_striker_phase", "track");
+        }
         tree->setEntry<double>("autonomy_command_vx", 0.0);
         tree->setEntry<double>("autonomy_command_vy", 0.0);
         tree->setEntry<double>("autonomy_command_theta", 0.0);
@@ -2472,6 +3349,7 @@ void Brain::agentCommandCallback(const std_msgs::msg::String::SharedPtr msg) {
         msg->data == "autonomy_save_chase" ||
         msg->data == "autonomy_save_adjust") {
         const string phase = msg->data.substr(string("autonomy_save_").size());
+        resetAutonomyAdjustReadiness();
         tree->setEntry<string>("autonomy_auto_phase", phase);
         RCLCPP_INFO(get_logger(), "Autonomy saved phase => %s", phase.c_str());
         return;
@@ -2481,6 +3359,7 @@ void Brain::agentCommandCallback(const std_msgs::msg::String::SharedPtr msg) {
         msg->data == "autonomy_auto_chase" ||
         msg->data == "autonomy_auto_adjust") {
         const string phase = msg->data.substr(string("autonomy_auto_").size());
+        resetAutonomyAdjustReadiness();
         tree->setEntry<string>("autonomy_auto_phase", phase);
         tree->setEntry<string>("autonomy_switch", "auto");
         tree->setEntry<bool>("autonomy_enabled", true);
@@ -2493,6 +3372,7 @@ void Brain::agentCommandCallback(const std_msgs::msg::String::SharedPtr msg) {
         if (manual_mode == "chase" || manual_mode == "adjust") {
             tree->setEntry<string>("autonomy_auto_phase", manual_mode);
         }
+        resetAutonomyAdjustReadiness();
         tree->setEntry<string>("autonomy_switch", "auto");
         tree->setEntry<bool>("autonomy_enabled", true);
         RCLCPP_INFO(
@@ -2502,12 +3382,32 @@ void Brain::agentCommandCallback(const std_msgs::msg::String::SharedPtr msg) {
         return;
     }
 
+    if (msg->data == "autonomy_striker") {
+        if (!config->get_enable_obstacle_avoidance()) {
+            RCLCPP_WARN(
+                get_logger(),
+                "Rejected autonomy_striker because obstacle avoidance is disabled");
+            return;
+        }
+        resetAutonomyAdjustReadiness();
+        tree->setEntry<string>("autonomy_striker_phase", "track");
+        tree->setEntry<string>("autonomy_switch", "striker");
+        tree->setEntry<bool>("autonomy_enabled", true);
+        RCLCPP_INFO(get_logger(), "Autonomy switch => striker (phase: track)");
+        return;
+    }
+
     if (msg->data == "autonomy_manual") {
-        if (tree->getEntry<string>("autonomy_switch") == "auto") {
+        const string previousSwitch = tree->getEntry<string>("autonomy_switch");
+        if (previousSwitch == "auto") {
             tree->setEntry<string>(
                 "autonomy_manual_mode",
                 tree->getEntry<string>("autonomy_auto_phase"));
+        } else if (previousSwitch == "striker") {
+            // Never carry an autonomous full-speed score into manual mode.
+            tree->setEntry<string>("autonomy_manual_mode", "track");
         }
+        resetAutonomyAdjustReadiness();
         tree->setEntry<string>("autonomy_switch", "manual");
         tree->setEntry<bool>("autonomy_enabled", true);
         RCLCPP_INFO(
@@ -2519,8 +3419,17 @@ void Brain::agentCommandCallback(const std_msgs::msg::String::SharedPtr msg) {
 
     if (msg->data == "autonomy_track" ||
         msg->data == "autonomy_chase" ||
-        msg->data == "autonomy_adjust") {
+        msg->data == "autonomy_adjust" ||
+        msg->data == "autonomy_score") {
+        if (msg->data == "autonomy_score" &&
+            !config->get_enable_obstacle_avoidance()) {
+            RCLCPP_WARN(
+                get_logger(),
+                "Rejected autonomy_score because obstacle avoidance is disabled");
+            return;
+        }
         const string mode = msg->data.substr(string("autonomy_").size());
+        resetAutonomyAdjustReadiness();
         tree->setEntry<string>("autonomy_manual_mode", mode);
         tree->setEntry<string>("autonomy_switch", "manual");
         tree->setEntry<bool>("autonomy_enabled", true);
@@ -2560,6 +3469,21 @@ void Brain::agentCommandCallback(const std_msgs::msg::String::SharedPtr msg) {
     } else {
         RCLCPP_WARN(get_logger(), "Unknown agent command: %s", msg->data.c_str());
         return;
+    }
+
+    if (game_state != "PLAY") {
+        resetAutonomyAdjustReadiness();
+        tree->setEntry<bool>("autonomy_score_active", false);
+        if (tree->getEntry<string>("autonomy_manual_mode") == "score") {
+            tree->setEntry<string>("autonomy_manual_mode", "track");
+        }
+        if (tree->getEntry<string>("autonomy_striker_phase") == "score") {
+            tree->setEntry<string>("autonomy_striker_phase", "track");
+        }
+        tree->setEntry<double>("autonomy_command_vx", 0.0);
+        tree->setEntry<double>("autonomy_command_vy", 0.0);
+        tree->setEntry<double>("autonomy_command_theta", 0.0);
+        client->setVelocity(0.0, 0.0, 0.0);
     }
 
     tree->setEntry<int>("control_state", control_state);

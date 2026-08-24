@@ -8,6 +8,15 @@ from launch_ros.actions import Node
 from launch.substitutions import LaunchConfiguration
 
 
+def parse_bool_launch_argument(name, value):
+    normalized = value.strip().lower()
+    if normalized in ('true', '1'):
+        return True
+    if normalized in ('false', '0'):
+        return False
+    raise ValueError(f"{name} must be true, false, 1, or 0; got {value!r}")
+
+
 def handle_configuration(context, *args, **kwargs):
     # get launch argument 'vision_config_path' and construct paths to vision.yaml and vision_local.yaml
     vision_config_dir = context.perform_substitution(LaunchConfiguration('vision_config_path'))
@@ -64,6 +73,24 @@ def handle_configuration(context, *args, **kwargs):
     disableCom = context.perform_substitution(LaunchConfiguration('disable_com'))
     if disableCom in ['true', 'True', '1']:
         config['enable_com'] = False
+
+    obstacle_avoidance = context.perform_substitution(LaunchConfiguration('obstacle_avoidance'))
+    object_avoid_distance = context.perform_substitution(LaunchConfiguration('object_avoid_distance'))
+    object_stop = context.perform_substitution(LaunchConfiguration('object_stop'))
+    avoid_distance = float(object_avoid_distance)
+    stop_distance = float(object_stop)
+    # Validate against the public/default map range here. Brain::loadConfig
+    # repeats the check against the effective YAML/local max_x parameter.
+    depth_map_range = 3.0
+    if not 0.0 < stop_distance < avoid_distance <= depth_map_range:
+        raise ValueError(
+            'Obstacle distances must satisfy '
+            '0 < object_stop < object_avoid_distance <= '
+            f'obstacle_avoidance.max_x ({depth_map_range})')
+    config['obstacle_avoidance.enable'] = parse_bool_launch_argument(
+        'obstacle_avoidance', obstacle_avoidance)
+    config['obstacle_avoidance.avoid_distance'] = avoid_distance
+    config['obstacle_avoidance.stop_distance'] = stop_distance
 
     return [
         Node(
@@ -128,6 +155,21 @@ def generate_launch_description():
             'agent_mode', 
             default_value='false',
             description='Whether to run in agent mode. In agent mode, the robot is controlled by the APP and does not receive commands from the referee or physical controller'
+        ),
+        DeclareLaunchArgument(
+            'obstacle_avoidance',
+            default_value='true',
+            description='Enable the autonomous obstacle-avoidance velocity safety filter'
+        ),
+        DeclareLaunchArgument(
+            'object_avoid_distance',
+            default_value='1.40',
+            description='Distance in metres at which the autonomous planner begins detouring'
+        ),
+        DeclareLaunchArgument(
+            'object_stop',
+            default_value='0.50',
+            description='Emergency/blocked-path stop distance in metres'
         ),
         OpaqueFunction(function=handle_configuration) # Continue processing in handle_configuration
     ])
